@@ -121,8 +121,8 @@ The prototype never silently guesses a Match, invents Unit conversion, partially
 
 There are no automated tests. The prototype is deliberately throwaway and has no framework, persistence, network dependency, or production error handling.
 
-The design is accepted when the user can complete the four guided walkthroughs and explore the free-play cases without encountering a mutation that feels surprising, unsafe, inconsistent between text and voice, or unnecessarily verbose. Any such reaction changes the conversation policy before the Wayfinder ticket is resolved.
+The prototype answers its question when the user can complete the four guided walkthroughs and explore the free-play cases without encountering a mutation that feels surprising, unsafe, inconsistent between text and voice, or unnecessarily verbose. Any such reaction changes the conversation policy before the Wayfinder ticket is resolved.
 
 ## Capture
 
-The HTML prototype and this design document live on the throwaway `prototype/inventory-conversation` branch. The Wayfinder ticket will link to the branch as the primary source. Once the prototype has been evaluated, the ticket's resolution comment records the validated conversation decisions; production implementation remains out of scope for this map session.
+The HTML prototype will be added beside this design document on the throwaway `prototype/inventory-conversation` branch. The Wayfinder ticket will link to the branch as the primary source. Once the prototype has been evaluated, the ticket's resolution comment records the validated conversation decisions; production implementation remains out of scope for this map session.
