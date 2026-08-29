@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Inventory Conversation Prototype</title>
+    <style>
+      /* Task 4 replaces this marker with the complete restrained styling. */
+    </style>
+  </head>
+  <body>
+    <main class="page">
+      <header>
+        <p>Throwaway logic prototype</p>
+        <h1>Inventory conversations in text and voice</h1>
+        <p>This prototype tests one balanced mutation policy across text and voice while adapting confirmations, clarification, and result length.</p>
+      </header>
+
+      <nav id="scenario-tabs" class="scenario-tabs" aria-label="Guided walkthroughs"></nav>
+
+      <section class="workspace">
+        <section class="conversation-panel">
+          <h2 id="scenario-title"></h2>
+          <div class="channel-buttons" role="group" aria-label="Channel selection">
+            <button type="button" data-channel="text">Text</button>
+            <button type="button" data-channel="voice">Voice</button>
+          </div>
+          <p id="scenario-description"></p>
+          <div id="transcript"></div>
+          <div id="walkthrough-controls"></div>
+        </section>
+
+        <aside class="state-column">
+          <section id="conversation-state"></section>
+          <section id="inventory-state"></section>
+          <section id="transition-explanation"></section>
+        </aside>
+      </section>
+
+      <section class="free-play">
+        <div id="free-play-controls"></div>
+        <p>These controls use the same reducer.</p>
+      </section>
+    </main>
+
+    <script>
+      const createSeedInventory = () => ({
+        entries: [
+          { id: "gloves", name: "Nitrile gloves", quantity: 6, unit: "boxes", location: "Garage", note: "" },
+          { id: "aa-batteries", name: "AA batteries", quantity: 24, unit: "each", location: "Garage", note: "" },
+          { id: "aaa-batteries", name: "AAA batteries", quantity: 18, unit: "each", location: "Utility room", note: "" },
+          { id: "white-paint", name: "White wall paint", quantity: 2, unit: "cans", location: "Garage", note: "" },
+          { id: "blue-paint", name: "Blue wall paint", quantity: 1, unit: "can", location: "Garage", note: "" },
+          { id: "primer", name: "Primer", quantity: 3, unit: "cans", location: "Garage", note: "For wall paint" },
+          { id: "screws", name: "Wood screws", quantity: 48, unit: "each", location: "Garage", note: "40 mm" },
+          { id: "filters", name: "Air filters", quantity: 4, unit: "boxes", location: "Garage", note: "" },
+          { id: "tape", name: "Masking tape", quantity: 8, unit: "rolls", location: "Garage", note: "" },
+          { id: "sandpaper", name: "Sandpaper", quantity: 12, unit: "sheets", location: "Garage", note: "120 grit" },
+          { id: "oil", name: "Machine oil", quantity: 2, unit: "bottles", location: "Garage", note: "" },
+          { id: "brushes", name: "Paint brushes", quantity: 7, unit: "each", location: "Garage", note: "" },
+          { id: "rags", name: "Cleaning rags", quantity: 15, unit: "each", location: "Garage", note: "" },
+          { id: "anchors", name: "Wall anchors", quantity: 30, unit: "each", location: "Garage", note: "" },
+          { id: "sealant", name: "Silicone sealant", quantity: 5, unit: "tubes", location: "Garage", note: "" },
+          { id: "extension-cords", name: "Extension cords", quantity: 3, unit: "each", location: "Garage", note: "" },
+        ],
+      });
+    </script>
+  </body>
+</html>
