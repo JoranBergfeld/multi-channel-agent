@@ -125,4 +125,4 @@ The prototype answers its question when the user can complete the four guided wa
 
 ## Capture
 
-The HTML prototype will be added beside this design document on the throwaway `prototype/inventory-conversation` branch. The Wayfinder ticket will link to the branch as the primary source. Once the prototype has been evaluated, the ticket's resolution comment records the validated conversation decisions; production implementation remains out of scope for this map session.
+The self-contained HTML prototype lives at `prototypes/inventory-conversation-prototype.html` on the throwaway `prototype/inventory-conversation` branch. The Wayfinder ticket will link to the branch as the primary source. Once the prototype has been evaluated, the ticket's resolution comment records the validated conversation decisions; production implementation remains out of scope for this map session.
