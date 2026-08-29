@@ -5,7 +5,461 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Inventory Conversation Prototype</title>
     <style>
-      /* Task 4 replaces this marker with the complete restrained styling. */
+      :root {
+        color-scheme: light;
+        --ink: #16202d;
+        --muted: #5f6b7a;
+        --border: #d7dde5;
+        --surface: #ffffff;
+        --surface-soft: #f6f8fb;
+        --page-bg: #eef2f7;
+        --accent: #2563eb;
+        --accent-soft: #e8f0ff;
+        --success: #166534;
+        --success-soft: #e7f7ed;
+        --danger-soft: #fce8e8;
+        --shadow: 0 10px 30px rgba(22, 32, 45, 0.08);
+        --radius: 16px;
+        --radius-sm: 12px;
+        --focus-ring: 0 0 0 3px rgba(37, 99, 235, 0.22);
+      }
+
+      *,
+      *::before,
+      *::after {
+        box-sizing: border-box;
+      }
+
+      html {
+        background: var(--page-bg);
+      }
+
+      body {
+        margin: 0;
+        color: var(--ink);
+        background: var(--page-bg);
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+          sans-serif;
+        line-height: 1.5;
+        overflow-x: hidden;
+      }
+
+      img,
+      svg,
+      video,
+      canvas {
+        display: block;
+        max-width: 100%;
+      }
+
+      button,
+      input,
+      select,
+      textarea {
+        font: inherit;
+      }
+
+      button {
+        appearance: none;
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        padding: 0.75rem 1rem;
+        background: var(--surface);
+        color: var(--ink);
+        cursor: pointer;
+        box-shadow: 0 1px 0 rgba(22, 32, 45, 0.02);
+        transition: background-color 120ms ease, border-color 120ms ease,
+          color 120ms ease, box-shadow 120ms ease, transform 120ms ease;
+      }
+
+      button:hover {
+        border-color: #b9c4d3;
+        background: #fdfefe;
+      }
+
+      button:active {
+        transform: translateY(1px);
+      }
+
+      button:focus-visible {
+        outline: none;
+        box-shadow: var(--focus-ring);
+        border-color: var(--accent);
+      }
+
+      button[data-channel],
+      #scenario-tabs button,
+      [data-reset-walkthrough],
+      [data-next-step],
+      [data-free-play-index] {
+        min-height: 2.75rem;
+      }
+
+      .page {
+        max-width: 1440px;
+        margin: 0 auto;
+        padding: 2rem 1rem 3rem;
+      }
+
+      header {
+        max-width: 72rem;
+        margin-bottom: 1.5rem;
+      }
+
+      header p:first-of-type {
+        margin: 0 0 0.5rem;
+        color: var(--accent);
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        font-size: 0.8rem;
+        font-weight: 700;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: clamp(2rem, 4vw, 3.5rem);
+        line-height: 1.1;
+        letter-spacing: -0.03em;
+      }
+
+      header p:last-of-type {
+        margin: 0.75rem 0 0;
+        max-width: 60rem;
+        color: var(--muted);
+        font-size: 1.05rem;
+      }
+
+      .scenario-tabs {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.75rem;
+        margin: 1.25rem 0 1rem;
+      }
+
+      .scenario-tabs button[aria-current="page"] {
+        border-color: var(--accent);
+        background: var(--accent-soft);
+        color: #113a8c;
+        box-shadow: inset 0 0 0 1px rgba(37, 99, 235, 0.18);
+        font-weight: 700;
+      }
+
+      .workspace {
+        display: grid;
+        grid-template-columns: minmax(0, 2fr) minmax(19rem, 1fr);
+        gap: 1rem;
+        align-items: start;
+      }
+
+      .conversation-panel,
+      .state-column > section,
+      .free-play {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        box-shadow: var(--shadow);
+      }
+
+      .conversation-panel {
+        padding: 1.25rem;
+        min-width: 0;
+      }
+
+      .conversation-panel h2,
+      .state-column h2,
+      .free-play h2 {
+        margin: 0;
+        font-size: 1.2rem;
+        line-height: 1.25;
+      }
+
+      .conversation-panel > p {
+        margin: 0.75rem 0 1rem;
+        color: var(--muted);
+      }
+
+      .channel-buttons {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.75rem;
+        margin-top: 0.85rem;
+      }
+
+      .channel-buttons button {
+        min-width: 6rem;
+        background: var(--surface);
+      }
+
+      .channel-buttons button[aria-pressed="true"] {
+        border-color: var(--accent);
+        background: var(--accent-soft);
+        color: #113a8c;
+        box-shadow: inset 0 0 0 1px rgba(37, 99, 235, 0.18);
+        font-weight: 700;
+      }
+
+      #transcript {
+        margin-top: 1rem;
+        min-height: 20rem;
+        padding: 1rem;
+        border: 1px solid var(--border);
+        border-radius: var(--radius-sm);
+        background: var(--surface-soft);
+      }
+
+      #transcript > p {
+        min-height: 16rem;
+        margin: 0;
+        display: grid;
+        place-items: center;
+        color: var(--muted);
+        text-align: center;
+      }
+
+      .transcript-list {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 0.75rem;
+      }
+
+      .transcript-turn {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: flex-start;
+        gap: 0.4rem;
+        max-width: 80%;
+        padding: 0.85rem 1rem;
+        border-radius: 1rem;
+        border: 1px solid var(--border);
+        background: var(--surface);
+        overflow-wrap: anywhere;
+        word-break: normal;
+      }
+
+      .transcript-turn strong {
+        flex: none;
+      }
+
+      .transcript-turn span {
+        min-width: 0;
+      }
+
+      .transcript-turn.user-turn {
+        margin-left: auto;
+        border-color: rgba(37, 99, 235, 0.24);
+        background: var(--accent-soft);
+        justify-content: flex-end;
+      }
+
+      .transcript-turn.agent-turn {
+        margin-right: auto;
+        background: var(--surface);
+      }
+
+      #walkthrough-controls {
+        margin-top: 1rem;
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.75rem;
+      }
+
+      #walkthrough-controls p,
+      #walkthrough-controls p {
+        margin: 0;
+        color: var(--success);
+        font-weight: 600;
+      }
+
+      .free-play > p {
+        margin: 0;
+        color: var(--muted);
+      }
+
+      .secondary {
+        background: var(--surface);
+      }
+
+      .state-column {
+        display: grid;
+        gap: 1rem;
+        min-width: 0;
+      }
+
+      .state-column > section {
+        padding: 1rem 1rem 1.15rem;
+        min-width: 0;
+      }
+
+      .state-column dl {
+        display: grid;
+        grid-template-columns: minmax(0, 9rem) minmax(0, 1fr);
+        gap: 0.6rem 0.9rem;
+        margin: 0.85rem 0 0;
+      }
+
+      .state-column dt {
+        color: var(--muted);
+        font-size: 0.92rem;
+        font-weight: 700;
+      }
+
+      .state-column dd {
+        margin: 0;
+        min-width: 0;
+        overflow-wrap: anywhere;
+        word-break: break-word;
+      }
+
+      .state-column table {
+        width: 100%;
+        table-layout: fixed;
+        border-collapse: collapse;
+        margin-top: 0.85rem;
+        font-size: 0.95rem;
+      }
+
+      .state-column thead th {
+        padding: 0.7rem 0.65rem;
+        text-align: left;
+        background: var(--surface-soft);
+        border-bottom: 1px solid var(--border);
+        color: var(--muted);
+        font-size: 0.82rem;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+      }
+
+      .state-column tbody th,
+      .state-column tbody td {
+        padding: 0.65rem 0.65rem;
+        border-bottom: 1px solid #e5eaf0;
+        vertical-align: top;
+        overflow-wrap: anywhere;
+      }
+
+      .state-column tbody th {
+        text-align: left;
+        font-weight: 600;
+      }
+
+      .zero-entry {
+        background: var(--danger-soft);
+        color: #8b1f1f;
+      }
+
+      .zero-entry th,
+      .zero-entry td {
+        color: inherit;
+      }
+
+      #transition-explanation {
+        border-color: rgba(37, 99, 235, 0.34);
+        background: linear-gradient(180deg, #ffffff 0%, #fbfcff 100%);
+      }
+
+      #transition-explanation::before {
+        content: "Transition";
+        display: inline-block;
+        margin-bottom: 0.75rem;
+        padding: 0.25rem 0.5rem;
+        border-radius: 999px;
+        background: var(--accent-soft);
+        color: #113a8c;
+        font-size: 0.75rem;
+        font-weight: 700;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+      }
+
+      #free-play-controls {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+        gap: 0.75rem;
+        margin-top: 1rem;
+      }
+
+      .free-play {
+        margin-top: 1rem;
+        padding: 1rem;
+      }
+
+      .free-play > p {
+        margin-top: 0.85rem;
+      }
+
+      .free-play button {
+        width: 100%;
+        justify-content: center;
+      }
+
+      @media (max-width: 960px) {
+        .workspace {
+          grid-template-columns: minmax(0, 1fr);
+        }
+
+        .state-column {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
+        #transition-explanation {
+          grid-column: 1 / -1;
+        }
+      }
+
+      @media (max-width: 600px) {
+        .page {
+          padding: 1rem 0.75rem 2rem;
+        }
+
+        header {
+          margin-bottom: 1rem;
+        }
+
+        .conversation-panel,
+        .state-column > section,
+        .free-play {
+          padding: 1rem;
+        }
+
+        .channel-buttons,
+        #walkthrough-controls {
+          align-items: stretch;
+        }
+
+        .channel-buttons button,
+        #walkthrough-controls button,
+        #walkthrough-controls .secondary {
+          width: 100%;
+        }
+
+        .transcript-turn {
+          max-width: 100%;
+        }
+
+        .state-column {
+          grid-template-columns: 1fr;
+        }
+
+        .state-column dl {
+          grid-template-columns: 1fr;
+          gap: 0.25rem 0;
+        }
+
+        .state-column dt {
+          margin-top: 0.25rem;
+        }
+
+        .state-column thead th,
+        .state-column tbody th,
+        .state-column tbody td {
+          padding-left: 0.5rem;
+          padding-right: 0.5rem;
+        }
+      }
     </style>
   </head>
   <body>
