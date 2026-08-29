@@ -64,6 +64,391 @@
           { id: "extension-cords", name: "Extension cords", quantity: 3, unit: "each", location: "Garage", note: "" },
         ],
       });
+
+      const ConversationStatus = Object.freeze({
+        IDLE: "idle",
+        UNDERSTANDING: "understanding",
+        CLARIFYING: "clarifying",
+        CONFIRMING: "confirming",
+        APPLIED: "applied",
+        FAILED: "failed",
+      });
+
+      const createInitialState = (channel = "text") => ({
+        inventory: createSeedInventory(),
+        channel,
+        status: ConversationStatus.IDLE,
+        pendingIntent: null,
+        candidates: [],
+        proposedMutations: [],
+        uncertainFields: [],
+        transcript: [],
+        lastResponse: "Choose a walkthrough or a free-play action.",
+        transition: "The prototype is ready.",
+      });
+
+      const updateEntry = (inventory, entryId, update) => ({
+        ...inventory,
+        entries: inventory.entries.map((entry) =>
+          entry.id === entryId ? { ...entry, ...update(entry) } : entry
+        ),
+      });
+
+      const appendTurn = (state, speaker, text) => ({
+        ...state,
+        transcript: [...state.transcript, { speaker, text }],
+      });
+
+      const withAgentResponse = (state, text, transition) => ({
+        ...appendTurn(state, "Agent", text),
+        lastResponse: text,
+        transition,
+      });
+
+      const formatQuantity = (quantity, unit) => `${quantity} ${unit}`;
+
+      const Responses = {
+        added(channel, entry, amount, resultingQuantity) {
+          if (channel === "voice") {
+            return `Added ${formatQuantity(amount, entry.unit)} in the ${entry.location.toLowerCase()}. You now have ${resultingQuantity}.`;
+          }
+          return `Added ${formatQuantity(amount, entry.unit)} of ${entry.name} in the ${entry.location}. You now have ${formatQuantity(resultingQuantity, entry.unit)}.`;
+        },
+
+        ambiguousBatteries(channel) {
+          if (channel === "voice") {
+            return "AA batteries in the garage, or AAA batteries in the utility room?";
+          }
+          return "Which batteries: 1. AA batteries — 24 each, Garage; or 2. AAA batteries — 18 each, Utility room?";
+        },
+
+        removed(channel, entry, amount, resultingQuantity) {
+          if (channel === "voice") {
+            return `Removed ${amount}. ${resultingQuantity} ${entry.name} remain in the ${entry.location.toLowerCase()}.`;
+          }
+          return `Removed ${formatQuantity(amount, entry.unit)} of ${entry.name} from the ${entry.location}. ${formatQuantity(resultingQuantity, entry.unit)} remain.`;
+        },
+
+        bulkPreview(channel, mutations) {
+          if (channel === "voice") {
+            const names = mutations.map((mutation) => mutation.name.toLowerCase());
+            return `That affects ${mutations.length} entries: ${names.slice(0, -1).join(", ")}, and ${names.at(-1)}. All would become zero. Should I apply that?`;
+          }
+          const details = mutations
+            .map((mutation) => `${mutation.name}: ${mutation.before} ${mutation.unit} → 0`)
+            .join("; ");
+          return `This will set ${mutations.length} Stock Entries to zero: ${details}. Apply these changes?`;
+        },
+
+        bulkApplied(channel, count) {
+          return channel === "voice"
+            ? `Done. All ${count} entries are now zero.`
+            : `Applied the bulk Set. ${count} Stock Entries are now zero.`;
+        },
+
+        garageList(channel, entries) {
+          if (channel === "voice") {
+            const largest = [...entries]
+              .sort((left, right) => right.quantity - left.quantity)
+              .slice(0, 3)
+              .map((entry) => `${entry.quantity} ${entry.name.toLowerCase()}`);
+            return `You have ${entries.length} on-hand entries in the garage. The largest quantities are ${largest.join(", ")}. Want the full list, or should I narrow it?`;
+          }
+          return entries
+            .map((entry) => `${entry.name}: ${formatQuantity(entry.quantity, entry.unit)}`)
+            .join(" · ");
+        },
+
+        uncertainQuantity() {
+          return "Was that fifteen boxes or fifty boxes?";
+        },
+
+        insufficient(entry, requested) {
+          return `I couldn't remove ${requested}. Only ${formatQuantity(entry.quantity, entry.unit)} of ${entry.name} are on hand.`;
+        },
+      };
+
+      const ConversationPrototype = (() => {
+        const paintIds = ["white-paint", "blue-paint", "primer"];
+
+        const receive = (state, utterance) =>
+          appendTurn(
+            { ...state, status: ConversationStatus.UNDERSTANDING },
+            "You",
+            utterance
+          );
+
+        const applyAdd = (state, entryId, amount) => {
+          const entry = state.inventory.entries.find((candidate) => candidate.id === entryId);
+          const resultingQuantity = entry.quantity + amount;
+          const nextState = {
+            ...state,
+            inventory: updateEntry(state.inventory, entryId, (current) => ({
+              quantity: current.quantity + amount,
+            })),
+            status: ConversationStatus.APPLIED,
+            pendingIntent: null,
+            uncertainFields: [],
+          };
+          return withAgentResponse(
+            nextState,
+            Responses.added(state.channel, entry, amount, resultingQuantity),
+            `Applied Add to ${entry.name}: ${entry.quantity} → ${resultingQuantity} ${entry.unit}.`
+          );
+        };
+
+        const applyRemove = (state, entryId, amount) => {
+          const entry = state.inventory.entries.find((candidate) => candidate.id === entryId);
+          if (amount > entry.quantity) {
+            return withAgentResponse(
+              {
+                ...state,
+                status: ConversationStatus.FAILED,
+                pendingIntent: null,
+                candidates: [],
+              },
+              Responses.insufficient(entry, amount),
+              "Rejected Remove; Inventory is unchanged because the requested amount exceeds On-hand Stock."
+            );
+          }
+
+          const resultingQuantity = entry.quantity - amount;
+          const nextState = {
+            ...state,
+            inventory: updateEntry(state.inventory, entryId, (current) => ({
+              quantity: current.quantity - amount,
+            })),
+            status: ConversationStatus.APPLIED,
+            pendingIntent: null,
+            candidates: [],
+          };
+          return withAgentResponse(
+            nextState,
+            Responses.removed(state.channel, entry, amount, resultingQuantity),
+            `Applied Remove to ${entry.name}: ${entry.quantity} → ${resultingQuantity} ${entry.unit}.`
+          );
+        };
+
+        const reducer = (state, action) => {
+          switch (action.type) {
+            case "SET_CHANNEL":
+              return {
+                ...state,
+                channel: action.channel,
+                transition: `Changed presentation to ${action.channel}; mutation policy is unchanged.`,
+              };
+
+            case "RESET":
+              return createInitialState(action.channel ?? state.channel);
+
+            case "START_ADD": {
+              const understood = receive(state, "Add 4 boxes of nitrile gloves to the garage.");
+              return applyAdd(understood, "gloves", 4);
+            }
+
+            case "START_AMBIGUOUS_REMOVE": {
+              const understood = receive(state, "Remove 2 batteries.");
+              return withAgentResponse(
+                {
+                  ...understood,
+                  status: ConversationStatus.CLARIFYING,
+                  pendingIntent: { kind: "remove", amount: 2 },
+                  candidates: ["aa-batteries", "aaa-batteries"],
+                },
+                Responses.ambiguousBatteries(state.channel),
+                "Paused before mutation because the reference has two Matches."
+              );
+            }
+
+            case "CHOOSE_MATCH": {
+              if (
+                state.status !== ConversationStatus.CLARIFYING ||
+                state.pendingIntent?.kind !== "remove" ||
+                !state.candidates.includes(action.entryId)
+              ) {
+                return state;
+              }
+              const entry = state.inventory.entries.find(
+                (candidate) => candidate.id === action.entryId
+              );
+              if (!entry) {
+                return state;
+              }
+              const clarified = appendTurn(state, "You", entry.name);
+              return applyRemove(clarified, action.entryId, state.pendingIntent.amount);
+            }
+
+            case "START_BULK_SET": {
+              const understood = receive(state, "Set all garage paint to zero.");
+              const proposedMutations = understood.inventory.entries
+                .filter((entry) => paintIds.includes(entry.id))
+                .map((entry) => ({
+                  entryId: entry.id,
+                  name: entry.name,
+                  unit: entry.unit,
+                  before: entry.quantity,
+                  after: 0,
+                }));
+              return withAgentResponse(
+                {
+                  ...understood,
+                  status: ConversationStatus.CONFIRMING,
+                  pendingIntent: { kind: "bulk-set-zero" },
+                  proposedMutations,
+                },
+                Responses.bulkPreview(state.channel, proposedMutations),
+                "Prepared an exact atomic preview; Inventory is unchanged until explicit confirmation."
+              );
+            }
+
+            case "CONFIRM_MUTATION": {
+              if (
+                state.status !== ConversationStatus.CONFIRMING ||
+                state.pendingIntent?.kind !== "bulk-set-zero"
+              ) {
+                return state;
+              }
+              const confirmed = appendTurn(state, "You", "Yes, apply it.");
+              const ids = new Set(
+                confirmed.proposedMutations.map((mutation) => mutation.entryId)
+              );
+              const inventory = {
+                ...confirmed.inventory,
+                entries: confirmed.inventory.entries.map((entry) =>
+                  ids.has(entry.id) ? { ...entry, quantity: 0 } : entry
+                ),
+              };
+              return withAgentResponse(
+                {
+                  ...confirmed,
+                  inventory,
+                  status: ConversationStatus.APPLIED,
+                  pendingIntent: null,
+                  proposedMutations: [],
+                },
+                Responses.bulkApplied(state.channel, ids.size),
+                `Atomically set ${ids.size} Stock Entries to zero.`
+              );
+            }
+
+            case "CANCEL_MUTATION": {
+              if (state.status !== ConversationStatus.CONFIRMING) {
+                return state;
+              }
+              const cancelled = appendTurn(state, "You", "No, cancel.");
+              return withAgentResponse(
+                {
+                  ...cancelled,
+                  status: ConversationStatus.IDLE,
+                  pendingIntent: null,
+                  proposedMutations: [],
+                },
+                "Cancelled. Nothing changed.",
+                "Cleared the proposed mutation; Inventory is unchanged."
+              );
+            }
+
+            case "START_GARAGE_LIST": {
+              const understood = receive(state, "What do I have in the garage?");
+              const entries = understood.inventory.entries.filter(
+                (entry) => entry.location === "Garage" && entry.quantity > 0
+              );
+              return withAgentResponse(
+                {
+                  ...understood,
+                  status: ConversationStatus.APPLIED,
+                  pendingIntent:
+                    state.channel === "voice"
+                      ? {
+                          kind: "garage-list",
+                          entryIds: entries.map((entry) => entry.id),
+                        }
+                      : null,
+                },
+                Responses.garageList(state.channel, entries),
+                state.channel === "voice"
+                  ? "Returned a spoken summary and preserved the result set for progressive disclosure."
+                  : "Returned the complete filtered List."
+              );
+            }
+
+            case "REQUEST_FULL_LIST": {
+              if (state.pendingIntent?.kind !== "garage-list") {
+                return state;
+              }
+              const entries = state.pendingIntent.entryIds.map((entryId) =>
+                state.inventory.entries.find((entry) => entry.id === entryId)
+              );
+              const requested = appendTurn(state, "You", "Read the full list.");
+              return withAgentResponse(
+                { ...requested, pendingIntent: null },
+                entries
+                  .map(
+                    (entry) =>
+                      `${entry.name}, ${formatQuantity(entry.quantity, entry.unit)}`
+                  )
+                  .join("; "),
+                "Expanded the preserved List result without rerunning or changing Inventory."
+              );
+            }
+
+            case "START_UNCERTAIN_QUANTITY": {
+              const understood = receive(
+                state,
+                "Add [fifteen or fifty] boxes of air filters."
+              );
+              return withAgentResponse(
+                {
+                  ...understood,
+                  status: ConversationStatus.CLARIFYING,
+                  pendingIntent: { kind: "add", entryId: "filters" },
+                  uncertainFields: ["quantity"],
+                },
+                Responses.uncertainQuantity(),
+                "Paused before mutation because Quantity recognition is uncertain; the rest of the intent is preserved."
+              );
+            }
+
+            case "CLARIFY_QUANTITY": {
+              if (
+                state.pendingIntent?.kind !== "add" ||
+                !state.uncertainFields.includes("quantity") ||
+                ![15, 50].includes(action.quantity)
+              ) {
+                return state;
+              }
+              const clarified = appendTurn(state, "You", `${action.quantity} boxes.`);
+              return applyAdd(clarified, state.pendingIntent.entryId, action.quantity);
+            }
+
+            case "START_EXCESSIVE_REMOVE": {
+              const understood = receive(state, "Remove 30 AA batteries.");
+              return applyRemove(understood, "aa-batteries", 30);
+            }
+
+            case "INTERRUPT": {
+              const interrupted = appendTurn(state, "You", action.utterance);
+              return withAgentResponse(
+                {
+                  ...interrupted,
+                  status: ConversationStatus.IDLE,
+                  pendingIntent: null,
+                  candidates: [],
+                  proposedMutations: [],
+                  uncertainFields: [],
+                },
+                "Okay. I cleared the unfinished change. What would you like to do instead?",
+                "Discarded the stale pending mutation before accepting a new unrelated intent."
+              );
+            }
+
+            default:
+              return state;
+          }
+        };
+
+        return { createInitialState, reducer };
+      })();
     </script>
   </body>
 </html>
