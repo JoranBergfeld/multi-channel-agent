@@ -449,6 +449,370 @@
 
         return { createInitialState, reducer };
       })();
+
+      const walkthroughs = [
+        {
+          id: "clear-add",
+          title: "Clear Add",
+          description:
+            "One clear Match applies immediately, without clarification or confirmation.",
+          steps: [
+            { action: { type: "START_ADD" }, label: "Send clear Add" },
+          ],
+        },
+        {
+          id: "ambiguous-remove",
+          title: "Ambiguous Remove",
+          description:
+            "Multiple Matches pause the Remove so the Agent can ask for the minimal distinction.",
+          steps: [
+            {
+              action: { type: "START_AMBIGUOUS_REMOVE" },
+              label: "Ask to remove batteries",
+            },
+            {
+              action: { type: "CHOOSE_MATCH", entryId: "aa-batteries" },
+              label: "Choose AA batteries",
+            },
+          ],
+        },
+        {
+          id: "bulk-set",
+          title: "Bulk Set",
+          description:
+            "Plural scope produces an exact atomic preview and requires explicit confirmation.",
+          steps: [
+            {
+              action: { type: "START_BULK_SET" },
+              label: "Ask to zero garage paint",
+            },
+            {
+              action: { type: "CONFIRM_MUTATION" },
+              label: "Confirm the preview",
+            },
+          ],
+        },
+        {
+          id: "garage-list",
+          title: "Garage List",
+          description:
+            "Text returns the full List, while voice starts with a summary and supports progressive disclosure.",
+          steps: [
+            {
+              action: { type: "START_GARAGE_LIST" },
+              label: "Ask what is in the garage",
+            },
+            {
+              action: { type: "REQUEST_FULL_LIST" },
+              label: "Request full spoken List",
+              voiceOnly: true,
+            },
+          ],
+        },
+      ];
+
+      const freePlayActions = [
+        {
+          label: "Ambiguous Remove",
+          action: { type: "START_AMBIGUOUS_REMOVE" },
+        },
+        {
+          label: "Choose AAA batteries",
+          action: { type: "CHOOSE_MATCH", entryId: "aaa-batteries" },
+        },
+        {
+          label: "Preview bulk Set",
+          action: { type: "START_BULK_SET" },
+        },
+        {
+          label: "Confirm pending mutation",
+          action: { type: "CONFIRM_MUTATION" },
+        },
+        {
+          label: "Cancel pending mutation",
+          action: { type: "CANCEL_MUTATION" },
+        },
+        {
+          label: "Uncertain spoken Quantity",
+          action: { type: "START_UNCERTAIN_QUANTITY" },
+        },
+        {
+          label: "Clarify as 15 boxes",
+          action: { type: "CLARIFY_QUANTITY", quantity: 15 },
+        },
+        {
+          label: "Clarify as 50 boxes",
+          action: { type: "CLARIFY_QUANTITY", quantity: 50 },
+        },
+        {
+          label: "Remove too many batteries",
+          action: { type: "START_EXCESSIVE_REMOVE" },
+        },
+        {
+          label: "Interrupt pending turn",
+          action: {
+            type: "INTERRUPT",
+            utterance: "Actually, tell me about something unrelated.",
+          },
+        },
+      ];
+
+      let activeWalkthroughId = walkthroughs[0].id;
+      let completedStepCount = 0;
+      let state = ConversationPrototype.createInitialState();
+
+      const elements = {
+        scenarioTabs: document.getElementById("scenario-tabs"),
+        scenarioTitle: document.getElementById("scenario-title"),
+        scenarioDescription: document.getElementById("scenario-description"),
+        transcript: document.getElementById("transcript"),
+        walkthroughControls: document.getElementById("walkthrough-controls"),
+        conversationState: document.getElementById("conversation-state"),
+        inventoryState: document.getElementById("inventory-state"),
+        transitionExplanation: document.getElementById("transition-explanation"),
+        freePlayControls: document.getElementById("free-play-controls"),
+        channelButtons: [...document.querySelectorAll("[data-channel]")],
+      };
+
+      const escapeHtml = (value) =>
+        String(value).replace(
+          /[&<>"']/g,
+          (character) =>
+            ({
+              "&": "&amp;",
+              "<": "&lt;",
+              ">": "&gt;",
+              '"': "&quot;",
+              "'": "&#39;",
+            })[character]
+        );
+
+      const dispatch = (action) => {
+        state = ConversationPrototype.reducer(state, action);
+        render();
+      };
+
+      const getActiveWalkthrough = () =>
+        walkthroughs.find(
+          (walkthrough) => walkthrough.id === activeWalkthroughId
+        );
+
+      const getNextVisibleStep = (walkthrough) => {
+        for (
+          let stepIndex = completedStepCount;
+          stepIndex < walkthrough.steps.length;
+          stepIndex += 1
+        ) {
+          const step = walkthrough.steps[stepIndex];
+          if (step.voiceOnly && state.channel !== "voice") {
+            continue;
+          }
+          if (
+            step.action.type === "REQUEST_FULL_LIST" &&
+            state.pendingIntent?.kind !== "garage-list"
+          ) {
+            continue;
+          }
+          return { step, stepIndex };
+        }
+        return null;
+      };
+
+      const renderScenarioTabs = () => {
+        elements.scenarioTabs.innerHTML = walkthroughs
+          .map(
+            (walkthrough) => `
+              <button
+                type="button"
+                data-scenario="${escapeHtml(walkthrough.id)}"
+                aria-current="${
+                  walkthrough.id === activeWalkthroughId ? "page" : "false"
+                }"
+              >${escapeHtml(walkthrough.title)}</button>
+            `
+          )
+          .join("");
+
+        elements.scenarioTabs
+          .querySelectorAll("[data-scenario]")
+          .forEach((button) => {
+            button.addEventListener("click", () => {
+              activeWalkthroughId = button.dataset.scenario;
+              completedStepCount = 0;
+              state = ConversationPrototype.createInitialState(state.channel);
+              render();
+            });
+          });
+      };
+
+      const renderTranscript = () => {
+        if (state.transcript.length === 0) {
+          elements.transcript.innerHTML =
+            "<p>Press the next walkthrough step to begin.</p>";
+          return;
+        }
+
+        elements.transcript.innerHTML = `
+          <ol class="transcript-list">
+            ${state.transcript
+              .map((turn) => {
+                const speakerClass =
+                  turn.speaker === "You" ? "user-turn" : "agent-turn";
+                return `
+                  <li class="transcript-turn ${speakerClass}">
+                    <strong>${escapeHtml(turn.speaker)}:</strong>
+                    <span>${escapeHtml(turn.text)}</span>
+                  </li>
+                `;
+              })
+              .join("")}
+          </ol>
+        `;
+      };
+
+      const renderConversationState = () => {
+        const candidateNames = state.candidates.map((candidateId) => {
+          const entry = state.inventory.entries.find(
+            (candidate) => candidate.id === candidateId
+          );
+          return entry?.name ?? candidateId;
+        });
+        const pendingIntent =
+          state.pendingIntent === null
+            ? "None"
+            : JSON.stringify(state.pendingIntent);
+
+        elements.conversationState.innerHTML = `
+          <h2>Conversation state</h2>
+          <dl>
+            <dt>Channel</dt>
+            <dd>${escapeHtml(state.channel)}</dd>
+            <dt>Status</dt>
+            <dd>${escapeHtml(state.status)}</dd>
+            <dt>Pending intent</dt>
+            <dd>${escapeHtml(pendingIntent)}</dd>
+            <dt>Candidate Matches</dt>
+            <dd>${escapeHtml(candidateNames.length ? candidateNames.join(", ") : "None")}</dd>
+            <dt>Proposed mutations</dt>
+            <dd>${escapeHtml(state.proposedMutations.length)}</dd>
+            <dt>Uncertain fields</dt>
+            <dd>${escapeHtml(
+              state.uncertainFields.length
+                ? state.uncertainFields.join(", ")
+                : "None"
+            )}</dd>
+          </dl>
+        `;
+      };
+
+      const renderInventory = () => {
+        elements.inventoryState.innerHTML = `
+          <h2>Inventory state</h2>
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Stock Entry</th>
+                <th scope="col">Quantity</th>
+                <th scope="col">Location</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${state.inventory.entries
+                .map(
+                  (entry) => `
+                    <tr${entry.quantity === 0 ? ' class="zero-entry"' : ""}>
+                      <th scope="row">${escapeHtml(entry.name)}</th>
+                      <td>${escapeHtml(formatQuantity(entry.quantity, entry.unit))}</td>
+                      <td>${escapeHtml(entry.location)}</td>
+                    </tr>
+                  `
+                )
+                .join("")}
+            </tbody>
+          </table>
+        `;
+      };
+
+      const renderWalkthroughControls = (walkthrough) => {
+        const next = getNextVisibleStep(walkthrough);
+        elements.walkthroughControls.innerHTML = `
+          <button type="button" class="secondary" data-reset-walkthrough>
+            Reset walkthrough
+          </button>
+          ${
+            next
+              ? `<button type="button" data-next-step>${escapeHtml(next.step.label)}</button>`
+              : "<p>Walkthrough complete — use free play or reset.</p>"
+          }
+        `;
+
+        elements.walkthroughControls
+          .querySelector("[data-reset-walkthrough]")
+          .addEventListener("click", () => {
+            completedStepCount = 0;
+            dispatch({ type: "RESET", channel: state.channel });
+          });
+
+        const nextButton =
+          elements.walkthroughControls.querySelector("[data-next-step]");
+        if (nextButton && next) {
+          nextButton.addEventListener("click", () => {
+            completedStepCount = next.stepIndex + 1;
+            dispatch(next.step.action);
+          });
+        }
+      };
+
+      const renderFreePlayControls = () => {
+        elements.freePlayControls.innerHTML = `
+          <h2>Free play</h2>
+          ${freePlayActions
+            .map(
+              (item, index) => `
+                <button type="button" data-free-play-index="${index}">
+                  ${escapeHtml(item.label)}
+                </button>
+              `
+            )
+            .join("")}
+        `;
+
+        elements.freePlayControls
+          .querySelectorAll("[data-free-play-index]")
+          .forEach((button) => {
+            button.addEventListener("click", () => {
+              const item = freePlayActions[Number(button.dataset.freePlayIndex)];
+              dispatch(item.action);
+            });
+          });
+      };
+
+      const render = () => {
+        const walkthrough = getActiveWalkthrough();
+        elements.scenarioTitle.textContent = walkthrough.title;
+        elements.scenarioDescription.textContent = walkthrough.description;
+        elements.transitionExplanation.textContent = state.transition;
+        elements.channelButtons.forEach((button) => {
+          button.setAttribute(
+            "aria-pressed",
+            String(button.dataset.channel === state.channel)
+          );
+        });
+        renderScenarioTabs();
+        renderTranscript();
+        renderConversationState();
+        renderInventory();
+        renderWalkthroughControls(walkthrough);
+        renderFreePlayControls();
+      };
+
+      elements.channelButtons.forEach((button) => {
+        button.addEventListener("click", () => {
+          dispatch({ type: "SET_CHANNEL", channel: button.dataset.channel });
+        });
+      });
+
+      render();
     </script>
   </body>
 </html>
