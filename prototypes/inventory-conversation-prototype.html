@@ -9,7 +9,7 @@
         color-scheme: light;
         --ink: #16202d;
         --muted: #5f6b7a;
-        --border: #d7dde5;
+        --line: #d7dde5;
         --surface: #ffffff;
         --surface-soft: #f6f8fb;
         --page-bg: #eef2f7;
@@ -61,24 +61,18 @@
 
       button {
         appearance: none;
-        border: 1px solid var(--border);
+        border: 1px solid var(--line);
         border-radius: 999px;
         padding: 0.75rem 1rem;
         background: var(--surface);
         color: var(--ink);
         cursor: pointer;
         box-shadow: 0 1px 0 rgba(22, 32, 45, 0.02);
-        transition: background-color 120ms ease, border-color 120ms ease,
-          color 120ms ease, box-shadow 120ms ease, transform 120ms ease;
       }
 
       button:hover {
         border-color: #b9c4d3;
         background: #fdfefe;
-      }
-
-      button:active {
-        transform: translateY(1px);
       }
 
       button:focus-visible {
@@ -155,7 +149,7 @@
       .state-column > section,
       .free-play {
         background: var(--surface);
-        border: 1px solid var(--border);
+        border: 1px solid var(--line);
         border-radius: var(--radius);
         box-shadow: var(--shadow);
       }
@@ -202,7 +196,7 @@
         margin-top: 1rem;
         min-height: 20rem;
         padding: 1rem;
-        border: 1px solid var(--border);
+        border: 1px solid var(--line);
         border-radius: var(--radius-sm);
         background: var(--surface-soft);
       }
@@ -233,7 +227,7 @@
         max-width: 80%;
         padding: 0.85rem 1rem;
         border-radius: 1rem;
-        border: 1px solid var(--border);
+        border: 1px solid var(--line);
         background: var(--surface);
         overflow-wrap: anywhere;
         word-break: normal;
@@ -326,7 +320,7 @@
         padding: 0.7rem 0.65rem;
         text-align: left;
         background: var(--surface-soft);
-        border-bottom: 1px solid var(--border);
+        border-bottom: 1px solid var(--line);
         color: var(--muted);
         font-size: 0.82rem;
         text-transform: uppercase;
