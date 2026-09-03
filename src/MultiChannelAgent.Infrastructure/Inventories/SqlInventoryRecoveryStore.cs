@@ -153,25 +153,6 @@ public sealed class SqlInventoryRecoveryStore(MultiChannelAgentDbContext db, ITe
         var targetMembership = await db.Memberships.FirstOrDefaultAsync(
             m => m.InventoryId == inventoryId.Value && m.ParticipantId == resolvedTarget.ParticipantId.Value, cancellationToken);
 
-        ownerRow.Role = MembershipRole.Editor;
-        ownerRow.ConcurrencyStamp = Guid.NewGuid();
-
-        if (targetMembership is null)
-        {
-            db.Memberships.Add(new MembershipEntity
-            {
-                InventoryId = inventoryId.Value,
-                ParticipantId = resolvedTarget.ParticipantId.Value,
-                Role = MembershipRole.Owner,
-                CreatedAt = now,
-            });
-        }
-        else
-        {
-            targetMembership.Role = MembershipRole.Owner;
-            targetMembership.ConcurrencyStamp = Guid.NewGuid();
-        }
-
         var fact = AuditFact.Create(
             AuditEventType.OrphanOwnershipRecovered,
             AuditActorKind.RecoveryAdministrator,
@@ -180,11 +161,37 @@ public sealed class SqlInventoryRecoveryStore(MultiChannelAgentDbContext db, ITe
             resolvedTarget.ParticipantId,
             "Recovered",
             now);
-        db.InventoryAudits.Add(InventoryAuditMapper.ToEntity(fact));
 
         try
         {
+            await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+
+            // SQL Server checks the filtered one-Owner index statement by statement. Persist the
+            // demotion before the promotion, but keep both saves inside one transaction so no
+            // ownerless state can become visible or survive a failed promotion.
+            ownerRow.Role = MembershipRole.Editor;
+            ownerRow.ConcurrencyStamp = Guid.NewGuid();
             await db.SaveChangesAsync(cancellationToken);
+
+            if (targetMembership is null)
+            {
+                db.Memberships.Add(new MembershipEntity
+                {
+                    InventoryId = inventoryId.Value,
+                    ParticipantId = resolvedTarget.ParticipantId.Value,
+                    Role = MembershipRole.Owner,
+                    CreatedAt = now,
+                });
+            }
+            else
+            {
+                targetMembership.Role = MembershipRole.Owner;
+                targetMembership.ConcurrencyStamp = Guid.NewGuid();
+            }
+
+            db.InventoryAudits.Add(InventoryAuditMapper.ToEntity(fact));
+            await db.SaveChangesAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
         }
         catch (DbUpdateConcurrencyException)
         {

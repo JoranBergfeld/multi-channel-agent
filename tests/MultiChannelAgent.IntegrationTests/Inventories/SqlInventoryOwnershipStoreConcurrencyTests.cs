@@ -148,10 +148,10 @@ public sealed class SqlInventoryOwnershipStoreConcurrencyTests : IDisposable
     {
         private bool _synchronized;
 
-        public override async ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(
+        public override async ValueTask<DbDataReader> ReaderExecutedAsync(
             DbCommand command,
-            CommandEventData eventData,
-            InterceptionResult<DbDataReader> result,
+            CommandExecutedEventData eventData,
+            DbDataReader result,
             CancellationToken cancellationToken = default)
         {
             if (!_synchronized && command.CommandText.Contains("Memberships", StringComparison.Ordinal))
@@ -160,7 +160,7 @@ public sealed class SqlInventoryOwnershipStoreConcurrencyTests : IDisposable
                 await Task.Run(() => checkArrivalBarrier.SignalAndWait(cancellationToken), cancellationToken);
             }
 
-            return await base.ReaderExecutingAsync(command, eventData, result, cancellationToken);
+            return await base.ReaderExecutedAsync(command, eventData, result, cancellationToken);
         }
     }
 

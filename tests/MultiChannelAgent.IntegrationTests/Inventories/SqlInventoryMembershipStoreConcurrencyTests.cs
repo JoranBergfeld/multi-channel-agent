@@ -72,8 +72,8 @@ public sealed class SqlInventoryMembershipStoreConcurrencyTests : IDisposable
         var now = DateTimeOffset.UtcNow;
 
         using var barrier = new Barrier(2);
-        using var dbA = CreateContext(new SynchronizeFirstReadInterceptor(barrier));
-        using var dbB = CreateContext(new SynchronizeFirstReadInterceptor(barrier));
+        using var dbA = CreateContext(new SynchronizeFirstReadResultInterceptor(barrier));
+        using var dbB = CreateContext(new SynchronizeFirstReadResultInterceptor(barrier));
 
         var storeA = new SqlInventoryMembershipStore(dbA);
         var storeB = new SqlInventoryMembershipStore(dbB);
@@ -116,8 +116,8 @@ public sealed class SqlInventoryMembershipStoreConcurrencyTests : IDisposable
         }
 
         using var barrier = new Barrier(2);
-        using var dbA = CreateContext(new SynchronizeFirstReadInterceptor(barrier));
-        using var dbB = CreateContext(new SynchronizeFirstReadInterceptor(barrier));
+        using var dbA = CreateContext(new SynchronizeFirstReadResultInterceptor(barrier));
+        using var dbB = CreateContext(new SynchronizeFirstReadResultInterceptor(barrier));
         var storeA = new SqlInventoryMembershipStore(dbA);
         var storeB = new SqlInventoryMembershipStore(dbB);
 
@@ -209,6 +209,26 @@ public sealed class SqlInventoryMembershipStoreConcurrencyTests : IDisposable
             }
 
             return await base.ReaderExecutingAsync(command, eventData, result, cancellationToken);
+        }
+    }
+
+    private sealed class SynchronizeFirstReadResultInterceptor(Barrier checkArrivalBarrier) : DbCommandInterceptor
+    {
+        private bool _synchronized;
+
+        public override async ValueTask<DbDataReader> ReaderExecutedAsync(
+            DbCommand command,
+            CommandExecutedEventData eventData,
+            DbDataReader result,
+            CancellationToken cancellationToken = default)
+        {
+            if (!_synchronized && command.CommandText.Contains("Memberships", StringComparison.Ordinal))
+            {
+                _synchronized = true;
+                await Task.Run(() => checkArrivalBarrier.SignalAndWait(cancellationToken), cancellationToken);
+            }
+
+            return await base.ReaderExecutedAsync(command, eventData, result, cancellationToken);
         }
     }
 

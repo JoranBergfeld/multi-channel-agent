@@ -34,32 +34,39 @@ public sealed class SqlInventoryOwnershipStore(MultiChannelAgentDbContext db) : 
         var targetRow = await db.Memberships.FirstOrDefaultAsync(
             m => m.InventoryId == inventoryId.Value && m.ParticipantId == targetParticipantId.Value, cancellationToken);
 
-        ownerRow.Role = MembershipRole.Editor;
-        ownerRow.ConcurrencyStamp = Guid.NewGuid();
-
-        if (targetRow is null)
-        {
-            db.Memberships.Add(new MembershipEntity
-            {
-                InventoryId = inventoryId.Value,
-                ParticipantId = targetParticipantId.Value,
-                Role = MembershipRole.Owner,
-                CreatedAt = now,
-            });
-        }
-        else
-        {
-            targetRow.Role = MembershipRole.Owner;
-            targetRow.ConcurrencyStamp = Guid.NewGuid();
-        }
-
         var fact = AuditFact.Create(
             AuditEventType.OwnershipTransferred, AuditActorKind.Participant, requesterId.ToString(), inventoryId, targetParticipantId, "Transferred", now);
-        db.InventoryAudits.Add(InventoryAuditMapper.ToEntity(fact));
 
         try
         {
+            await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+
+            // SQL Server enforces the filtered one-Owner index after each statement. Demote first,
+            // then promote inside the same transaction so no committed state is ever ownerless and
+            // the temporary in-transaction state cannot violate the unique index.
+            ownerRow.Role = MembershipRole.Editor;
+            ownerRow.ConcurrencyStamp = Guid.NewGuid();
             await db.SaveChangesAsync(cancellationToken);
+
+            if (targetRow is null)
+            {
+                db.Memberships.Add(new MembershipEntity
+                {
+                    InventoryId = inventoryId.Value,
+                    ParticipantId = targetParticipantId.Value,
+                    Role = MembershipRole.Owner,
+                    CreatedAt = now,
+                });
+            }
+            else
+            {
+                targetRow.Role = MembershipRole.Owner;
+                targetRow.ConcurrencyStamp = Guid.NewGuid();
+            }
+
+            db.InventoryAudits.Add(InventoryAuditMapper.ToEntity(fact));
+            await db.SaveChangesAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
         }
         catch (DbUpdateConcurrencyException)
         {
