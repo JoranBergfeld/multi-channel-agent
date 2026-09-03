@@ -18,6 +18,8 @@ public sealed class TurnProcessingCoordinator(
     ITurnResultStore turnResultStore,
     ILeaseCoordinator leaseCoordinator,
     IModelBoundary modelBoundary,
+    TurnExecutionContextFactory executionContextFactory,
+    IToolDispatcher toolDispatcher,
     TimeProvider timeProvider,
     ILogger<TurnProcessingCoordinator> logger)
 {
@@ -78,12 +80,21 @@ public sealed class TurnProcessingCoordinator(
 
     private async Task ProcessOneAsync(InboundTurn turn, CancellationToken cancellationToken)
     {
-        var decision = await modelBoundary.DecideAsync(turn, cancellationToken);
         var now = timeProvider.GetUtcNow();
+        var proposal = await modelBoundary.ProposeAsync(turn, cancellationToken);
+
+        // The trusted TurnExecutionContext - Participant, ChannelConversation, Foundry conversation,
+        // and current Active Inventory - is assembled here, from the durably-accepted Turn's own
+        // identity plus a fresh authorization recheck, and is only ever built when a tool call was
+        // actually proposed. It is never derived from anything the proposal itself claims.
+        var decision = proposal.Kind == ModelProposalKind.Direct
+            ? proposal.Direct!
+            : await toolDispatcher.DispatchAsync(
+                proposal.ToolCall!, await executionContextFactory.CreateAsync(turn, now, cancellationToken), now, cancellationToken);
 
         var outcome = decision.Status == OutcomeStatus.Completed
-            ? Outcome.Completed(turn.TurnId, decision.Code, decision.Summary, now)
-            : Outcome.Failed(turn.TurnId, decision.Code, decision.Summary, now);
+            ? Outcome.Completed(turn.TurnId, decision.Code, decision.Summary, now, decision.Payload)
+            : Outcome.Failed(turn.TurnId, decision.Code, decision.Summary, now, decision.Payload);
 
         var deliveries = decision.Deliveries
             .Select(requested => Delivery.Request(turn.TurnId, requested.Channel, requested.Payload, now))

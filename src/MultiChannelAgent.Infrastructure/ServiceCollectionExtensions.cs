@@ -32,6 +32,7 @@ public static class ServiceCollectionExtensions
         services.AddScoped<IDeliverySender, LoggingDeliverySender>();
         services.AddSingleton(TimeProvider.System);
         services.AddScoped<IModelBoundary, ScriptedModelBoundary>();
+        services.AddScoped<IToolDispatcher, StockToolDispatcher>();
         services.AddScoped<TurnAcceptanceService>();
         services.AddScoped<TurnProcessingCoordinator>();
         services.AddScoped<DeliveryDispatchCoordinator>();

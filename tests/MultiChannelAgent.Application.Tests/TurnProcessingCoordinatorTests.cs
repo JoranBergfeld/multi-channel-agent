@@ -1,6 +1,8 @@
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Time.Testing;
+using MultiChannelAgent.Application.Inventories;
 using MultiChannelAgent.Application.Tests.TestDoubles;
+using MultiChannelAgent.Application.Tests.TestDoubles.Inventories;
 using MultiChannelAgent.Application.Turns;
 using MultiChannelAgent.Domain.Inventories;
 using MultiChannelAgent.Domain.Turns;
@@ -17,10 +19,10 @@ public class TurnProcessingCoordinatorTests
     {
         public int InvocationCount { get; private set; }
 
-        public Task<ModelDecision> DecideAsync(InboundTurn turn, CancellationToken cancellationToken)
+        public Task<ModelProposal> ProposeAsync(InboundTurn turn, CancellationToken cancellationToken)
         {
             InvocationCount++;
-            return inner.DecideAsync(turn, cancellationToken);
+            return inner.ProposeAsync(turn, cancellationToken);
         }
     }
 
@@ -32,11 +34,30 @@ public class TurnProcessingCoordinatorTests
         var deliveries = new InMemoryDeliveryStore();
         var resultStore = new InMemoryTurnResultStore(inbox, outcomes, deliveries);
         var leases = new InMemoryLeaseCoordinator(timeProvider);
+
+        // These tests never exercise the tool-dispatch path (their content is always "hello" or the
+        // scripted failure marker, both Direct decisions) - real, minimally wired instances are used
+        // here purely to satisfy the constructor, matching the pattern of Application services
+        // elsewhere backed by in-memory stores.
+        var inventoryStore = new InMemoryInventoryStore(_ => "Owner Name");
+        var selectionStore = new InMemoryActiveInventorySelectionStore();
+        var auditStore = new InMemoryInventoryAuthorizationAuditStore(selectionStore);
+        var authorizationService = new InventoryAuthorizationService(inventoryStore, auditStore);
+        var selectionService = new InventorySelectionService(authorizationService, selectionStore);
+        var bindingStore = new InMemoryFoundryConversationBindingStore();
+        var executionContextFactory = new TurnExecutionContextFactory(bindingStore, selectionService);
+        var stockStore = new InMemoryStockStore();
+        var toolDispatcher = new StockToolDispatcher(
+            new StockListingService(stockStore, authorizationService),
+            new StockFindingService(stockStore, authorizationService));
+
         var coordinator = new TurnProcessingCoordinator(
             inbox,
             resultStore,
             leases,
             modelBoundary ?? new ScriptedModelBoundary(),
+            executionContextFactory,
+            toolDispatcher,
             timeProvider,
             NullLogger<TurnProcessingCoordinator>.Instance);
 
