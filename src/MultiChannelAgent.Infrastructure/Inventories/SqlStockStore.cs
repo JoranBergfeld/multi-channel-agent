@@ -72,31 +72,7 @@ public sealed class SqlStockStore(MultiChannelAgentDbContext db) : IStockStore
     public async Task<IReadOnlyList<StockEntrySummary>> FindMatchesAsync(
         StockFindQuery query, int maxCandidatesPlusOne, CancellationToken cancellationToken)
     {
-        var rows = ScopedRows(query.InventoryId);
-
-        if (query.StockEntryId is { } stockEntryId)
-        {
-            rows = rows.Where(r => r.StockEntry.Id == stockEntryId.Value);
-        }
-        else
-        {
-            var normalizedNameReference = query.NormalizedNameReference;
-            rows = rows.Where(r => r.StockEntry.NormalizedName == normalizedNameReference);
-
-            if (query.UnitId is { } unitId)
-            {
-                rows = rows.Where(r => r.StockEntry.UnitId == unitId.Value);
-            }
-
-            if (query.UnlocatedOnly)
-            {
-                rows = rows.Where(r => r.StockEntry.LocationId == null);
-            }
-            else if (query.LocationId is { } locationId)
-            {
-                rows = rows.Where(r => r.StockEntry.LocationId == locationId.Value);
-            }
-        }
+        var rows = MatchingRows(ScopedRows(query.InventoryId), query);
 
         // The candidate cap is applied by the database too: a reference matching thousands of rows
         // still only ever materializes the few needed to decide "one match", "these candidates", or
@@ -106,6 +82,34 @@ public sealed class SqlStockStore(MultiChannelAgentDbContext db) : IStockStore
             .ToListAsync(cancellationToken);
 
         return matches.Select(ToSummary).ToList();
+    }
+
+    /// <summary>Applies one Find's exact matching: by opaque identity, else by normalized name with any narrowing.</summary>
+    private static IQueryable<JoinedRow> MatchingRows(IQueryable<JoinedRow> rows, StockFindQuery query)
+    {
+        if (query.StockEntryId is { } stockEntryId)
+        {
+            return rows.Where(r => r.StockEntry.Id == stockEntryId.Value);
+        }
+
+        var normalizedNameReference = query.NormalizedNameReference;
+        rows = rows.Where(r => r.StockEntry.NormalizedName == normalizedNameReference);
+
+        if (query.UnitId is { } unitId)
+        {
+            rows = rows.Where(r => r.StockEntry.UnitId == unitId.Value);
+        }
+
+        if (query.UnlocatedOnly)
+        {
+            rows = rows.Where(r => r.StockEntry.LocationId == null);
+        }
+        else if (query.LocationId is { } locationId)
+        {
+            rows = rows.Where(r => r.StockEntry.LocationId == locationId.Value);
+        }
+
+        return rows;
     }
 
     /// <summary>
@@ -120,6 +124,31 @@ public sealed class SqlStockStore(MultiChannelAgentDbContext db) : IStockStore
         public required UnitEntity Unit { get; init; }
 
         public LocationEntity? Location { get; init; }
+    }
+
+    public async Task<StockMatchFacets> SummarizeMatchFacetsAsync(
+        StockFindQuery query, int maxFacetValues, CancellationToken cancellationToken)
+    {
+        var matches = MatchingRows(ScopedRows(query.InventoryId), query);
+
+        var unitNames = await matches
+            .Select(r => r.Unit.CanonicalName)
+            .Distinct()
+            .OrderBy(name => name)
+            .Take(maxFacetValues)
+            .ToListAsync(cancellationToken);
+
+        var locationNames = await matches
+            .Where(r => r.Location != null)
+            .Select(r => r.Location!.Name)
+            .Distinct()
+            .OrderBy(name => name)
+            .Take(maxFacetValues)
+            .ToListAsync(cancellationToken);
+
+        var hasUnlocated = await matches.AnyAsync(r => r.Location == null, cancellationToken);
+
+        return new StockMatchFacets(unitNames, locationNames, hasUnlocated);
     }
 
     private IQueryable<JoinedRow> ScopedRows(InventoryId inventoryId) =>

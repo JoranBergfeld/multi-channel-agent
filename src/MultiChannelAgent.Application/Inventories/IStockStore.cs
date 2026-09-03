@@ -25,4 +25,22 @@ public interface IStockStore
     /// so the caller can detect "more than the cap matched" without a separate count query.
     /// </summary>
     Task<IReadOnlyList<StockEntrySummary>> FindMatchesAsync(StockFindQuery query, int maxCandidatesPlusOne, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Summarizes what actually distinguishes the whole match set for <paramref name="query"/> - the
+    /// Units and Locations its matches occupy, bounded to <paramref name="maxFacetValues"/> values
+    /// each - so an ambiguous answer can offer narrowing a Participant can really act on rather than
+    /// guessing from the few candidates it happened to show. Computed by the database, never by
+    /// loading the matches.
+    /// </summary>
+    Task<StockMatchFacets> SummarizeMatchFacetsAsync(StockFindQuery query, int maxFacetValues, CancellationToken cancellationToken);
 }
+
+/// <summary>
+/// What the matches of one Find differ by: the Unit canonical names and Location names they occupy
+/// (each bounded and in display order), and whether any of them is kept nowhere in particular.
+/// </summary>
+public sealed record StockMatchFacets(
+    IReadOnlyList<string> UnitCanonicalNames,
+    IReadOnlyList<string> LocationNames,
+    bool HasUnlocatedMatches);

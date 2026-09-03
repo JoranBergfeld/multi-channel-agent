@@ -37,7 +37,7 @@ public class StockToolDispatcherTests
         var referenceStore = new InMemoryInventoryReferenceStore();
         var dispatcher = new StockToolDispatcher(
             new StockListingService(stockStore, referenceStore, authorizationService),
-            new StockFindingService(stockStore, authorizationService));
+            new StockFindingService(stockStore, referenceStore, authorizationService));
 
         return (dispatcher, stockStore);
     }
@@ -208,5 +208,64 @@ public class StockToolDispatcherTests
         var decision = await dispatcher.DispatchAsync(proposal, Context(Viewer, SomeInventory), Now, CancellationToken.None);
 
         Assert.Empty(decision.Deliveries);
+    }
+    // Wording a Participant can trust: an answer that shows five of many must say so, and must offer
+    // narrowing that would really change the result.
+    [Fact]
+    public async Task An_oversized_ambiguous_answer_says_plainly_that_more_matched_and_how_to_narrow()
+    {
+        var (dispatcher, stockStore) = CreateDispatcher();
+        var boxUnit = new UnitId(Guid.Parse("55555555-5555-5555-5555-555555555555"));
+        for (var i = 0; i < 7; i++)
+        {
+            stockStore.Add(SomeInventory, new StockEntrySummary(
+                new StockEntryId(Guid.Parse($"{i + 1:00000000}-0000-0000-0000-000000000000")),
+                "Bolts",
+                "bolts",
+                i % 2 == 0 ? EachUnit : boxUnit,
+                i % 2 == 0 ? "each" : "box",
+                new LocationId(Guid.NewGuid()),
+                $"Shelf {(char)('A' + i)}",
+                null,
+                Quantity.Create(1m)));
+        }
+
+        var proposal = new ToolCallProposal("find_stock", new Dictionary<string, string> { ["reference"] = "Bolts" });
+        var decision = await dispatcher.DispatchAsync(proposal, Context(Viewer, SomeInventory), Now, CancellationToken.None);
+
+        Assert.Equal(OutcomeCategory.Ambiguous, decision.Category);
+        Assert.Contains("More than 5 Stock Entries match", decision.Summary);
+        Assert.Contains("showing the first 5", decision.Summary);
+        Assert.Contains("Narrow by", decision.Summary);
+        Assert.Contains("\"hasMoreCandidates\":true", decision.Payload);
+        Assert.Contains("narrowingHints", decision.Payload);
+    }
+
+    [Fact]
+    public async Task A_small_ambiguous_answer_never_claims_more_matched_than_did()
+    {
+        var (dispatcher, stockStore) = CreateDispatcher();
+        stockStore.Add(SomeInventory, Row("Bolts", 1m, "10000000"));
+        stockStore.Add(SomeInventory, Row("Bolts", 1m, "20000000"));
+
+        var proposal = new ToolCallProposal("find_stock", new Dictionary<string, string> { ["reference"] = "Bolts" });
+        var decision = await dispatcher.DispatchAsync(proposal, Context(Viewer, SomeInventory), Now, CancellationToken.None);
+
+        Assert.Equal("2 Stock Entries match. Choose one.", decision.Summary);
+        Assert.Contains("\"hasMoreCandidates\":false", decision.Payload);
+    }
+
+    [Fact]
+    public async Task Find_narrowing_args_reach_the_deterministic_service_as_exact_references()
+    {
+        var (dispatcher, stockStore) = CreateDispatcher();
+        stockStore.Add(SomeInventory, Row("Bolts", 1m, "10000000"));
+
+        var proposal = new ToolCallProposal(
+            "find_stock", new Dictionary<string, string> { ["reference"] = "Bolts", ["location"] = "Shelf Z" });
+        var decision = await dispatcher.DispatchAsync(proposal, Context(Viewer, SomeInventory), Now, CancellationToken.None);
+
+        Assert.Equal(OutcomeCategory.NotFound, decision.Category);
+        Assert.Equal("reference_not_found", decision.Code);
     }
 }

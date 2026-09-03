@@ -95,22 +95,40 @@ public sealed class StockToolDispatcher(StockListingService listingService, Stoc
         DateTimeOffset now,
         CancellationToken cancellationToken)
     {
-        var reference = untrustedArgs.GetValueOrDefault("reference");
+        var request = new StockFindRequest
+        {
+            Reference = untrustedArgs.GetValueOrDefault("reference"),
+            UnitReference = untrustedArgs.GetValueOrDefault("unit"),
+            LocationReference = untrustedArgs.GetValueOrDefault("location"),
+            UnlocatedOnly = ParseFlag(untrustedArgs, "unlocated"),
+        };
 
         var result = await findingService.FindAsync(
-            context.ParticipantId, inventoryId, reference, context.ChannelConversationId.Value, now, cancellationToken);
+            context.ParticipantId, inventoryId, request, context.ChannelConversationId.Value, now, cancellationToken);
 
         return result.Kind switch
         {
             StockFindResultKind.Completed => Completed(
                 "completed",
                 $"Found {result.View!.Candidates[0].Name}.",
-                JsonSerializer.Serialize(new StockFindPayload(1, "stock_find", result.View.Candidates, false), PayloadOptions)),
+                JsonSerializer.Serialize(
+                    new StockFindPayload(1, "stock_find", result.View.Candidates, false, NarrowingHintsPayload.None), PayloadOptions)),
             StockFindResultKind.Ambiguous => Ambiguous(
                 "ambiguous",
-                $"{result.View!.Candidates.Count} Stock Entries matched; narrow your request.",
-                JsonSerializer.Serialize(new StockFindPayload(1, "stock_find", result.View.Candidates, result.View.HasMoreCandidates), PayloadOptions)),
+                SummarizeAmbiguity(result.View!),
+                JsonSerializer.Serialize(
+                    new StockFindPayload(
+                        1,
+                        "stock_find",
+                        result.View!.Candidates,
+                        result.View.HasMoreCandidates,
+                        NarrowingHintsPayload.From(result.View.NarrowingHints)),
+                    PayloadOptions)),
             StockFindResultKind.NotFound => Semantic(OutcomeCategory.NotFound, "not_found", "No matching Stock Entry was found."),
+            StockFindResultKind.ReferenceNotFound => Semantic(
+                OutcomeCategory.NotFound,
+                "reference_not_found",
+                "That Unit or Location does not exist in this Inventory."),
             StockFindResultKind.Invalid => Semantic(OutcomeCategory.Invalid, "invalid_reference", "That request could not be understood."),
             _ => Semantic(OutcomeCategory.Forbidden, "forbidden", "That request could not be completed."),
         };
@@ -127,6 +145,39 @@ public sealed class StockToolDispatcher(StockListingService listingService, Stoc
     /// </summary>
     private static int? ParsePageSize(IReadOnlyDictionary<string, string> untrustedArgs) =>
         untrustedArgs.TryGetValue("pageSize", out var raw) && int.TryParse(raw, out var parsed) ? parsed : null;
+
+    /// <summary>
+    /// States exactly what was matched and shown, never more. When more matched than the cap allows,
+    /// the wording says so instead of implying the shown candidates are all of them, and it offers
+    /// the narrowing the matches genuinely differ by.
+    /// </summary>
+    private static string SummarizeAmbiguity(StockFindView view)
+    {
+        var shown = view.Candidates.Count;
+        var opening = view.HasMoreCandidates
+            ? $"More than {shown} Stock Entries match; showing the first {shown}."
+            : $"{shown} Stock Entries match.";
+
+        var narrowings = new List<string>();
+        if (view.NarrowingHints.Units.Count > 0)
+        {
+            narrowings.Add($"unit ({string.Join(", ", view.NarrowingHints.Units)})");
+        }
+
+        if (view.NarrowingHints.Locations.Count > 0)
+        {
+            narrowings.Add($"location ({string.Join(", ", view.NarrowingHints.Locations)})");
+        }
+
+        if (view.NarrowingHints.IncludesUnlocated)
+        {
+            narrowings.Add("unlocated stock");
+        }
+
+        return narrowings.Count == 0
+            ? $"{opening} Choose one."
+            : $"{opening} Narrow by {string.Join(" or ", narrowings)}.";
+    }
 
     private static string Summarize(StockListView view) => view.Rows.Count switch
     {
@@ -178,5 +229,19 @@ public sealed class StockToolDispatcher(StockListingService listingService, Stoc
 
     private sealed record StockListPayload(int Version, string Kind, IReadOnlyList<StockRowView> Rows, string? NextCursor, bool HasMore);
 
-    private sealed record StockFindPayload(int Version, string Kind, IReadOnlyList<StockRowView> Candidates, bool HasMoreCandidates);
+    private sealed record StockFindPayload(
+        int Version,
+        string Kind,
+        IReadOnlyList<StockRowView> Candidates,
+        bool HasMoreCandidates,
+        NarrowingHintsPayload NarrowingHints);
+
+    /// <summary>The narrowing a client can offer as choices; empty lists mean "nothing here would change the answer".</summary>
+    private sealed record NarrowingHintsPayload(IReadOnlyList<string> Units, IReadOnlyList<string> Locations, bool IncludesUnlocated)
+    {
+        public static readonly NarrowingHintsPayload None = new([], [], false);
+
+        public static NarrowingHintsPayload From(StockNarrowingHints hints) =>
+            new(hints.Units, hints.Locations, hints.IncludesUnlocated);
+    }
 }

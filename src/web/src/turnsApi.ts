@@ -44,11 +44,19 @@ export interface StockListPayload {
   hasMore: boolean;
 }
 
+/** What the matches genuinely differ by, so an ambiguous answer can offer choices that change it. */
+export interface StockNarrowingHints {
+  units: string[];
+  locations: string[];
+  includesUnlocated: boolean;
+}
+
 export interface StockFindPayload {
   version: number;
   kind: 'stock_find';
   candidates: StockRowView[];
   hasMoreCandidates: boolean;
+  narrowingHints: StockNarrowingHints;
 }
 
 export type TurnOutcomePayload = StockListPayload | StockFindPayload;

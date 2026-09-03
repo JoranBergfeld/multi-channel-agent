@@ -62,7 +62,7 @@ public class TurnProcessingCoordinatorTests
         var referenceStore = new InMemoryInventoryReferenceStore();
         var toolDispatcher = new StockToolDispatcher(
             new StockListingService(stockStore, referenceStore, authorizationService),
-            new StockFindingService(stockStore, authorizationService));
+            new StockFindingService(stockStore, referenceStore, authorizationService));
 
         var coordinator = new TurnProcessingCoordinator(
             inbox,

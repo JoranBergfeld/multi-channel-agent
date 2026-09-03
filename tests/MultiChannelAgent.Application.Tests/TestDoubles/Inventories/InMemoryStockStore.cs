@@ -39,17 +39,30 @@ public sealed class InMemoryStockStore : IStockStore
 
     public Task<IReadOnlyList<StockEntrySummary>> FindMatchesAsync(StockFindQuery query, int maxCandidatesPlusOne, CancellationToken cancellationToken)
     {
+        var ordered = Matches(query).OrderBy(r => r, StockEntryOrdering.ByDisplayOrder).Take(maxCandidatesPlusOne).ToList();
+        return Task.FromResult<IReadOnlyList<StockEntrySummary>>(ordered);
+    }
+
+    public Task<StockMatchFacets> SummarizeMatchFacetsAsync(StockFindQuery query, int maxFacetValues, CancellationToken cancellationToken)
+    {
+        var matches = Matches(query).ToList();
+
+        return Task.FromResult(new StockMatchFacets(
+            matches.Select(r => r.UnitCanonicalName).Distinct().OrderBy(name => name, StringComparer.Ordinal).Take(maxFacetValues).ToList(),
+            matches.Where(r => r.LocationName is not null).Select(r => r.LocationName!).Distinct().OrderBy(name => name, StringComparer.Ordinal).Take(maxFacetValues).ToList(),
+            matches.Any(r => r.LocationId is null)));
+    }
+
+    private IEnumerable<StockEntrySummary> Matches(StockFindQuery query)
+    {
         var scoped = _rows.Where(r => r.InventoryId == query.InventoryId).Select(r => r.Row);
 
-        IEnumerable<StockEntrySummary> matches = query.StockEntryId is { } id
+        return query.StockEntryId is { } id
             ? scoped.Where(r => r.Id == id)
             : scoped
                 .Where(r => r.NormalizedName == query.NormalizedNameReference)
                 .Where(r => query.UnitId is null || r.UnitId == query.UnitId)
                 .Where(r => !query.UnlocatedOnly || r.LocationId is null)
                 .Where(r => query.UnlocatedOnly || query.LocationId is null || r.LocationId == query.LocationId);
-
-        var ordered = matches.OrderBy(r => r, StockEntryOrdering.ByDisplayOrder).Take(maxCandidatesPlusOne).ToList();
-        return Task.FromResult<IReadOnlyList<StockEntrySummary>>(ordered);
     }
 }

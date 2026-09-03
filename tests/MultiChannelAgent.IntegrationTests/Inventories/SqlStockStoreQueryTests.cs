@@ -225,4 +225,30 @@ public sealed class SqlStockStoreQueryTests : IDisposable
             return ValueTask.FromResult(result);
         }
     }
+    // The narrowing an ambiguous Find offers is computed by the database over the whole match set,
+    // bounded - never by loading the matches to inspect them.
+    [Fact]
+    public async Task Match_facets_are_summarized_by_the_database_over_the_whole_match_set()
+    {
+        var shelves = new[] { "Shelf A", "Shelf B", "Shelf C" };
+        foreach (var shelf in shelves)
+        {
+            SeedStock("Bolts", 1m, SeedLocation(shelf));
+        }
+
+        SeedStock("Bolts", 1m);
+
+        using var db = CreateContext();
+        var store = new SqlStockStore(db);
+        _executedCommands.Clear();
+
+        var facets = await store.SummarizeMatchFacetsAsync(
+            StockFindQuery.ByName(new InventoryId(_inventoryId), "Bolts", unitId: null, locationId: null), 2, CancellationToken.None);
+
+        Assert.Equal(["each"], facets.UnitCanonicalNames);
+        Assert.Equal(["Shelf A", "Shelf B"], facets.LocationNames);
+        Assert.True(facets.HasUnlocatedMatches);
+        Assert.All(_executedCommands, command => Assert.Contains("WHERE", command, StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(_executedCommands, command => command.Contains("LIMIT", StringComparison.OrdinalIgnoreCase));
+    }
 }

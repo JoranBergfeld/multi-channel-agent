@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { getTurnOutcome, submitTurn, type StockRowView, type TurnOutcomeView } from './turnsApi';
+import {
+  getTurnOutcome,
+  submitTurn,
+  type StockNarrowingHints,
+  type StockRowView,
+  type TurnOutcomeView,
+} from './turnsApi';
 
 const POLL_INTERVAL_MS = 1500;
 
@@ -26,6 +32,25 @@ function StockRows({ rows }: { rows: StockRowView[] }) {
       </tbody>
     </table>
   );
+}
+
+function NarrowingHints({ hints }: { hints: StockNarrowingHints }) {
+  const suggestions: string[] = [];
+  if (hints.units.length > 0) {
+    suggestions.push(`unit (${hints.units.join(', ')})`);
+  }
+  if (hints.locations.length > 0) {
+    suggestions.push(`location (${hints.locations.join(', ')})`);
+  }
+  if (hints.includesUnlocated) {
+    suggestions.push('unlocated stock');
+  }
+
+  if (suggestions.length === 0) {
+    return null;
+  }
+
+  return <p>Narrow by {suggestions.join(' or ')}.</p>;
 }
 
 interface TurnTracerProps {
@@ -105,7 +130,9 @@ function TurnTracer({ csrfToken, onTerminalOutcome }: TurnTracerProps) {
     <section>
       <h2>Conversation</h2>
       <p>
-        Try <code>list stock</code>, <code>list stock including zero</code>, or <code>find &lt;name&gt;</code>.
+        Try <code>list stock</code>, <code>list stock including zero</code>, <code>list stock in &lt;location&gt;</code>,{' '}
+        <code>list stock unit &lt;unit&gt;</code>, <code>list stock unlocated</code>,{' '}
+        <code>list stock page size &lt;n&gt;</code>, or <code>find &lt;name&gt;</code>.
       </p>
       <form onSubmit={handleSubmit}>
         <label htmlFor="contentText">Message</label>
@@ -164,7 +191,10 @@ function TurnTracer({ csrfToken, onTerminalOutcome }: TurnTracerProps) {
             <>
               <h3>Candidates</h3>
               <StockRows rows={outcome.payload.candidates} />
-              {outcome.payload.hasMoreCandidates && <p>More than five candidates matched - narrow your request.</p>}
+              {outcome.payload.hasMoreCandidates && (
+                <p>More matched than are shown here - narrow your request to see the rest.</p>
+              )}
+              <NarrowingHints hints={outcome.payload.narrowingHints} />
             </>
           )}
 
