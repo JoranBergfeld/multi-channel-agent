@@ -21,6 +21,9 @@ public sealed class ConversationTestClient
 
     public string CsrfToken { get; private set; } = string.Empty;
 
+    /// <summary>The tenant identifier this client signed in as - what an Owner names when granting it a role.</summary>
+    public string ParticipantIdentifier { get; private set; } = string.Empty;
+
     public static HttpClient CreateHttpsClient(WebApplicationFactory<Program> factory) =>
         factory.CreateClient(new WebApplicationFactoryClientOptions
         {
@@ -33,9 +36,16 @@ public sealed class ConversationTestClient
     {
         var participant = new ConversationTestClient(client);
 
+        participant.ParticipantIdentifier = Guid.NewGuid().ToString();
+
         var signInResponse = await participant.SendAsync(new HttpRequestMessage(HttpMethod.Post, "/api/test/sign-in")
         {
-            Content = JsonContent.Create(new { participantId = Guid.NewGuid().ToString(), displayName, activeTenantMember = true }),
+            Content = JsonContent.Create(new
+            {
+                participantId = participant.ParticipantIdentifier,
+                displayName,
+                activeTenantMember = true,
+            }),
         });
         Assert.Equal(HttpStatusCode.OK, signInResponse.StatusCode);
 
@@ -91,6 +101,19 @@ public sealed class ConversationTestClient
     {
         var response = await SendAsync(new HttpRequestMessage(HttpMethod.Post, $"/api/inventories/{inventoryId}/select"), withCsrf: true);
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    /// <summary>Grants another Participant a role in an Inventory this client Owns.</summary>
+    public async Task GrantMembershipAsync(Guid inventoryId, string targetIdentifier, string role)
+    {
+        var response = await SendAsync(
+            new HttpRequestMessage(HttpMethod.Put, $"/api/inventories/{inventoryId}/members")
+            {
+                Content = JsonContent.Create(new { targetIdentifier, role }),
+            },
+            withCsrf: true);
+
+        Assert.True(response.IsSuccessStatusCode, $"Granting {role} failed with {response.StatusCode}.");
     }
 
     public async Task<HttpResponseMessage> SubmitTurnAsync(string nativeMessageId, string contentText) =>

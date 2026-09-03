@@ -224,4 +224,15 @@ public sealed class StockConversationScenarioTests : SqlIntegrationTestBase
 
         await StockReadDeliveryScenario.RunAsync(Factory!);
     }
+
+    // Every stock mutation acceptance criterion for #31, end to end against real SQL Server with
+    // production migrations applied. StockMutationSqliteTests proves the identical behavior
+    // Docker-free.
+    [SkippableFact]
+    public async Task Adding_removing_and_setting_stock_through_a_web_conversation_behaves_exactly_as_specified()
+    {
+        Skip.IfNot(DockerAvailable, "Docker is not available in this environment; skipping the SQL-backed Stock mutation scenario.");
+
+        await StockMutationScenario.RunAsync(Factory!);
+    }
 }
