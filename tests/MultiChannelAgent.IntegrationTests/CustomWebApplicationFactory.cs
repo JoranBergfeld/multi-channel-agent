@@ -1,9 +1,11 @@
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
+using MultiChannelAgent.Infrastructure.Persistence;
 
 namespace MultiChannelAgent.IntegrationTests;
 
@@ -28,6 +30,8 @@ public sealed class CustomWebApplicationFactory(string connectionString) : WebAp
         builder.ConfigureServices(services =>
         {
             services.RemoveAll<IHostedService>();
+            services.RemoveAll<DbContextOptions<MultiChannelAgentDbContext>>();
+            services.AddDbContext<MultiChannelAgentDbContext>(options => options.UseSqlServer(connectionString));
         });
     }
 }
