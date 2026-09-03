@@ -34,12 +34,21 @@ public static class ServiceCollectionExtensions
         services.AddScoped<IParticipantStore, SqlParticipantStore>();
         services.AddScoped<IInventoryStore, SqlInventoryStore>();
         services.AddScoped<IActiveInventorySelectionStore, SqlActiveInventorySelectionStore>();
+        services.AddScoped<IInventoryAuthorizationAuditStore, SqlInventoryAuthorizationAuditStore>();
+        services.AddScoped<IInventoryMembershipStore, SqlInventoryMembershipStore>();
+        services.AddScoped<IInventoryOwnershipStore, SqlInventoryOwnershipStore>();
+        services.AddScoped<IInventoryRecoveryStore, SqlInventoryRecoveryStore>();
+        services.AddSingleton<ITenantMemberDirectory, PlaceholderTenantMemberDirectory>();
         services.AddScoped<IAuthTicketRepository, SqlAuthTicketRepository>();
         services.AddScoped<ParticipantSessionService>();
         services.AddScoped<InventoryCreationService>();
         services.AddScoped<InventoryListingService>();
+        services.AddScoped<InventoryAuthorizationService>();
         services.AddScoped<InventorySelectionService>();
         services.AddScoped<InventoryBootstrapService>();
+        services.AddScoped<InventoryMembershipService>();
+        services.AddScoped<InventoryOwnershipTransferService>();
+        services.AddScoped<InventoryRecoveryService>();
 
         return services;
     }

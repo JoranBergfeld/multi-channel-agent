@@ -18,7 +18,8 @@ public class InventorySelectionServiceTests
         var creation = new InventoryCreationService(inventoryStore);
         var view = creation.CreateAsync(Member, "Owner Name", "Warehouse", "req-1", Now, CancellationToken.None).GetAwaiter().GetResult();
         var selectionStore = new InMemoryActiveInventorySelectionStore();
-        var service = new InventorySelectionService(inventoryStore, selectionStore);
+        var authorizationService = new InventoryAuthorizationService(inventoryStore, new InMemoryInventoryAuthorizationAuditStore(selectionStore));
+        var service = new InventorySelectionService(authorizationService, selectionStore);
 
         return (service, inventoryStore, selectionStore, new InventoryId(Guid.Parse(view.Id)));
     }

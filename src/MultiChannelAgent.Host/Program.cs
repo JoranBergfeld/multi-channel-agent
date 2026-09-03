@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
+using MultiChannelAgent.Application.Inventories;
 using MultiChannelAgent.Host.Authentication;
 using MultiChannelAgent.Host.Authorization;
 using MultiChannelAgent.Host.Endpoints;
@@ -20,6 +21,14 @@ var authenticationProvider = builder.Configuration["Authentication:Provider"] ??
 var challengeScheme = string.Equals(authenticationProvider, "Test", StringComparison.OrdinalIgnoreCase)
     ? ProviderSchemes.Test
     : ProviderSchemes.Entra;
+
+if (challengeScheme == ProviderSchemes.Test)
+{
+    // Overrides the production placeholder directory adapter with a deterministic double tests
+    // control entirely through HTTP (see TestAuthEndpoints) - never exercising the real,
+    // not-yet-wired Microsoft Graph boundary outside Production.
+    builder.Services.AddSingleton<ITenantMemberDirectory, TestTenantMemberDirectory>();
+}
 
 builder.Services.AddMultiChannelAgentAuthentication(builder.Configuration, builder.Environment);
 builder.Services.AddMultiChannelAgentAuthorization();
@@ -58,6 +67,8 @@ app.UseAuthorization();
 app.MapTurnEndpoints();
 app.MapSessionEndpoints();
 app.MapInventoryEndpoints();
+app.MapInventoryGovernanceEndpoints();
+app.MapInventoryRecoveryEndpoints();
 app.MapAuthEndpoints(challengeScheme);
 
 if (challengeScheme == ProviderSchemes.Test)

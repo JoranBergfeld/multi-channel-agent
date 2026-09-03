@@ -111,4 +111,36 @@ public sealed class InMemoryInventoryStore : IInventoryStore
             _memberships.RemoveAll(m => m.InventoryId == inventoryId && m.ParticipantId == participantId);
         }
     }
+
+    /// <summary>Test-only helper mirroring the governance stores' upsert-or-change-role behavior.</summary>
+    public void SetRole(InventoryId inventoryId, ParticipantId participantId, MembershipRole role, DateTimeOffset createdAt)
+    {
+        lock (_gate)
+        {
+            var index = _memberships.FindIndex(m => m.InventoryId == inventoryId && m.ParticipantId == participantId);
+            if (index >= 0)
+            {
+                _memberships[index] = _memberships[index] with { Role = role };
+            }
+            else
+            {
+                _memberships.Add(new Membership
+                {
+                    InventoryId = inventoryId,
+                    ParticipantId = participantId,
+                    Role = role,
+                    CreatedAt = createdAt,
+                });
+            }
+        }
+    }
+
+    /// <summary>Test-only helper to seed an Inventory row directly, without the Owner-Membership side effect <see cref="CreateAsync"/> has.</summary>
+    public void AddInventoryRecord(Inventory inventory)
+    {
+        lock (_gate)
+        {
+            _inventories.Add(inventory);
+        }
+    }
 }
