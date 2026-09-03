@@ -448,8 +448,7 @@ public class StockMutationServiceTests
     }
 
     [Fact]
-    public async Task Adding_zero_is_not_an_Add_and_is_refused_as_invalid()
-    {
+    public async Task Adding_zero_is_not_an_Add_and_is_refused_as_invalid()    {
         var harness = CreateHarness();
         harness.StockStore.Add(SomeInventory, Row("Steel Bolts", 5m, "10000000"));
 
@@ -462,6 +461,30 @@ public class StockMutationServiceTests
 
         Assert.Equal(StockMutationResultKind.Invalid, result.Kind);
         Assert.Equal("invalid_quantity", result.Code);
+    }
+
+    [Fact]
+    public async Task An_Add_whose_total_could_no_longer_be_stored_exactly_is_refused_as_out_of_bounds()
+    {
+        var harness = CreateHarness();
+        var row = Row("Steel Bolts", 999_999_999_999_999_999m, "10000000");
+        harness.StockStore.Add(SomeInventory, row);
+
+        var result = await MutateAsync(harness, Editor, new StockMutationRequest
+        {
+            Kind = StockMutationKind.Add,
+            Reference = "Steel Bolts",
+            QuantityText = "1",
+        });
+
+        Assert.Equal(StockMutationResultKind.Invalid, result.Kind);
+        Assert.Equal("quantity_out_of_bounds", result.Code);
+        Assert.Null(result.View);
+
+        // The refusal is exactly that: the Stock Entry still carries what it did, and nothing was audited.
+        Assert.Equal(
+            "999999999999999999", harness.StockStore.Find(SomeInventory, row.Id)!.Quantity.ToInvariantText());
+        Assert.Empty(harness.MutationStore.AuditFacts);
     }
 
     [Fact]
