@@ -19,17 +19,26 @@ public sealed record StockFindQuery
 
     public LocationId? LocationId { get; init; }
 
+    /// <summary>Narrows to Stock kept nowhere in particular; mutually exclusive with <see cref="LocationId"/>.</summary>
+    public bool UnlocatedOnly { get; init; }
+
     public static StockFindQuery ById(InventoryId inventoryId, StockEntryId stockEntryId) => new()
     {
         InventoryId = inventoryId,
         StockEntryId = stockEntryId,
     };
 
-    public static StockFindQuery ByName(InventoryId inventoryId, string? nameReference, UnitId? unitId, LocationId? locationId)
+    public static StockFindQuery ByName(
+        InventoryId inventoryId, string? nameReference, UnitId? unitId, LocationId? locationId, bool unlocatedOnly = false)
     {
         if (string.IsNullOrWhiteSpace(nameReference))
         {
             throw new ArgumentException("Value must not be blank.", nameof(nameReference));
+        }
+
+        if (unlocatedOnly && locationId is not null)
+        {
+            throw new ArgumentException("A Location narrowing and an unlocated-only narrowing are mutually exclusive.", nameof(unlocatedOnly));
         }
 
         return new StockFindQuery
@@ -38,6 +47,7 @@ public sealed record StockFindQuery
             NormalizedNameReference = NameNormalization.Normalize(nameReference),
             UnitId = unitId,
             LocationId = locationId,
+            UnlocatedOnly = unlocatedOnly,
         };
     }
 }

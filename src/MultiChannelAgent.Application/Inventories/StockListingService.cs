@@ -62,7 +62,8 @@ public sealed class StockListingService(IStockStore stockStore, InventoryAuthori
         StockListQuery query;
         try
         {
-            query = StockListQuery.Create(inventoryId, includeZero, ParseLocationId(locationId), nameFilter, pageSize, cursor);
+            query = StockListQuery.Create(
+                inventoryId, includeZero, unitId: null, ParseLocationId(locationId), unlocatedOnly: false, nameFilter, pageSize, cursor);
         }
         catch (ArgumentException)
         {

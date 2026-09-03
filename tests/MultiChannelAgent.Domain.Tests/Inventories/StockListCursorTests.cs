@@ -36,7 +36,7 @@ public class StockListCursorTests
         StockListCursor.TryDecode(cursor.Encode(), out var result);
 
         Assert.Equal(cursor, result);
-        Assert.Null(result!.LocationName);
+        Assert.Equal(StockEntryOrderKey.UnlocatedOrderKey, result!.OrderKey.LocationOrderKey);
     }
 
     [Fact]

@@ -115,6 +115,7 @@ public sealed class StockEntryRelationalModelTests : IDisposable
             Id = unitId,
             InventoryId = inventoryId,
             CanonicalName = "each",
+            NormalizedCanonicalName = "each",
             IsReserved = true,
             CreatedAt = DateTimeOffset.UtcNow,
         });

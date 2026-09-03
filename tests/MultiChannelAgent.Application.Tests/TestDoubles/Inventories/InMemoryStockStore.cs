@@ -20,7 +20,9 @@ public sealed class InMemoryStockStore : IStockStore
             .Where(r => r.InventoryId == query.InventoryId)
             .Select(r => r.Row)
             .Where(r => query.IncludeZero || r.Quantity.IsOnHand)
-            .Where(r => query.LocationId is null || r.LocationId == query.LocationId)
+            .Where(r => query.UnitId is null || r.UnitId == query.UnitId)
+            .Where(r => !query.UnlocatedOnly || r.LocationId is null)
+            .Where(r => query.UnlocatedOnly || query.LocationId is null || r.LocationId == query.LocationId)
             .Where(r => query.NameFilter is null || r.NormalizedName.Contains(NameNormalization.Normalize(query.NameFilter), StringComparison.Ordinal))
             .OrderBy(r => r, StockEntryOrdering.ByDisplayOrder)
             .ToList();
@@ -28,9 +30,7 @@ public sealed class InMemoryStockStore : IStockStore
         if (query.Cursor is { } cursor)
         {
             candidates = candidates
-                .Where(r => StockEntryOrdering.ByDisplayOrder.Compare(
-                    r,
-                    new StockEntrySummary(cursor.StockEntryId, string.Empty, cursor.NormalizedName, default, cursor.UnitCanonicalName, null, cursor.LocationName, null, default)) > 0)
+                .Where(r => StockEntryOrderKey.From(r).CompareTo(cursor.OrderKey) > 0)
                 .ToList();
         }
 
@@ -46,7 +46,8 @@ public sealed class InMemoryStockStore : IStockStore
             : scoped
                 .Where(r => r.NormalizedName == query.NormalizedNameReference)
                 .Where(r => query.UnitId is null || r.UnitId == query.UnitId)
-                .Where(r => query.LocationId is null || r.LocationId == query.LocationId);
+                .Where(r => !query.UnlocatedOnly || r.LocationId is null)
+                .Where(r => query.UnlocatedOnly || query.LocationId is null || r.LocationId == query.LocationId);
 
         var ordered = matches.OrderBy(r => r, StockEntryOrdering.ByDisplayOrder).Take(maxCandidatesPlusOne).ToList();
         return Task.FromResult<IReadOnlyList<StockEntrySummary>>(ordered);

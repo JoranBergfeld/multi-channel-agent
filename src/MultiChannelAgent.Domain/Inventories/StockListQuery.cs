@@ -17,7 +17,15 @@ public sealed record StockListQuery
 
     public required bool IncludeZero { get; init; }
 
+    public UnitId? UnitId { get; init; }
+
     public LocationId? LocationId { get; init; }
+
+    /// <summary>
+    /// Restricts the page to Stock kept nowhere in particular. Unlocated Stock is the absence of a
+    /// Location, so it can only be asked for explicitly - never named like a place.
+    /// </summary>
+    public bool UnlocatedOnly { get; init; }
 
     public string? NameFilter { get; init; }
 
@@ -28,11 +36,18 @@ public sealed record StockListQuery
     public static StockListQuery Create(
         InventoryId inventoryId,
         bool includeZero,
+        UnitId? unitId,
         LocationId? locationId,
+        bool unlocatedOnly,
         string? nameFilter,
         int? pageSize,
         string? cursor)
     {
+        if (unlocatedOnly && locationId is not null)
+        {
+            throw new ArgumentException("A Location filter and an unlocated-only filter are mutually exclusive.", nameof(unlocatedOnly));
+        }
+
         var boundedPageSize = pageSize ?? DefaultPageSize;
         if (boundedPageSize < 1 || boundedPageSize > MaxPageSize)
         {
@@ -48,7 +63,9 @@ public sealed record StockListQuery
         {
             InventoryId = inventoryId,
             IncludeZero = includeZero,
+            UnitId = unitId,
             LocationId = locationId,
+            UnlocatedOnly = unlocatedOnly,
             NameFilter = NormalizeOptional(nameFilter),
             PageSize = boundedPageSize,
             Cursor = decodedCursor,

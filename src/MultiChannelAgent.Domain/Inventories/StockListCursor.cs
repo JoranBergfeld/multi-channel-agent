@@ -5,20 +5,20 @@ using System.Text.Json.Serialization;
 namespace MultiChannelAgent.Domain.Inventories;
 
 /// <summary>
-/// An opaque, deterministic pagination cursor encoding the last row's display ordering tuple
-/// (<see cref="StockEntryOrdering"/>). Bounded pagination for List always resumes strictly after this
-/// exact tuple via keyset pagination, so paging remains stable even as unrelated rows are inserted.
-/// The wire form is base64url JSON: opaque to callers, but not intended to hide anything sensitive -
-/// it carries the same fields already visible in the row it was derived from.
+/// An opaque, deterministic pagination cursor encoding the last returned row's
+/// <see cref="StockEntryOrderKey"/>. Bounded pagination for List always resumes strictly after that
+/// exact key via keyset pagination, so paging remains stable even as unrelated rows are inserted. The
+/// wire form is base64url JSON: opaque to callers, but not intended to hide anything sensitive - it
+/// carries the same fields already visible in the row it was derived from.
 /// </summary>
-public sealed record StockListCursor(string NormalizedName, string UnitCanonicalName, string? LocationName, StockEntryId StockEntryId)
+public sealed record StockListCursor(StockEntryOrderKey OrderKey)
 {
-    public static StockListCursor FromRow(StockEntrySummary row) =>
-        new(row.NormalizedName, row.UnitCanonicalName, row.LocationName, row.Id);
+    public static StockListCursor FromRow(StockEntrySummary row) => new(StockEntryOrderKey.From(row));
 
     public string Encode()
     {
-        var json = JsonSerializer.Serialize(new CursorPayload(NormalizedName, UnitCanonicalName, LocationName, StockEntryId.Value));
+        var json = JsonSerializer.Serialize(new CursorPayload(
+            OrderKey.NormalizedName, OrderKey.UnitOrderKey, OrderKey.LocationOrderKey, OrderKey.IdOrderKey));
         var base64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(json));
         return base64.TrimEnd('=').Replace('+', '-').Replace('/', '_');
     }
@@ -44,12 +44,17 @@ public sealed record StockListCursor(string NormalizedName, string UnitCanonical
             var json = Encoding.UTF8.GetString(Convert.FromBase64String(padded));
             var payload = JsonSerializer.Deserialize<CursorPayload>(json);
 
-            if (payload is null || string.IsNullOrEmpty(payload.NormalizedName) || string.IsNullOrEmpty(payload.UnitCanonicalName))
+            if (payload is null
+                || string.IsNullOrEmpty(payload.NormalizedName)
+                || string.IsNullOrEmpty(payload.UnitOrderKey)
+                || payload.LocationOrderKey is null
+                || string.IsNullOrEmpty(payload.IdOrderKey))
             {
                 return false;
             }
 
-            result = new StockListCursor(payload.NormalizedName, payload.UnitCanonicalName, payload.LocationName, new StockEntryId(payload.StockEntryId));
+            result = new StockListCursor(new StockEntryOrderKey(
+                payload.NormalizedName, payload.UnitOrderKey, payload.LocationOrderKey, payload.IdOrderKey));
             return true;
         }
         catch (FormatException)
@@ -64,7 +69,7 @@ public sealed record StockListCursor(string NormalizedName, string UnitCanonical
 
     private sealed record CursorPayload(
         [property: JsonPropertyName("n")] string NormalizedName,
-        [property: JsonPropertyName("u")] string UnitCanonicalName,
-        [property: JsonPropertyName("l")] string? LocationName,
-        [property: JsonPropertyName("i")] Guid StockEntryId);
+        [property: JsonPropertyName("u")] string UnitOrderKey,
+        [property: JsonPropertyName("l")] string LocationOrderKey,
+        [property: JsonPropertyName("i")] string IdOrderKey);
 }

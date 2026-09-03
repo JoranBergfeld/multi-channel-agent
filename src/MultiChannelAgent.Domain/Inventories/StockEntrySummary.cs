@@ -18,33 +18,12 @@ public sealed record StockEntrySummary(
     Quantity Quantity);
 
 /// <summary>
-/// The stable deterministic display order every List and Find result is returned in: normalized name,
-/// then Unit canonical name, then Location name (unlocated stock sorts first), then Stock Entry id as
-/// the final tie-breaker so ordering never depends on database row order and opaque list cursors
-/// (which encode this same tuple) remain valid across pages.
+/// The stable deterministic display order every List and Find result is returned in, defined by
+/// <see cref="StockEntryOrderKey"/> so this domain, an opaque paging cursor, and the database itself
+/// all agree on it exactly.
 /// </summary>
 public static class StockEntryOrdering
 {
-    public static readonly IComparer<StockEntrySummary> ByDisplayOrder = Comparer<StockEntrySummary>.Create((a, b) =>
-    {
-        var byName = string.CompareOrdinal(a.NormalizedName, b.NormalizedName);
-        if (byName != 0)
-        {
-            return byName;
-        }
-
-        var byUnit = string.CompareOrdinal(a.UnitCanonicalName, b.UnitCanonicalName);
-        if (byUnit != 0)
-        {
-            return byUnit;
-        }
-
-        var byLocation = string.CompareOrdinal(a.LocationName ?? string.Empty, b.LocationName ?? string.Empty);
-        if (byLocation != 0)
-        {
-            return byLocation;
-        }
-
-        return a.Id.Value.CompareTo(b.Id.Value);
-    });
+    public static readonly IComparer<StockEntrySummary> ByDisplayOrder =
+        Comparer<StockEntrySummary>.Create((a, b) => StockEntryOrderKey.From(a).CompareTo(StockEntryOrderKey.From(b)));
 }

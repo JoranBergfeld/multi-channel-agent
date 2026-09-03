@@ -68,4 +68,34 @@ public class StockEntryOrderingTests
 
         Assert.Equal([first.Id, second.Id], ordered.Select(r => r.Id));
     }
+    // The order key is what a database ORDER BY (and a paging cursor) must reproduce exactly, so it
+    // is expressed entirely as normalized strings compared ordinally - never as, say, a Guid, whose
+    // ordering differs between .NET and a relational engine.
+    [Fact]
+    public void The_order_key_is_normalized_strings_only()
+    {
+        var key = StockEntryOrderKey.From(Row("Steel  BOLTS", "Each", "Shelf A", "11111111-1111-1111-1111-111111111111"));
+
+        Assert.Equal("steel bolts", key.NormalizedName);
+        Assert.Equal("each", key.UnitOrderKey);
+        Assert.Equal("shelf a", key.LocationOrderKey);
+        Assert.Equal("11111111-1111-1111-1111-111111111111", key.IdOrderKey);
+    }
+
+    [Fact]
+    public void Unlocated_stock_uses_the_empty_location_order_key()
+    {
+        var key = StockEntryOrderKey.From(Row("Bolts", "each", null, "11111111-1111-1111-1111-111111111111"));
+
+        Assert.Equal(StockEntryOrderKey.UnlocatedOrderKey, key.LocationOrderKey);
+    }
+
+    [Fact]
+    public void Unit_comparison_uses_the_normalized_canonical_name()
+    {
+        var upper = Row("Bolts", "BOX", null, "11111111-1111-1111-1111-111111111111");
+        var lower = Row("Bolts", "box", null, "11111111-1111-1111-1111-111111111111");
+
+        Assert.Equal(0, StockEntryOrdering.ByDisplayOrder.Compare(upper, lower));
+    }
 }

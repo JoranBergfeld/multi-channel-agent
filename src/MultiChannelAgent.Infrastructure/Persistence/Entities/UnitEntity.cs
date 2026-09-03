@@ -13,6 +13,13 @@ public sealed class UnitEntity
 
     public required string CanonicalName { get; set; }
 
+    /// <summary>
+    /// The canonical name normalized the same way every other name in this domain is. It is the
+    /// Unit component of a Stock Entry's deterministic order key, so List and Find can order in SQL
+    /// exactly as the domain does.
+    /// </summary>
+    public required string NormalizedCanonicalName { get; set; }
+
     public bool IsReserved { get; set; }
 
     public DateTimeOffset CreatedAt { get; set; }
