@@ -18,8 +18,21 @@ public sealed class ScriptedModelBoundary : IModelBoundary
     private const string ListStockIncludingZeroCommand = "list stock including zero";
     private const string FindCommandPrefix = "find ";
 
-    public Task<ModelProposal> ProposeAsync(InboundTurn turn, CancellationToken cancellationToken)
+    public Task<ModelProposal> ProposeAsync(InboundTurn turn, ModelInvocationContext context, CancellationToken cancellationToken)
     {
+        // The Foundry conversation is the conversation this invocation continues. Without one the
+        // application has not established where the Turn belongs, so answering anyway would answer
+        // outside any conversation - fail closed instead.
+        if (context.FoundryConversationId.Value == Guid.Empty || context.Generation < 1)
+        {
+            return Task.FromResult(ModelProposal.Directly(new ModelDecision
+            {
+                Category = OutcomeCategory.TransientFailure,
+                Code = "no_conversation_binding",
+                Summary = "This Turn has no established conversation to continue.",
+            }));
+        }
+
         var content = turn.ContentText.Trim();
 
         if (content == FailureMarker)

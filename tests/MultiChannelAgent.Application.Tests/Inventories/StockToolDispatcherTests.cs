@@ -42,7 +42,7 @@ public class StockToolDispatcherTests
     }
 
     private static TurnExecutionContext Context(ParticipantId participantId, InventoryId? activeInventoryId) => new(
-        TurnId.NewId(), participantId, SomeConversation, new FoundryConversationId(Guid.NewGuid()), activeInventoryId, TraceId: null);
+        TurnId.NewId(), participantId, SomeConversation, new FoundryConversationId(Guid.NewGuid()), FoundryConversationGeneration: 1, activeInventoryId, TraceId: null);
 
     [Fact]
     public async Task List_stock_tool_call_returns_a_completed_decision_with_a_typed_payload()

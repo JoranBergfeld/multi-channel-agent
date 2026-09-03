@@ -100,16 +100,23 @@ public sealed class TurnProcessingCoordinator(
     private async Task ProcessOneAsync(InboundTurn turn, CancellationToken cancellationToken)
     {
         var now = timeProvider.GetUtcNow();
-        var proposal = await modelBoundary.ProposeAsync(turn, cancellationToken);
 
         // The trusted TurnExecutionContext - Participant, ChannelConversation, Foundry conversation,
-        // and current Active Inventory - is assembled here, from the durably-accepted Turn's own
-        // identity plus a fresh authorization recheck, and is only ever built when a tool call was
-        // actually proposed. It is never derived from anything the proposal itself claims.
+        // and current Active Inventory - is assembled from the durably-accepted Turn's own identity
+        // plus a fresh authorization recheck, before the model is asked anything and for EVERY Turn,
+        // not only ones that end up calling a tool: a Turn answered directly belongs to the same
+        // conversation, and the model boundary is given that conversation to continue. It is never
+        // derived from anything the proposal itself claims.
+        var executionContext = await executionContextFactory.CreateAsync(turn, now, cancellationToken);
+
+        var proposal = await modelBoundary.ProposeAsync(
+            turn,
+            new ModelInvocationContext(executionContext.FoundryConversationId, executionContext.FoundryConversationGeneration, turn.Locale),
+            cancellationToken);
+
         var decision = proposal.Kind == ModelProposalKind.Direct
             ? proposal.Direct!
-            : await toolDispatcher.DispatchAsync(
-                proposal.ToolCall!, await executionContextFactory.CreateAsync(turn, now, cancellationToken), now, cancellationToken);
+            : await toolDispatcher.DispatchAsync(proposal.ToolCall!, executionContext, now, cancellationToken);
 
         var outcome = Outcome.Record(turn.TurnId, decision.Category, decision.Code, decision.Summary, now, decision.Payload);
 

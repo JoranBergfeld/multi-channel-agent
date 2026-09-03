@@ -16,6 +16,7 @@ public sealed record TurnExecutionContext(
     ParticipantId ParticipantId,
     ChannelConversationId ChannelConversationId,
     FoundryConversationId FoundryConversationId,
+    int FoundryConversationGeneration,
     InventoryId? ActiveInventoryId,
     string? TraceId);
 
@@ -42,6 +43,7 @@ public sealed class TurnExecutionContextFactory(
             turn.ParticipantId,
             turn.ChannelConversationId,
             binding.FoundryConversationId,
+            binding.Generation,
             activeInventoryId,
             turn.TraceId);
     }

@@ -8,6 +8,9 @@ public class ScriptedModelBoundaryTests
 {
     private static readonly ParticipantId SomeParticipant = new(Guid.Parse("11111111-1111-1111-1111-111111111111"));
 
+    private static readonly ModelInvocationContext BoundConversation = new(
+        new FoundryConversationId(Guid.Parse("99999999-9999-9999-9999-999999999999")), Generation: 1, Locale: null);
+
     private static InboundTurn Turn(string contentText) =>
         InboundTurn.Create("native-1", SomeParticipant, "conversation-1", contentText, null, DateTimeOffset.UtcNow, null);
 
@@ -16,7 +19,7 @@ public class ScriptedModelBoundaryTests
     {
         var boundary = new ScriptedModelBoundary();
 
-        var proposal = await boundary.ProposeAsync(Turn("hello"), CancellationToken.None);
+        var proposal = await boundary.ProposeAsync(Turn("hello"), BoundConversation, CancellationToken.None);
 
         Assert.Equal(ModelProposalKind.Direct, proposal.Kind);
         var decision = proposal.Direct!;
@@ -33,7 +36,7 @@ public class ScriptedModelBoundaryTests
     {
         var boundary = new ScriptedModelBoundary();
 
-        var proposal = await boundary.ProposeAsync(Turn(ScriptedModelBoundary.FailureMarker), CancellationToken.None);
+        var proposal = await boundary.ProposeAsync(Turn(ScriptedModelBoundary.FailureMarker), BoundConversation, CancellationToken.None);
 
         Assert.Equal(ModelProposalKind.Direct, proposal.Kind);
         var decision = proposal.Direct!;
@@ -50,7 +53,7 @@ public class ScriptedModelBoundaryTests
     {
         var boundary = new ScriptedModelBoundary();
 
-        var proposal = await boundary.ProposeAsync(Turn(content), CancellationToken.None);
+        var proposal = await boundary.ProposeAsync(Turn(content), BoundConversation, CancellationToken.None);
 
         Assert.Equal(ModelProposalKind.ToolCall, proposal.Kind);
         Assert.Equal("list_stock", proposal.ToolCall!.ToolName);
@@ -62,7 +65,7 @@ public class ScriptedModelBoundaryTests
     {
         var boundary = new ScriptedModelBoundary();
 
-        var proposal = await boundary.ProposeAsync(Turn("list stock including zero"), CancellationToken.None);
+        var proposal = await boundary.ProposeAsync(Turn("list stock including zero"), BoundConversation, CancellationToken.None);
 
         Assert.Equal("list_stock", proposal.ToolCall!.ToolName);
         Assert.Equal("true", proposal.ToolCall.UntrustedArgs["includeZero"]);
@@ -75,7 +78,7 @@ public class ScriptedModelBoundaryTests
     {
         var boundary = new ScriptedModelBoundary();
 
-        var proposal = await boundary.ProposeAsync(Turn(content), CancellationToken.None);
+        var proposal = await boundary.ProposeAsync(Turn(content), BoundConversation, CancellationToken.None);
 
         Assert.Equal(ModelProposalKind.ToolCall, proposal.Kind);
         Assert.Equal("find_stock", proposal.ToolCall!.ToolName);
@@ -90,8 +93,23 @@ public class ScriptedModelBoundaryTests
     {
         var boundary = new ScriptedModelBoundary();
 
-        var proposal = await boundary.ProposeAsync(Turn("delete everything"), CancellationToken.None);
+        var proposal = await boundary.ProposeAsync(Turn("delete everything"), BoundConversation, CancellationToken.None);
 
         Assert.Equal(ModelProposalKind.Direct, proposal.Kind);
+    }
+    // The Foundry conversation the Turn belongs to is trusted context the application establishes and
+    // injects; the model boundary genuinely needs it (that is the conversation it continues) and so
+    // must refuse to answer without it rather than silently answer outside any conversation.
+    [Fact]
+    public async Task Planning_without_an_established_foundry_conversation_fails_closed()
+    {
+        var boundary = new ScriptedModelBoundary();
+        var unbound = new ModelInvocationContext(default, Generation: 0, Locale: null);
+
+        var proposal = await boundary.ProposeAsync(Turn("list stock"), unbound, CancellationToken.None);
+
+        Assert.Equal(ModelProposalKind.Direct, proposal.Kind);
+        Assert.Equal(OutcomeCategory.TransientFailure, proposal.Direct!.Category);
+        Assert.Equal("no_conversation_binding", proposal.Direct.Code);
     }
 }

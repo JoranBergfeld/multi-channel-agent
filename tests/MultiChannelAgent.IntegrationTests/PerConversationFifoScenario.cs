@@ -23,7 +23,7 @@ internal static class PerConversationFifoScenario
     /// <summary>Fails the injected Turn and records the identity of every Turn the model is asked to plan, in order.</summary>
     private sealed class RecordingModelBoundary(IModelBoundary inner, List<Guid> planned, Func<bool> faultInjected) : IModelBoundary
     {
-        public Task<ModelProposal> ProposeAsync(InboundTurn turn, CancellationToken cancellationToken)
+        public Task<ModelProposal> ProposeAsync(InboundTurn turn, ModelInvocationContext context, CancellationToken cancellationToken)
         {
             planned.Add(turn.TurnId.Value);
 
@@ -32,7 +32,7 @@ internal static class PerConversationFifoScenario
                 throw new InvalidOperationException("Injected fault: this Turn cannot reach a terminal Outcome yet.");
             }
 
-            return inner.ProposeAsync(turn, cancellationToken);
+            return inner.ProposeAsync(turn, context, cancellationToken);
         }
     }
 

@@ -59,6 +59,16 @@ public sealed record ModelProposal
 }
 
 /// <summary>
+/// The trusted, application-established context one model invocation runs in: the Foundry
+/// conversation this Turn belongs to (and its generation), plus the Turn's locale. It carries no
+/// Participant, Inventory, or authorization identity - the model is never given any of those - and it
+/// is never derived from anything the model proposes. Its Foundry conversation is stable for a
+/// Participant's ChannelConversation, so a conversation's history stays coherent across Turns whether
+/// they are answered directly or through a tool call.
+/// </summary>
+public sealed record ModelInvocationContext(FoundryConversationId FoundryConversationId, int Generation, string? Locale);
+
+/// <summary>
 /// The only boundary between the durable Turn workflow and "model" behavior. It only ever proposes -
 /// it must never itself call SQL, a service, or trust anything about the caller's identity. The
 /// production implementation for this ticket is a deterministic scripted responder; a real
@@ -66,7 +76,7 @@ public sealed record ModelProposal
 /// </summary>
 public interface IModelBoundary
 {
-    Task<ModelProposal> ProposeAsync(InboundTurn turn, CancellationToken cancellationToken);
+    Task<ModelProposal> ProposeAsync(InboundTurn turn, ModelInvocationContext context, CancellationToken cancellationToken);
 }
 
 /// <summary>
