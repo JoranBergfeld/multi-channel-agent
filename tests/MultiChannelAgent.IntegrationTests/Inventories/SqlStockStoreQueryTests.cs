@@ -71,8 +71,9 @@ public sealed class SqlStockStoreQueryTests : IDisposable
         using var db = CreateContext();
         var store = new SqlStockStore(db);
 
-        var firstPage = await store.ListPageAsync(Query(pageSize: 1), CancellationToken.None);
-        var cursor = StockListCursor.FromRow(firstPage[0]);
+        var query = Query(pageSize: 1);
+        var firstPage = await store.ListPageAsync(query, CancellationToken.None);
+        var cursor = StockListCursor.FromRow(firstPage[0], query.Shape);
         var secondPage = await store.ListPageAsync(Query(pageSize: 1, cursor: cursor.Encode()), CancellationToken.None);
 
         Assert.Equal("Apple Bolts", firstPage[0].Name);

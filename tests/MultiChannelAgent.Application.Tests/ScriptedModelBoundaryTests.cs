@@ -112,4 +112,82 @@ public class ScriptedModelBoundaryTests
         Assert.Equal(OutcomeCategory.TransientFailure, proposal.Direct!.Category);
         Assert.Equal("no_conversation_binding", proposal.Direct.Code);
     }
+    // The filters and paging bounds a Participant can ask for conversationally. Every value stays
+    // untrusted free-form text - the deterministic services resolve and bound it.
+    [Fact]
+    public async Task List_stock_accepts_bounded_unit_location_and_paging_clauses()
+    {
+        var boundary = new ScriptedModelBoundary();
+
+        var proposal = await boundary.ProposeAsync(
+            Turn("list stock including zero named bolts unit boxes in Shelf A page size 5 after CURSOR123"),
+            BoundConversation,
+            CancellationToken.None);
+
+        Assert.Equal("list_stock", proposal.ToolCall!.ToolName);
+        Assert.Equal("true", proposal.ToolCall.UntrustedArgs["includeZero"]);
+        Assert.Equal("bolts", proposal.ToolCall.UntrustedArgs["nameFilter"]);
+        Assert.Equal("boxes", proposal.ToolCall.UntrustedArgs["unit"]);
+        Assert.Equal("Shelf A", proposal.ToolCall.UntrustedArgs["location"]);
+        Assert.Equal("5", proposal.ToolCall.UntrustedArgs["pageSize"]);
+        Assert.Equal("CURSOR123", proposal.ToolCall.UntrustedArgs["cursor"]);
+    }
+
+    [Fact]
+    public async Task List_stock_can_ask_for_unlocated_stock_explicitly()
+    {
+        var boundary = new ScriptedModelBoundary();
+
+        var proposal = await boundary.ProposeAsync(Turn("list stock unlocated"), BoundConversation, CancellationToken.None);
+
+        Assert.Equal("list_stock", proposal.ToolCall!.ToolName);
+        Assert.Equal("true", proposal.ToolCall.UntrustedArgs["unlocated"]);
+        Assert.False(proposal.ToolCall.UntrustedArgs.ContainsKey("location"));
+    }
+
+    // A command carrying anything unrecognized is not answered as a narrower request than was asked:
+    // it is simply not recognized as a command at all.
+    [Fact]
+    public async Task List_stock_with_an_unrecognized_clause_is_not_treated_as_a_list_command()
+    {
+        var boundary = new ScriptedModelBoundary();
+
+        var proposal = await boundary.ProposeAsync(Turn("list stock sorted by price"), BoundConversation, CancellationToken.None);
+
+        Assert.Equal(ModelProposalKind.Direct, proposal.Kind);
+    }
+
+    [Fact]
+    public async Task Find_accepts_unit_and_location_narrowing()
+    {
+        var boundary = new ScriptedModelBoundary();
+
+        var proposal = await boundary.ProposeAsync(Turn("find steel bolts unit boxes in Shelf A"), BoundConversation, CancellationToken.None);
+
+        Assert.Equal("find_stock", proposal.ToolCall!.ToolName);
+        Assert.Equal("steel bolts", proposal.ToolCall.UntrustedArgs["reference"]);
+        Assert.Equal("boxes", proposal.ToolCall.UntrustedArgs["unit"]);
+        Assert.Equal("Shelf A", proposal.ToolCall.UntrustedArgs["location"]);
+    }
+
+    [Fact]
+    public async Task Find_can_narrow_to_unlocated_stock()
+    {
+        var boundary = new ScriptedModelBoundary();
+
+        var proposal = await boundary.ProposeAsync(Turn("find steel bolts unlocated"), BoundConversation, CancellationToken.None);
+
+        Assert.Equal("steel bolts", proposal.ToolCall!.UntrustedArgs["reference"]);
+        Assert.Equal("true", proposal.ToolCall.UntrustedArgs["unlocated"]);
+    }
+
+    [Fact]
+    public async Task Find_keeps_a_reference_that_merely_contains_a_clause_word_intact()
+    {
+        var boundary = new ScriptedModelBoundary();
+
+        var proposal = await boundary.ProposeAsync(Turn("find bin liners"), BoundConversation, CancellationToken.None);
+
+        Assert.Equal("bin liners", proposal.ToolCall!.UntrustedArgs["reference"]);
+    }
 }

@@ -33,6 +33,12 @@ public sealed record StockListQuery
 
     public StockListCursor? Cursor { get; init; }
 
+    /// <summary>
+    /// The identity of this request's shape. Cursors are issued against it, and only accepted back
+    /// from a request whose shape is identical.
+    /// </summary>
+    public required StockListQueryShape Shape { get; init; }
+
     public static StockListQuery Create(
         InventoryId inventoryId,
         bool includeZero,
@@ -59,6 +65,19 @@ public sealed record StockListQuery
             throw new ArgumentException("Cursor is not a valid Stock list cursor.", nameof(cursor));
         }
 
+        var normalizedNameFilter = NormalizeOptional(nameFilter) is { } filter ? NameNormalization.Normalize(filter) : null;
+        var shape = StockListQueryShape.Compute(
+            inventoryId, includeZero, unitId, locationId, unlocatedOnly, normalizedNameFilter, boundedPageSize);
+
+        // A cursor answers "continue exactly this question". Resuming one against a different
+        // question - another Inventory, filter, on-hand setting, page size, or an older meaning of
+        // any of them - would return a page that answers neither, so it is refused outright rather
+        // than quietly reinterpreted.
+        if (decodedCursor is not null && !decodedCursor.Matches(shape))
+        {
+            throw new ArgumentException("Cursor was issued for a different Stock list request.", nameof(cursor));
+        }
+
         return new StockListQuery
         {
             InventoryId = inventoryId,
@@ -69,6 +88,7 @@ public sealed record StockListQuery
             NameFilter = NormalizeOptional(nameFilter),
             PageSize = boundedPageSize,
             Cursor = decodedCursor,
+            Shape = shape,
         };
     }
 

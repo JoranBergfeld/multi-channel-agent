@@ -20,6 +20,7 @@ public static class StockEndpoints
             Guid inventoryId,
             string? includeZero,
             string? locationId,
+            string? unlocated,
             string? nameFilter,
             string? cursor,
             ClaimsPrincipal user,
@@ -33,11 +34,14 @@ public static class StockEndpoints
             var result = await listingService.ListAsync(
                 user.GetParticipantId(),
                 new InventoryId(inventoryId),
-                includeZero: string.Equals(includeZero, "true", StringComparison.OrdinalIgnoreCase),
-                locationId,
-                nameFilter,
-                pageSize: null,
-                cursor,
+                new StockListRequest
+                {
+                    IncludeZero = string.Equals(includeZero, "true", StringComparison.OrdinalIgnoreCase),
+                    LocationReference = locationId,
+                    UnlocatedOnly = string.Equals(unlocated, "true", StringComparison.OrdinalIgnoreCase),
+                    NameFilter = nameFilter,
+                    Cursor = cursor,
+                },
                 webConversationId,
                 timeProvider.GetUtcNow(),
                 cancellationToken);
@@ -49,6 +53,8 @@ public static class StockEndpoints
                 StockAccessOutcomeKind.Completed => Results.Ok(result.View),
                 StockAccessOutcomeKind.NotFound => Results.NotFound(),
                 StockAccessOutcomeKind.Forbidden => Results.NotFound(),
+                StockAccessOutcomeKind.ReferenceNotFound => Results.ValidationProblem(
+                    new Dictionary<string, string[]> { ["locationId"] = ["That Location does not exist in this Inventory."] }),
                 StockAccessOutcomeKind.Invalid => Results.ValidationProblem(
                     new Dictionary<string, string[]> { ["cursor"] = ["cursor is not a valid Stock list cursor, or pageSize/locationId is malformed."] }),
                 _ => throw new InvalidOperationException($"Unhandled {nameof(StockAccessOutcomeKind)}: {result.Kind}."),

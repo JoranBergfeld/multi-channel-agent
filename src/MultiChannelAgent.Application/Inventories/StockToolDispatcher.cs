@@ -55,13 +55,22 @@ public sealed class StockToolDispatcher(StockListingService listingService, Stoc
         DateTimeOffset now,
         CancellationToken cancellationToken)
     {
-        var includeZero = untrustedArgs.TryGetValue("includeZero", out var rawIncludeZero) && bool.TryParse(rawIncludeZero, out var parsed) && parsed;
-        var nameFilter = untrustedArgs.GetValueOrDefault("nameFilter");
-        var cursor = untrustedArgs.GetValueOrDefault("cursor");
+        // Every value here is untrusted free-form filter text: a bad or hostile value can only ever
+        // make the request narrower, malformed, or unresolvable - never wider, and never a different
+        // Participant's or Inventory's data, which come from trusted context alone.
+        var request = new StockListRequest
+        {
+            IncludeZero = ParseFlag(untrustedArgs, "includeZero"),
+            UnitReference = untrustedArgs.GetValueOrDefault("unit"),
+            LocationReference = untrustedArgs.GetValueOrDefault("location"),
+            UnlocatedOnly = ParseFlag(untrustedArgs, "unlocated"),
+            NameFilter = untrustedArgs.GetValueOrDefault("nameFilter"),
+            PageSize = ParsePageSize(untrustedArgs),
+            Cursor = untrustedArgs.GetValueOrDefault("cursor"),
+        };
 
         var result = await listingService.ListAsync(
-            context.ParticipantId, inventoryId, includeZero, locationId: null, nameFilter, pageSize: null, cursor,
-            context.ChannelConversationId.Value, now, cancellationToken);
+            context.ParticipantId, inventoryId, request, context.ChannelConversationId.Value, now, cancellationToken);
 
         return result.Kind switch
         {
@@ -70,6 +79,10 @@ public sealed class StockToolDispatcher(StockListingService listingService, Stoc
                 Summarize(result.View!),
                 JsonSerializer.Serialize(new StockListPayload(1, "stock_list", result.View!.Rows, result.View.NextCursor, result.View.HasMore), PayloadOptions)),
             StockAccessOutcomeKind.NotFound => Semantic(OutcomeCategory.NotFound, "not_found", "No accessible Inventory is selected."),
+            StockAccessOutcomeKind.ReferenceNotFound => Semantic(
+                OutcomeCategory.NotFound,
+                "reference_not_found",
+                "That Unit or Location does not exist in this Inventory."),
             StockAccessOutcomeKind.Invalid => Semantic(OutcomeCategory.Invalid, "invalid_query", "That request could not be understood."),
             _ => Semantic(OutcomeCategory.Forbidden, "forbidden", "That request could not be completed."),
         };
@@ -102,6 +115,18 @@ public sealed class StockToolDispatcher(StockListingService listingService, Stoc
             _ => Semantic(OutcomeCategory.Forbidden, "forbidden", "That request could not be completed."),
         };
     }
+
+    /// <summary>Reads an untrusted boolean flag; anything that is not an explicit "true" is simply absent.</summary>
+    private static bool ParseFlag(IReadOnlyDictionary<string, string> untrustedArgs, string key) =>
+        untrustedArgs.TryGetValue(key, out var raw) && bool.TryParse(raw, out var parsed) && parsed;
+
+    /// <summary>
+    /// Reads an untrusted page size. An unparseable value is treated as "not asked for" (the bounded
+    /// default applies); a parseable but out-of-range one is passed through so the request is
+    /// answered as invalid rather than silently widened or narrowed.
+    /// </summary>
+    private static int? ParsePageSize(IReadOnlyDictionary<string, string> untrustedArgs) =>
+        untrustedArgs.TryGetValue("pageSize", out var raw) && int.TryParse(raw, out var parsed) ? parsed : null;
 
     private static string Summarize(StockListView view) => view.Rows.Count switch
     {

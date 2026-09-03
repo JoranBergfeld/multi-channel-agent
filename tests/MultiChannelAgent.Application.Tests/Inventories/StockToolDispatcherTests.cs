@@ -34,8 +34,9 @@ public class StockToolDispatcherTests
         var auditStore = new InMemoryInventoryAuthorizationAuditStore(new InMemoryActiveInventorySelectionStore());
         var authorizationService = new InventoryAuthorizationService(inventoryStore, auditStore);
         var stockStore = new InMemoryStockStore();
+        var referenceStore = new InMemoryInventoryReferenceStore();
         var dispatcher = new StockToolDispatcher(
-            new StockListingService(stockStore, authorizationService),
+            new StockListingService(stockStore, referenceStore, authorizationService),
             new StockFindingService(stockStore, authorizationService));
 
         return (dispatcher, stockStore);

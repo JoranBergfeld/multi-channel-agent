@@ -8,6 +8,9 @@ public enum StockAccessOutcomeKind
     Completed,
     Forbidden,
     NotFound,
+
+    /// <summary>A named Unit or Location does not exist in this Inventory - it is never created implicitly.</summary>
+    ReferenceNotFound,
     Invalid,
 }
 
@@ -25,23 +28,46 @@ public sealed record StockListView(IReadOnlyList<StockRowView> Rows, string? Nex
 public sealed record StockListResult(StockAccessOutcomeKind Kind, StockListView? View, string Code);
 
 /// <summary>
-/// Lists Stock Entries for one Inventory: defaults to On-hand Stock, bounded/paginated via
-/// <see cref="StockListQuery"/>, in the stable deterministic display order every List and Find result
-/// shares. Authorization always flows through <see cref="InventoryAuthorizationService"/> so an
+/// One List request's bounds, as named by the caller. <see cref="UnitReference"/> and
+/// <see cref="LocationReference"/> are exact references (an opaque identifier, or an exact name -
+/// for a Unit also an active alias) that this service resolves against the Inventory; they are never
+/// pattern-matched. <see cref="UnlocatedOnly"/> asks for Stock kept nowhere in particular, which can
+/// only be requested explicitly because it is the absence of a Location rather than a place.
+/// </summary>
+public sealed record StockListRequest
+{
+    public bool IncludeZero { get; init; }
+
+    public string? UnitReference { get; init; }
+
+    public string? LocationReference { get; init; }
+
+    public bool UnlocatedOnly { get; init; }
+
+    public string? NameFilter { get; init; }
+
+    public int? PageSize { get; init; }
+
+    public string? Cursor { get; init; }
+}
+
+/// <summary>
+/// Lists Stock Entries for one Inventory: defaults to On-hand Stock, bounded and filtered by
+/// <see cref="StockListRequest"/>, in the stable deterministic display order every List and Find
+/// result shares. Authorization always flows through <see cref="InventoryAuthorizationService"/> so an
 /// unauthorized Inventory is indistinguishable from one that does not exist - callers of this service
 /// only ever supply an InventoryId already scoped by trusted context, never one taken from an
 /// untrusted model-proposed argument.
 /// </summary>
-public sealed class StockListingService(IStockStore stockStore, InventoryAuthorizationService authorizationService)
+public sealed class StockListingService(
+    IStockStore stockStore,
+    IInventoryReferenceStore referenceStore,
+    InventoryAuthorizationService authorizationService)
 {
     public async Task<StockListResult> ListAsync(
         ParticipantId participantId,
         InventoryId inventoryId,
-        bool includeZero,
-        string? locationId,
-        string? nameFilter,
-        int? pageSize,
-        string? cursor,
+        StockListRequest request,
         string? channelConversationId,
         DateTimeOffset now,
         CancellationToken cancellationToken)
@@ -59,11 +85,38 @@ public sealed class StockListingService(IStockStore stockStore, InventoryAuthori
             return new StockListResult(StockAccessOutcomeKind.Forbidden, null, "forbidden");
         }
 
+        UnitId? unitId = null;
+        if (!string.IsNullOrWhiteSpace(request.UnitReference))
+        {
+            unitId = await referenceStore.ResolveUnitAsync(inventoryId, request.UnitReference, cancellationToken);
+            if (unitId is null)
+            {
+                return new StockListResult(StockAccessOutcomeKind.ReferenceNotFound, null, "reference_not_found");
+            }
+        }
+
+        LocationId? locationId = null;
+        if (!string.IsNullOrWhiteSpace(request.LocationReference))
+        {
+            locationId = await referenceStore.ResolveLocationAsync(inventoryId, request.LocationReference, cancellationToken);
+            if (locationId is null)
+            {
+                return new StockListResult(StockAccessOutcomeKind.ReferenceNotFound, null, "reference_not_found");
+            }
+        }
+
         StockListQuery query;
         try
         {
             query = StockListQuery.Create(
-                inventoryId, includeZero, unitId: null, ParseLocationId(locationId), unlocatedOnly: false, nameFilter, pageSize, cursor);
+                inventoryId,
+                request.IncludeZero,
+                unitId,
+                locationId,
+                request.UnlocatedOnly,
+                request.NameFilter,
+                request.PageSize,
+                request.Cursor);
         }
         catch (ArgumentException)
         {
@@ -73,7 +126,10 @@ public sealed class StockListingService(IStockStore stockStore, InventoryAuthori
         var page = await stockStore.ListPageAsync(query, cancellationToken);
         var hasMore = page.Count > query.PageSize;
         var rows = page.Take(query.PageSize).ToList();
-        var nextCursor = hasMore ? StockListCursor.FromRow(rows[^1]).Encode() : null;
+
+        // The cursor is issued against this exact request's shape, so resuming it can only ever
+        // continue this same question.
+        var nextCursor = hasMore ? StockListCursor.FromRow(rows[^1], query.Shape).Encode() : null;
 
         return new StockListResult(
             StockAccessOutcomeKind.Completed,
@@ -81,21 +137,11 @@ public sealed class StockListingService(IStockStore stockStore, InventoryAuthori
             "completed");
     }
 
-    private static LocationId? ParseLocationId(string? value)
-    {
-        if (string.IsNullOrWhiteSpace(value))
-        {
-            return null;
-        }
-
-        if (!Guid.TryParse(value, out var guid))
-        {
-            throw new ArgumentException("locationId must be a GUID.", nameof(value));
-        }
-
-        return new LocationId(guid);
-    }
-
     internal static StockRowView ToRowView(StockEntrySummary row) => new(
-        row.Id.ToString(), row.Name, row.UnitCanonicalName, row.LocationName, row.Note, row.Quantity.Value.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        row.Id.ToString(),
+        row.Name,
+        row.UnitCanonicalName,
+        row.LocationName,
+        row.Note,
+        row.Quantity.Value.ToString(System.Globalization.CultureInfo.InvariantCulture));
 }
