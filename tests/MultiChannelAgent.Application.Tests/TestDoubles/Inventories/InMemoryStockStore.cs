@@ -1,0 +1,54 @@
+using MultiChannelAgent.Application.Inventories;
+using MultiChannelAgent.Domain.Inventories;
+
+namespace MultiChannelAgent.Application.Tests.TestDoubles.Inventories;
+
+/// <summary>
+/// Minimal in-memory <see cref="IStockStore"/> for Application-layer unit tests: applies the same
+/// ordering, on-hand default, keyset pagination, and id-first/name-then Find resolution the real SQL
+/// store must, over a plain in-memory list instead of a database.
+/// </summary>
+public sealed class InMemoryStockStore : IStockStore
+{
+    private readonly List<(InventoryId InventoryId, StockEntrySummary Row)> _rows = [];
+
+    public void Add(InventoryId inventoryId, StockEntrySummary row) => _rows.Add((inventoryId, row));
+
+    public Task<IReadOnlyList<StockEntrySummary>> ListPageAsync(StockListQuery query, CancellationToken cancellationToken)
+    {
+        var candidates = _rows
+            .Where(r => r.InventoryId == query.InventoryId)
+            .Select(r => r.Row)
+            .Where(r => query.IncludeZero || r.Quantity.IsOnHand)
+            .Where(r => query.LocationId is null || r.LocationId == query.LocationId)
+            .Where(r => query.NameFilter is null || r.NormalizedName.Contains(NameNormalization.Normalize(query.NameFilter), StringComparison.Ordinal))
+            .OrderBy(r => r, StockEntryOrdering.ByDisplayOrder)
+            .ToList();
+
+        if (query.Cursor is { } cursor)
+        {
+            candidates = candidates
+                .Where(r => StockEntryOrdering.ByDisplayOrder.Compare(
+                    r,
+                    new StockEntrySummary(cursor.StockEntryId, string.Empty, cursor.NormalizedName, default, cursor.UnitCanonicalName, null, cursor.LocationName, null, default)) > 0)
+                .ToList();
+        }
+
+        return Task.FromResult<IReadOnlyList<StockEntrySummary>>(candidates.Take(query.PageSize + 1).ToList());
+    }
+
+    public Task<IReadOnlyList<StockEntrySummary>> FindMatchesAsync(StockFindQuery query, int maxCandidatesPlusOne, CancellationToken cancellationToken)
+    {
+        var scoped = _rows.Where(r => r.InventoryId == query.InventoryId).Select(r => r.Row);
+
+        IEnumerable<StockEntrySummary> matches = query.StockEntryId is { } id
+            ? scoped.Where(r => r.Id == id)
+            : scoped
+                .Where(r => r.NormalizedName == query.NormalizedNameReference)
+                .Where(r => query.UnitId is null || r.UnitId == query.UnitId)
+                .Where(r => query.LocationId is null || r.LocationId == query.LocationId);
+
+        var ordered = matches.OrderBy(r => r, StockEntryOrdering.ByDisplayOrder).Take(maxCandidatesPlusOne).ToList();
+        return Task.FromResult<IReadOnlyList<StockEntrySummary>>(ordered);
+    }
+}
