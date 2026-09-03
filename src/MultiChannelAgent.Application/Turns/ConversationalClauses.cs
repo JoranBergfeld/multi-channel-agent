@@ -5,7 +5,7 @@ namespace MultiChannelAgent.Application.Turns;
 /// <summary>
 /// Parses the bounded clause grammar the scripted model boundary understands: a command word
 /// followed by zero or more named clauses in any order, for example
-/// <c>list stock including zero in Shelf A page size 5</c>. Clause values are free-form text and stay
+/// <c>list stock including zero in Shelf A page size 5</c> or <c>add stock Steel Bolts quantity 5 in Shelf A</c>. Clause values are free-form text and stay
 /// untrusted - they are only ever passed on as filter arguments, never as identity - and a command
 /// carrying anything that is not a recognized clause is deliberately not recognized at all, so it
 /// falls back to the plain echo rather than being answered as a narrower request than was asked.
@@ -15,7 +15,7 @@ public static partial class ConversationalClauses
     /// <summary>Clauses that stand alone; anything a caller writes after them belongs to the next clause.</summary>
     private static readonly string[] FlagClauses = ["including zero", "unlocated"];
 
-    [GeneratedRegex(@"\b(including zero|unlocated|named|unit|in|page size|after)\b", RegexOptions.IgnoreCase)]
+    [GeneratedRegex(@"\b(including zero|unlocated|named|unit|in|page size|after|quantity|note)\b", RegexOptions.IgnoreCase)]
     private static partial Regex ClauseScanner { get; }
 
     /// <summary>
