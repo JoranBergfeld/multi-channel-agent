@@ -152,4 +152,60 @@ public sealed class SqlInboxStoreFifoTests : IDisposable
             .Options;
         return new MultiChannelAgentDbContext(options);
     }
+    // Fairness across conversations: which heads fit inside a batch must follow how long each has
+    // been waiting, never how deep its conversation happens to be. A long-running conversation's
+    // outstanding head carries a high sequence purely because it has answered many Turns before -
+    // ordering candidate heads by that sequence would let a steady trickle of brand-new conversations
+    // (all at sequence 1) keep filling every batch and starve it indefinitely.
+    [Fact]
+    public async Task An_old_head_deep_in_its_conversation_is_not_starved_by_newer_conversations()
+    {
+        using var db = CreateContext();
+        var store = new SqlInboxStore(db);
+
+        const string longRunningConversation = "conversation-long-running";
+        foreach (var answered in new[] { "native-old-1", "native-old-2", "native-old-3" })
+        {
+            await CompleteAsync(await AcceptAsync(store, answered, longRunningConversation, SameInstant.AddMinutes(-10)));
+        }
+
+        // The oldest still-waiting Turn of them all - but the fourth in its conversation.
+        var starvedHead = await AcceptAsync(store, "native-old-4", longRunningConversation, SameInstant);
+
+        // Brand-new conversations, each on its very first Turn, all accepted afterwards.
+        var newerHeads = new List<TurnId>();
+        for (var i = 1; i <= 3; i++)
+        {
+            newerHeads.Add(await AcceptAsync(store, $"native-new-{i}", $"conversation-new-{i}", SameInstant.AddSeconds(i)));
+        }
+
+        var claimed = await store.ClaimPendingAsync(2, CancellationToken.None);
+
+        Assert.Equal(2, claimed.Count);
+        Assert.Equal(starvedHead, claimed[0].TurnId);
+        Assert.Equal(newerHeads[0], claimed[1].TurnId);
+    }
+
+    // Whatever decides which heads fit must be total and stable, or the same backlog could hand a
+    // worker a different batch every pass and leave some head permanently on the wrong side of the
+    // limit.
+    [Fact]
+    public async Task Heads_accepted_at_the_very_same_instant_are_claimed_in_a_stable_order()
+    {
+        using var db = CreateContext();
+        var store = new SqlInboxStore(db);
+
+        for (var i = 1; i <= 4; i++)
+        {
+            await AcceptAsync(store, $"native-tie-{i}", $"conversation-tie-{i}", SameInstant);
+        }
+
+        var first = await store.ClaimPendingAsync(2, CancellationToken.None);
+        var second = await store.ClaimPendingAsync(2, CancellationToken.None);
+        var third = await store.ClaimPendingAsync(4, CancellationToken.None);
+
+        Assert.Equal(first.Select(t => t.TurnId), second.Select(t => t.TurnId));
+        Assert.Equal(first.Select(t => t.TurnId), third.Take(2).Select(t => t.TurnId));
+        Assert.Equal(4, third.Count);
+    }
 }

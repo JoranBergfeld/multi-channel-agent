@@ -33,8 +33,8 @@ public sealed class InboxEntryEntityConfiguration : IEntityTypeConfiguration<Inb
         // that per-conversation FIFO depends on being total.
         builder.HasIndex(e => new { e.ChannelConversationId, e.ConversationSequence }).IsUnique();
 
-        // Supports claiming pending work in acceptance order.
-        builder.HasIndex(e => new { e.Status, e.ReceivedAt });
+        // Supports claiming pending work oldest-first, by the same key the claim orders on.
+        builder.HasIndex(e => new { e.Status, e.ReceivedAtTicks });
 
         // Supports the conversation-head claim: for a candidate Turn, resolving whether its
         // ChannelConversation still has an earlier outstanding (pending or in-flight) Turn.

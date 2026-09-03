@@ -47,6 +47,14 @@ public sealed class InboxEntryEntity
 
     public DateTimeOffset ReceivedAt { get; set; }
 
+    /// <summary>
+    /// <see cref="ReceivedAt"/> as UTC ticks. Claiming orders candidate heads by how long each has
+    /// been waiting, and a DateTimeOffset is not orderable on every relational provider this model
+    /// runs on, so the same instant is also kept in a form every provider can sort. It is written
+    /// once, at acceptance, from that very value.
+    /// </summary>
+    public long ReceivedAtTicks { get; set; }
+
     public DateTimeOffset CreatedAt { get; set; }
 
     public InboxEntryStatus Status { get; set; }

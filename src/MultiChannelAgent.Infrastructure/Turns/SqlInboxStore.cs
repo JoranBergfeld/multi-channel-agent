@@ -73,6 +73,7 @@ public sealed class SqlInboxStore(MultiChannelAgentDbContext db) : IInboxStore
                 Locale = turn.Locale,
                 TraceId = turn.TraceId,
                 ReceivedAt = turn.ReceivedAt,
+                ReceivedAtTicks = turn.ReceivedAt.UtcTicks,
                 CreatedAt = turn.ReceivedAt,
                 Status = InboxEntryStatus.Pending,
             });
@@ -137,20 +138,27 @@ public sealed class SqlInboxStore(MultiChannelAgentDbContext db) : IInboxStore
         // offers its head - the earliest-accepted Turn with no still-outstanding predecessor - so no
         // batch limit, extra pass, or lease boundary can ever hand a worker a Turn whose predecessor
         // has not completed. Different conversations are unaffected by each other and progress
-        // concurrently. Ordering across conversations only decides which heads fit inside maxCount
-        // (never the order within a conversation, which the sequence already fixes), so it uses the
-        // conversation sequence with the conversation id as a stable tie-break: both are orderable on
-        // every provider, unlike a DateTimeOffset. Safe without extra row locking: callers only claim
-        // pending work while holding the "turn-processing" lease, so at most one worker runs this at
-        // a time.
+        // concurrently.
+        //
+        // Ordering across conversations decides only which heads fit inside maxCount, and it is
+        // strictly a fairness question: whoever has waited longest goes first. It therefore orders by
+        // the acceptance instant, NOT by the conversation sequence - that sequence counts how many
+        // Turns a conversation has already answered, so ordering by it would push a long-running
+        // conversation's head behind every brand-new conversation's first Turn and let a steady
+        // trickle of new conversations starve it indefinitely. The instant is compared as UTC ticks
+        // because a DateTimeOffset is not orderable on every provider, with the Turn identity as a
+        // total, stable tie-break so one backlog always yields the same batch.
+        //
+        // Safe without extra row locking: callers only claim pending work while holding the
+        // "turn-processing" lease, so at most one worker runs this at a time.
         var pending = await db.InboxEntries
             .Where(e => e.Status == InboxEntryStatus.Pending)
             .Where(e => !db.InboxEntries.Any(predecessor =>
                 predecessor.ChannelConversationId == e.ChannelConversationId
                 && predecessor.Status != InboxEntryStatus.Completed
                 && predecessor.ConversationSequence < e.ConversationSequence))
-            .OrderBy(e => e.ConversationSequence)
-            .ThenBy(e => e.ChannelConversationId)
+            .OrderBy(e => e.ReceivedAtTicks)
+            .ThenBy(e => e.TurnId)
             .Take(maxCount)
             .ToListAsync(cancellationToken);
 
