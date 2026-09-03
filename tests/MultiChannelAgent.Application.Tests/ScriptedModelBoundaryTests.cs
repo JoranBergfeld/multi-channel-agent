@@ -12,7 +12,7 @@ public class ScriptedModelBoundaryTests
         new FoundryConversationId(Guid.Parse("99999999-9999-9999-9999-999999999999")), Generation: 1, Locale: null);
 
     private static InboundTurn Turn(string contentText) =>
-        InboundTurn.Create("native-1", SomeParticipant, "conversation-1", contentText, null, DateTimeOffset.UtcNow, null);
+        TestTurns.Text("native-1", SomeParticipant, "conversation-1", contentText, null, DateTimeOffset.UtcNow, null);
 
     [Fact]
     public async Task Ordinary_unrecognized_content_produces_a_direct_completed_outcome_with_one_echo_delivery()

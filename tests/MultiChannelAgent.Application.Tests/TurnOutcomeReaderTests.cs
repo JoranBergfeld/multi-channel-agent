@@ -17,7 +17,7 @@ public class TurnOutcomeReaderTests
         var inbox = new InMemoryInboxStore();
         var outcomeStore = new InMemoryOutcomeStore();
         var deliveryStore = new InMemoryDeliveryStore();
-        var turn = InboundTurn.Create("native-1", Owner, "conversation-1", "hello", null, Now, null);
+        var turn = TestTurns.Text("native-1", Owner, "conversation-1", "hello", null, Now, null);
         await inbox.AcceptAsync(turn, CancellationToken.None);
         await outcomeStore.SaveAsync(Outcome.Completed(turn.TurnId, "echoed", "Echoed: hello", Now), CancellationToken.None);
         var delivery = Delivery.Request(turn.TurnId, "synthetic", "Echoed: hello", Now);
@@ -81,7 +81,7 @@ public class TurnOutcomeReaderTests
         var inbox = new InMemoryInboxStore();
         var outcomeStore = new InMemoryOutcomeStore();
         var deliveryStore = new InMemoryDeliveryStore();
-        var turn = InboundTurn.Create("native-2", Owner, "conversation-1", "list stock", null, Now, null);
+        var turn = TestTurns.Text("native-2", Owner, "conversation-1", "list stock", null, Now, null);
         await inbox.AcceptAsync(turn, CancellationToken.None);
         await outcomeStore.SaveAsync(
             Outcome.Completed(turn.TurnId, "completed", "1 Stock Entry found.", Now, """{"version":1,"kind":"stock_list"}"""),
@@ -104,7 +104,7 @@ public class TurnOutcomeReaderTests
         var inbox = new InMemoryInboxStore();
         var outcomeStore = new InMemoryOutcomeStore();
         var deliveryStore = new InMemoryDeliveryStore();
-        var turn = InboundTurn.Create("native-3", Owner, "conversation-1", "find nothing", null, Now, null);
+        var turn = TestTurns.Text("native-3", Owner, "conversation-1", "find nothing", null, Now, null);
         await inbox.AcceptAsync(turn, CancellationToken.None);
         await outcomeStore.SaveAsync(
             Outcome.Record(turn.TurnId, OutcomeCategory.NotFound, "not_found", "No matching Stock Entry was found.", Now),
@@ -123,7 +123,7 @@ public class TurnOutcomeReaderTests
         var inbox = new InMemoryInboxStore();
         var outcomeStore = new InMemoryOutcomeStore();
         var deliveryStore = new InMemoryDeliveryStore();
-        var turn = InboundTurn.Create("native-4", Owner, "conversation-1", "hello", null, Now, null);
+        var turn = TestTurns.Text("native-4", Owner, "conversation-1", "hello", null, Now, null);
         await inbox.AcceptAsync(turn, CancellationToken.None);
         await outcomeStore.SaveAsync(
             Outcome.SystemFailure(turn.TurnId, "model_error", "The model could not answer.", Now), CancellationToken.None);

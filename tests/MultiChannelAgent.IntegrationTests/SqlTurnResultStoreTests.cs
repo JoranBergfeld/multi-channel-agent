@@ -33,7 +33,7 @@ public sealed class SqlTurnResultStoreTests : SqlIntegrationTestBase
     {
         Skip.IfNot(DockerAvailable, "Docker is not available in this environment; skipping the real SQL atomicity scenario.");
 
-        var turn = InboundTurn.Create("native-atomicity-1", SomeParticipant, "conversation-atomicity-1", "hello", null, DateTimeOffset.UtcNow, null);
+        var turn = TestTurns.Text("native-atomicity-1", SomeParticipant, "conversation-atomicity-1", "hello", null, DateTimeOffset.UtcNow, null);
 
         using (var seedScope = Factory!.Services.CreateScope())
         {
@@ -44,7 +44,10 @@ public sealed class SqlTurnResultStoreTests : SqlIntegrationTestBase
                 NativeMessageId = turn.NativeMessageId,
                 ParticipantId = turn.ParticipantId.Value,
                 ChannelConversationId = turn.ChannelConversationId.Value,
-                ContentText = turn.ContentText,
+                Channel = turn.Channel,
+                PrincipalKind = turn.Principal.Kind,
+                PrincipalSubject = turn.Principal.Subject,
+                Capabilities = turn.Capabilities,
                 ReceivedAt = turn.ReceivedAt,
                 CreatedAt = turn.ReceivedAt,
                 Status = InboxEntryStatus.Pending,
@@ -112,8 +115,8 @@ public sealed class SqlTurnResultStoreTests : SqlIntegrationTestBase
     {
         Skip.IfNot(DockerAvailable, "Docker is not available in this environment; skipping the real SQL cross-Turn contamination scenario.");
 
-        var turnA = InboundTurn.Create("native-contamination-a", SomeParticipant, "conversation-contamination-a", "hello a", null, DateTimeOffset.UtcNow, null);
-        var turnB = InboundTurn.Create("native-contamination-b", SomeParticipant, "conversation-contamination-b", "hello b", null, DateTimeOffset.UtcNow, null);
+        var turnA = TestTurns.Text("native-contamination-a", SomeParticipant, "conversation-contamination-a", "hello a", null, DateTimeOffset.UtcNow, null);
+        var turnB = TestTurns.Text("native-contamination-b", SomeParticipant, "conversation-contamination-b", "hello b", null, DateTimeOffset.UtcNow, null);
 
         using (var seedScope = Factory!.Services.CreateScope())
         {
@@ -126,7 +129,10 @@ public sealed class SqlTurnResultStoreTests : SqlIntegrationTestBase
                     NativeMessageId = turn.NativeMessageId,
                     ParticipantId = turn.ParticipantId.Value,
                     ChannelConversationId = turn.ChannelConversationId.Value,
-                    ContentText = turn.ContentText,
+                    Channel = turn.Channel,
+                    PrincipalKind = turn.Principal.Kind,
+                    PrincipalSubject = turn.Principal.Subject,
+                    Capabilities = turn.Capabilities,
                     ReceivedAt = turn.ReceivedAt,
                     CreatedAt = turn.ReceivedAt,
                     Status = InboxEntryStatus.Pending,

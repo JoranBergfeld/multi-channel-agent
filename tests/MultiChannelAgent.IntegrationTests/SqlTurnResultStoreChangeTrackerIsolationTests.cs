@@ -100,7 +100,7 @@ public sealed class SqlTurnResultStoreChangeTrackerIsolationTests : IDisposable
 
     private TurnId SeedPendingInboxEntry(string nativeMessageId)
     {
-        var turn = InboundTurn.Create(nativeMessageId, SomeParticipant, $"conversation-{nativeMessageId}", "hello", null, DateTimeOffset.UtcNow, null);
+        var turn = TestTurns.Text(nativeMessageId, SomeParticipant, $"conversation-{nativeMessageId}", "hello", null, DateTimeOffset.UtcNow, null);
 
         _db.InboxEntries.Add(new InboxEntryEntity
         {
@@ -108,7 +108,10 @@ public sealed class SqlTurnResultStoreChangeTrackerIsolationTests : IDisposable
             NativeMessageId = turn.NativeMessageId,
             ParticipantId = turn.ParticipantId.Value,
             ChannelConversationId = turn.ChannelConversationId.Value,
-            ContentText = turn.ContentText,
+            Channel = turn.Channel,
+            PrincipalKind = turn.Principal.Kind,
+            PrincipalSubject = turn.Principal.Subject,
+            Capabilities = turn.Capabilities,
             ReceivedAt = turn.ReceivedAt,
             CreatedAt = turn.ReceivedAt,
             Status = InboxEntryStatus.Pending,

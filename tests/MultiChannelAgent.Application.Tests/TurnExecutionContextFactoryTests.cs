@@ -27,7 +27,7 @@ public class TurnExecutionContextFactoryTests
     }
 
     private static InboundTurn Turn(string conversationId, string nativeMessageId = "native-1") =>
-        InboundTurn.Create(nativeMessageId, SomeParticipant, conversationId, "list stock", null, Now, "trace-1");
+        TestTurns.Text(nativeMessageId, SomeParticipant, conversationId, "list stock", null, Now, "trace-1");
 
     [Fact]
     public async Task Assembles_a_context_carrying_the_turns_own_identity()

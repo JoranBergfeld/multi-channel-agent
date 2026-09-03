@@ -1,3 +1,5 @@
+using MultiChannelAgent.Domain.Turns;
+
 namespace MultiChannelAgent.Infrastructure.Persistence.Entities;
 
 /// <summary>
@@ -25,7 +27,19 @@ public sealed class InboxEntryEntity
     /// </summary>
     public long ConversationSequence { get; set; }
 
-    public required string ContentText { get; set; }
+    /// <summary>Which channel this Turn arrived on, for example <c>web</c>.</summary>
+    public required string Channel { get; set; }
+
+    /// <summary>How the channel authenticated the Participant behind this Turn (evidence, never authorization).</summary>
+    public ChannelPrincipalKind PrincipalKind { get; set; }
+
+    /// <summary>The channel's own authenticated subject - an Entra object id, a verified mailbox address.</summary>
+    public required string PrincipalSubject { get; set; }
+
+    public string? PrincipalTenantId { get; set; }
+
+    /// <summary>What the channel can render and carry, as declared by its adapter with the Turn.</summary>
+    public ChannelCapabilities Capabilities { get; set; }
 
     public string? Locale { get; set; }
 

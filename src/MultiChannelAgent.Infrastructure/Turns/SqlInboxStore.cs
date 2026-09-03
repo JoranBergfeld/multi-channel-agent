@@ -36,7 +36,7 @@ public sealed class SqlInboxStore(MultiChannelAgentDbContext db) : IInboxStore
                     && e.NativeMessageId == key.NativeMessageId,
                 cancellationToken);
 
-        return entity is null ? null : ToDomain(entity);
+        return entity is null ? null : await ToDomainAsync(entity, cancellationToken);
     }
 
     public async Task<InboundTurn?> FindByTurnIdAsync(TurnId turnId, CancellationToken cancellationToken)
@@ -45,7 +45,7 @@ public sealed class SqlInboxStore(MultiChannelAgentDbContext db) : IInboxStore
             .AsNoTracking()
             .FirstOrDefaultAsync(e => e.TurnId == turnId.Value, cancellationToken);
 
-        return entity is null ? null : ToDomain(entity);
+        return entity is null ? null : await ToDomainAsync(entity, cancellationToken);
     }
 
     public async Task<InboxAcceptResult> AcceptAsync(InboundTurn turn, CancellationToken cancellationToken)
@@ -65,13 +65,31 @@ public sealed class SqlInboxStore(MultiChannelAgentDbContext db) : IInboxStore
                 ParticipantId = turn.ParticipantId.Value,
                 ChannelConversationId = turn.ChannelConversationId.Value,
                 ConversationSequence = nextSequence,
-                ContentText = turn.ContentText,
+                Channel = turn.Channel,
+                PrincipalKind = turn.Principal.Kind,
+                PrincipalSubject = turn.Principal.Subject,
+                PrincipalTenantId = turn.Principal.TenantId,
+                Capabilities = turn.Capabilities,
                 Locale = turn.Locale,
                 TraceId = turn.TraceId,
                 ReceivedAt = turn.ReceivedAt,
                 CreatedAt = turn.ReceivedAt,
                 Status = InboxEntryStatus.Pending,
             });
+
+            // The ordered content parts are inserted with the entry itself, in the same
+            // SaveChangesAsync: a Turn is never durably accepted without the content it was accepted
+            // for, provenance and order included.
+            foreach (var part in turn.ContentParts)
+            {
+                db.InboxContentParts.Add(new InboxContentPartEntity
+                {
+                    TurnId = turn.TurnId.Value,
+                    Order = part.Order,
+                    Provenance = part.Provenance,
+                    Text = part.Text,
+                });
+            }
 
             try
             {
@@ -136,7 +154,7 @@ public sealed class SqlInboxStore(MultiChannelAgentDbContext db) : IInboxStore
             .Take(maxCount)
             .ToListAsync(cancellationToken);
 
-        return pending.Select(ToDomain).ToList();
+        return await ToDomainAsync(pending, cancellationToken);
     }
 
     private async Task<long> NextConversationSequenceAsync(string channelConversationId, CancellationToken cancellationToken)
@@ -149,15 +167,58 @@ public sealed class SqlInboxStore(MultiChannelAgentDbContext db) : IInboxStore
         return (highest ?? 0L) + 1L;
     }
 
-    private static InboundTurn ToDomain(InboxEntryEntity entity) => new()
+    private async Task<InboundTurn> ToDomainAsync(InboxEntryEntity entity, CancellationToken cancellationToken) =>
+        (await ToDomainAsync([entity], cancellationToken))[0];
+
+    /// <summary>
+    /// Rehydrates whole Turns, content parts included, in one extra query for the whole batch rather
+    /// than one per Turn.
+    /// </summary>
+    private async Task<IReadOnlyList<InboundTurn>> ToDomainAsync(
+        IReadOnlyList<InboxEntryEntity> entities, CancellationToken cancellationToken)
     {
-        TurnId = new TurnId(entity.TurnId),
-        NativeMessageId = entity.NativeMessageId,
-        ParticipantId = new ParticipantId(entity.ParticipantId),
-        ChannelConversationId = new ChannelConversationId(entity.ChannelConversationId),
-        ContentText = entity.ContentText,
-        Locale = entity.Locale,
-        TraceId = entity.TraceId,
-        ReceivedAt = entity.ReceivedAt,
-    };
+        if (entities.Count == 0)
+        {
+            return [];
+        }
+
+        var turnIds = entities.Select(e => e.TurnId).ToList();
+        var parts = await db.InboxContentParts
+            .AsNoTracking()
+            .Where(p => turnIds.Contains(p.TurnId))
+            .ToListAsync(cancellationToken);
+
+        var partsByTurn = parts
+            .GroupBy(p => p.TurnId)
+            .ToDictionary(
+                group => group.Key,
+                group => (IReadOnlyList<TurnContentPart>)group
+                    .OrderBy(p => p.Order)
+                    .Select(p => new TurnContentPart { Order = p.Order, Provenance = p.Provenance, Text = p.Text })
+                    .ToList());
+
+        return entities.Select(entity => new InboundTurn
+        {
+            TurnId = new TurnId(entity.TurnId),
+            NativeMessageId = entity.NativeMessageId,
+            ParticipantId = new ParticipantId(entity.ParticipantId),
+            ChannelConversationId = new ChannelConversationId(entity.ChannelConversationId),
+            Channel = entity.Channel,
+            Principal = new ChannelPrincipal
+            {
+                Kind = entity.PrincipalKind,
+                Subject = entity.PrincipalSubject,
+                TenantId = entity.PrincipalTenantId,
+            },
+            Capabilities = entity.Capabilities,
+            // Content parts are written in the same transaction as the entry itself, so an accepted
+            // Turn without them is a broken invariant, not a case to paper over with a guess.
+            ContentParts = partsByTurn.TryGetValue(entity.TurnId, out var turnParts)
+                ? turnParts
+                : throw new InvalidOperationException($"Accepted Turn {entity.TurnId} has no durable content parts."),
+            Locale = entity.Locale,
+            TraceId = entity.TraceId,
+            ReceivedAt = entity.ReceivedAt,
+        }).ToList();
+    }
 }

@@ -12,6 +12,8 @@ public sealed class MultiChannelAgentDbContext(DbContextOptions<MultiChannelAgen
 {
     public DbSet<InboxEntryEntity> InboxEntries => Set<InboxEntryEntity>();
 
+    public DbSet<InboxContentPartEntity> InboxContentParts => Set<InboxContentPartEntity>();
+
     public DbSet<OutcomeEntity> Outcomes => Set<OutcomeEntity>();
 
     public DbSet<DeliveryEntity> Deliveries => Set<DeliveryEntity>();

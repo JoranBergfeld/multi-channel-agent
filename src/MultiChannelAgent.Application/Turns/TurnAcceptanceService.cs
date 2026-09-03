@@ -28,14 +28,19 @@ public sealed class TurnAcceptanceService(IInboxStore inboxStore)
             return new TurnAcceptanceResult(existing.TurnId, WasAlreadyAccepted: true);
         }
 
-        var turn = InboundTurn.Create(
+        // Every channel's text-only submission is the same shape: one content part, authored directly
+        // by the authenticated Participant in this Turn.
+        var turn = InboundTurn.Create(InboundTurnDraft.DirectText(
             request.NativeMessageId,
             request.ParticipantId,
             request.ChannelConversationId,
+            request.Channel,
+            request.Principal,
+            request.Capabilities,
             request.ContentText,
             request.Locale,
             receivedAt,
-            request.TraceId);
+            request.TraceId));
 
         var accepted = await inboxStore.AcceptAsync(turn, cancellationToken);
 

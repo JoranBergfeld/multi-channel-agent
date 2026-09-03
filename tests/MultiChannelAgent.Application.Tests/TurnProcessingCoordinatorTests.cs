@@ -82,7 +82,7 @@ public class TurnProcessingCoordinatorTests
     {
         var timeProvider = new FakeTimeProvider(Now);
         var (coordinator, inbox, outcomes, deliveries, _, _) = CreateCoordinator(timeProvider);
-        var turn = InboundTurn.Create("native-1", SomeParticipant, "conversation-1", "hello", null, Now, null);
+        var turn = TestTurns.Text("native-1", SomeParticipant, "conversation-1", "hello", null, Now, null);
         await inbox.AcceptAsync(turn, CancellationToken.None);
 
         var processedCount = await coordinator.ProcessPendingAsync(CancellationToken.None);
@@ -102,7 +102,7 @@ public class TurnProcessingCoordinatorTests
     {
         var timeProvider = new FakeTimeProvider(Now);
         var (coordinator, inbox, _, _, _, _) = CreateCoordinator(timeProvider);
-        var turn = InboundTurn.Create("native-1", SomeParticipant, "conversation-1", "hello", null, Now, null);
+        var turn = TestTurns.Text("native-1", SomeParticipant, "conversation-1", "hello", null, Now, null);
         await inbox.AcceptAsync(turn, CancellationToken.None);
 
         await coordinator.ProcessPendingAsync(CancellationToken.None);
@@ -127,7 +127,7 @@ public class TurnProcessingCoordinatorTests
     {
         var timeProvider = new FakeTimeProvider(Now);
         var (coordinator, inbox, outcomes, deliveries, _, _) = CreateCoordinator(timeProvider);
-        var turn = InboundTurn.Create("native-1", SomeParticipant, "conversation-1", ScriptedModelBoundary.FailureMarker, null, Now, null);
+        var turn = TestTurns.Text("native-1", SomeParticipant, "conversation-1", ScriptedModelBoundary.FailureMarker, null, Now, null);
         await inbox.AcceptAsync(turn, CancellationToken.None);
 
         await coordinator.ProcessPendingAsync(CancellationToken.None);
@@ -142,8 +142,8 @@ public class TurnProcessingCoordinatorTests
     {
         var timeProvider = new FakeTimeProvider(Now);
         var (coordinator, inbox, outcomes, _, resultStore, _) = CreateCoordinator(timeProvider);
-        var failingTurn = InboundTurn.Create("native-fail", SomeParticipant, "conversation-1", "hello", null, Now, null);
-        var okTurn = InboundTurn.Create("native-ok", SomeParticipant, "conversation-2", "hello", null, Now, null);
+        var failingTurn = TestTurns.Text("native-fail", SomeParticipant, "conversation-1", "hello", null, Now, null);
+        var okTurn = TestTurns.Text("native-ok", SomeParticipant, "conversation-2", "hello", null, Now, null);
         await inbox.AcceptAsync(failingTurn, CancellationToken.None);
         await inbox.AcceptAsync(okTurn, CancellationToken.None);
         resultStore.FailForTurnIds.Add(failingTurn.TurnId.Value);
@@ -164,10 +164,10 @@ public class TurnProcessingCoordinatorTests
     {
         var timeProvider = new FakeTimeProvider(Now);
         var (coordinator, inbox, outcomes, _, resultStore, _) = CreateCoordinator(timeProvider);
-        var firstInConversation = InboundTurn.Create("native-first", SomeParticipant, "conversation-1", "hello", null, Now, null);
-        var secondInSameConversation = InboundTurn.Create(
+        var firstInConversation = TestTurns.Text("native-first", SomeParticipant, "conversation-1", "hello", null, Now, null);
+        var secondInSameConversation = TestTurns.Text(
             "native-second", SomeParticipant, "conversation-1", "hello", null, Now.AddSeconds(1), null);
-        var turnInOtherConversation = InboundTurn.Create(
+        var turnInOtherConversation = TestTurns.Text(
             "native-other", SomeParticipant, "conversation-2", "hello", null, Now.AddSeconds(2), null);
         await inbox.AcceptAsync(firstInConversation, CancellationToken.None);
         await inbox.AcceptAsync(secondInSameConversation, CancellationToken.None);
@@ -199,7 +199,7 @@ public class TurnProcessingCoordinatorTests
         var timeProvider = new FakeTimeProvider(Now);
         var modelBoundary = new CountingModelBoundary(new ScriptedModelBoundary());
         var (coordinator, inbox, outcomes, _, resultStore, _) = CreateCoordinator(timeProvider, modelBoundary);
-        var turn = InboundTurn.Create("native-1", SomeParticipant, "conversation-1", "hello", null, Now, null);
+        var turn = TestTurns.Text("native-1", SomeParticipant, "conversation-1", "hello", null, Now, null);
         await inbox.AcceptAsync(turn, CancellationToken.None);
         resultStore.FailForTurnIds.Add(turn.TurnId.Value);
 
@@ -234,7 +234,7 @@ public class TurnProcessingCoordinatorTests
     {
         var timeProvider = new FakeTimeProvider(Now);
         var (coordinator, inbox, _, _, _, bindings) = CreateCoordinator(timeProvider);
-        var turn = InboundTurn.Create("native-1", SomeParticipant, "conversation-1", "hello", null, Now, null);
+        var turn = TestTurns.Text("native-1", SomeParticipant, "conversation-1", "hello", null, Now, null);
         await inbox.AcceptAsync(turn, CancellationToken.None);
 
         await coordinator.ProcessPendingAsync(CancellationToken.None);
@@ -251,11 +251,11 @@ public class TurnProcessingCoordinatorTests
         var capturing = new CapturingModelBoundary(new ScriptedModelBoundary());
         var (coordinator, inbox, _, _, _, bindings) = CreateCoordinator(timeProvider, capturing);
         await inbox.AcceptAsync(
-            InboundTurn.Create("native-1", SomeParticipant, "conversation-1", "hello", null, Now, null), CancellationToken.None);
+            TestTurns.Text("native-1", SomeParticipant, "conversation-1", "hello", null, Now, null), CancellationToken.None);
         await inbox.AcceptAsync(
-            InboundTurn.Create("native-2", SomeParticipant, "conversation-1", "hello again", null, Now, null), CancellationToken.None);
+            TestTurns.Text("native-2", SomeParticipant, "conversation-1", "hello again", null, Now, null), CancellationToken.None);
         await inbox.AcceptAsync(
-            InboundTurn.Create("native-3", SomeParticipant, "conversation-2", "hello there", null, Now, null), CancellationToken.None);
+            TestTurns.Text("native-3", SomeParticipant, "conversation-2", "hello there", null, Now, null), CancellationToken.None);
 
         await coordinator.ProcessPendingAsync(CancellationToken.None);
 

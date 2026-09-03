@@ -18,6 +18,19 @@ public sealed record SubmitTurnHttpRequest(
     string? Locale,
     string? TraceId);
 
+/// <summary>
+/// What the signed-in web channel is, as declared to the channel-neutral core: its name, and what it
+/// can actually do with an answer. It renders text and shows progress while a Turn is still being
+/// processed; it carries no inbound attachments and no voice yet, so neither is declared and neither
+/// will be offered.
+/// </summary>
+public static class WebChannel
+{
+    public const string Name = "web";
+
+    public const ChannelCapabilities Capabilities = ChannelCapabilities.Text | ChannelCapabilities.RichText | ChannelCapabilities.ProgressEvents;
+}
+
 /// <summary>Maps the application boundary's Turn acceptance and Outcome retrieval HTTP endpoints.</summary>
 public static class TurnEndpoints
 {
@@ -46,7 +59,18 @@ public static class TurnEndpoints
             var channelConversationId = WebConversationCookie.EnsureId(httpContext);
 
             var result = await acceptanceService.AcceptAsync(
-                new SubmitTurnRequest(request.NativeMessageId!, participantId, channelConversationId, request.ContentText!, request.Locale, request.TraceId),
+                new SubmitTurnRequest(
+                    request.NativeMessageId!,
+                    participantId,
+                    channelConversationId,
+                    WebChannel.Name,
+                    // Typed evidence of how this Turn's Participant was authenticated - the signed-in
+                    // Entra session behind the cookie, never anything the request body claimed.
+                    ChannelPrincipal.EntraUser(participantId.Value.ToString(), user.FindFirst("tid")?.Value),
+                    WebChannel.Capabilities,
+                    request.ContentText!,
+                    request.Locale,
+                    request.TraceId),
                 timeProvider.GetUtcNow(),
                 cancellationToken);
 

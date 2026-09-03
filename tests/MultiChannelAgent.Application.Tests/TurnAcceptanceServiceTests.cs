@@ -1,6 +1,7 @@
 using MultiChannelAgent.Application.Tests.TestDoubles;
 using MultiChannelAgent.Application.Turns;
 using MultiChannelAgent.Domain.Inventories;
+using MultiChannelAgent.Domain.Turns;
 
 namespace MultiChannelAgent.Application.Tests;
 
@@ -10,6 +11,24 @@ public class TurnAcceptanceServiceTests
 
     private static readonly DateTimeOffset ReceivedAt = new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
 
+    /// <summary>The ordinary signed-in web submission; only what a test is about ever varies.</summary>
+    private static SubmitTurnRequest SubmitRequest(
+        string nativeMessageId,
+        ParticipantId participantId,
+        string channelConversationId,
+        string contentText,
+        string? locale,
+        string? traceId) => new(
+            nativeMessageId,
+            participantId,
+            channelConversationId,
+            "web",
+            ChannelPrincipal.EntraUser(participantId.Value.ToString(), "22222222-2222-2222-2222-222222222222"),
+            ChannelCapabilities.Text | ChannelCapabilities.ProgressEvents,
+            contentText,
+            locale,
+            traceId);
+
     [Fact]
     public async Task Accepting_a_new_turn_durably_stores_it_and_returns_a_fresh_turn_id()
     {
@@ -17,7 +36,7 @@ public class TurnAcceptanceServiceTests
         var service = new TurnAcceptanceService(store);
 
         var result = await service.AcceptAsync(
-            new SubmitTurnRequest("native-1", SomeParticipant, "conversation-1", "hello", "en-US", "trace-1"),
+            SubmitRequest("native-1", SomeParticipant, "conversation-1", "hello", "en-US", "trace-1"),
             ReceivedAt,
             CancellationToken.None);
 
@@ -32,7 +51,7 @@ public class TurnAcceptanceServiceTests
     {
         var store = new InMemoryInboxStore();
         var service = new TurnAcceptanceService(store);
-        var request = new SubmitTurnRequest("native-1", SomeParticipant, "conversation-1", "hello", "en-US", "trace-1");
+        var request = SubmitRequest("native-1", SomeParticipant, "conversation-1", "hello", "en-US", "trace-1");
 
         var first = await service.AcceptAsync(request, ReceivedAt, CancellationToken.None);
         var second = await service.AcceptAsync(request, ReceivedAt.AddMinutes(1), CancellationToken.None);
@@ -46,7 +65,7 @@ public class TurnAcceptanceServiceTests
     public async Task Two_concurrent_deliveries_of_the_same_native_message_id_both_observing_absence_converge_on_one_turn()
     {
         var store = new InMemoryInboxStore();
-        var request = new SubmitTurnRequest("native-race-1", SomeParticipant, "conversation-race-1", "hello", "en-US", "trace-1");
+        var request = SubmitRequest("native-race-1", SomeParticipant, "conversation-race-1", "hello", "en-US", "trace-1");
 
         // Both parties are gated so that each only proceeds into AcceptAsync once BOTH have already
         // called FindByNativeMessageIdAsync and observed nothing - the exact "two simultaneous
@@ -80,9 +99,9 @@ public class TurnAcceptanceServiceTests
         var service = new TurnAcceptanceService(store);
 
         var mine = await service.AcceptAsync(
-            new SubmitTurnRequest("native-shared", SomeParticipant, "conversation-1", "hello", null, null), ReceivedAt, CancellationToken.None);
+            SubmitRequest("native-shared", SomeParticipant, "conversation-1", "hello", null, null), ReceivedAt, CancellationToken.None);
         var theirs = await service.AcceptAsync(
-            new SubmitTurnRequest("native-shared", otherParticipant, "conversation-1", "hello", null, null), ReceivedAt, CancellationToken.None);
+            SubmitRequest("native-shared", otherParticipant, "conversation-1", "hello", null, null), ReceivedAt, CancellationToken.None);
 
         Assert.NotEqual(mine.TurnId, theirs.TurnId);
         Assert.False(theirs.WasAlreadyAccepted);
@@ -96,9 +115,9 @@ public class TurnAcceptanceServiceTests
         var service = new TurnAcceptanceService(store);
 
         var first = await service.AcceptAsync(
-            new SubmitTurnRequest("native-shared", SomeParticipant, "conversation-1", "hello", null, null), ReceivedAt, CancellationToken.None);
+            SubmitRequest("native-shared", SomeParticipant, "conversation-1", "hello", null, null), ReceivedAt, CancellationToken.None);
         var second = await service.AcceptAsync(
-            new SubmitTurnRequest("native-shared", SomeParticipant, "conversation-2", "hello", null, null), ReceivedAt, CancellationToken.None);
+            SubmitRequest("native-shared", SomeParticipant, "conversation-2", "hello", null, null), ReceivedAt, CancellationToken.None);
 
         Assert.NotEqual(first.TurnId, second.TurnId);
         Assert.False(second.WasAlreadyAccepted);

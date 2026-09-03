@@ -114,9 +114,9 @@ public sealed class SqlInboxStoreFifoTests : IDisposable
         var storeB = new SqlInboxStore(dbB);
 
         var taskA = storeA.AcceptAsync(
-            InboundTurn.Create("native-race-a", SomeParticipant, "conversation-race", "a", null, SameInstant, null), CancellationToken.None);
+            TestTurns.Text("native-race-a", SomeParticipant, "conversation-race", "a", null, SameInstant, null), CancellationToken.None);
         var taskB = storeB.AcceptAsync(
-            InboundTurn.Create("native-race-b", SomeParticipant, "conversation-race", "b", null, SameInstant, null), CancellationToken.None);
+            TestTurns.Text("native-race-b", SomeParticipant, "conversation-race", "b", null, SameInstant, null), CancellationToken.None);
 
         await Task.WhenAll(taskA, taskB);
 
@@ -133,7 +133,7 @@ public sealed class SqlInboxStoreFifoTests : IDisposable
     private static async Task<TurnId> AcceptAsync(SqlInboxStore store, string nativeMessageId, string conversationId, DateTimeOffset receivedAt)
     {
         var result = await store.AcceptAsync(
-            InboundTurn.Create(nativeMessageId, SomeParticipant, conversationId, "hello", null, receivedAt, null), CancellationToken.None);
+            TestTurns.Text(nativeMessageId, SomeParticipant, conversationId, "hello", null, receivedAt, null), CancellationToken.None);
         return result.Turn.TurnId;
     }
 

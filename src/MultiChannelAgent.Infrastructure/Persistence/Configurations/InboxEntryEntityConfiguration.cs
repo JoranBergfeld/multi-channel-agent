@@ -13,7 +13,10 @@ public sealed class InboxEntryEntityConfiguration : IEntityTypeConfiguration<Inb
 
         builder.Property(e => e.NativeMessageId).HasMaxLength(256).IsRequired();
         builder.Property(e => e.ChannelConversationId).HasMaxLength(256).IsRequired();
-        builder.Property(e => e.ContentText).HasMaxLength(32 * 1024).IsRequired();
+        builder.Property(e => e.Channel).HasMaxLength(32).IsRequired();
+        builder.Property(e => e.PrincipalKind).HasConversion<string>().HasMaxLength(32);
+        builder.Property(e => e.PrincipalSubject).HasMaxLength(256).IsRequired();
+        builder.Property(e => e.PrincipalTenantId).HasMaxLength(128);
         builder.Property(e => e.Locale).HasMaxLength(32);
         builder.Property(e => e.TraceId).HasMaxLength(128);
         builder.Property(e => e.Status).HasConversion<string>().HasMaxLength(32);

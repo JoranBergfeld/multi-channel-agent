@@ -47,8 +47,8 @@ public sealed class SqlInboxStoreConcurrencyTests : IDisposable
     {
         const string nativeMessageId = "native-race-1";
         var now = DateTimeOffset.UtcNow;
-        var turnA = InboundTurn.Create(nativeMessageId, SomeParticipant, "conversation-race-1", "hello a", null, now, null);
-        var turnB = InboundTurn.Create(nativeMessageId, SomeParticipant, "conversation-race-1", "hello b", null, now, null);
+        var turnA = TestTurns.Text(nativeMessageId, SomeParticipant, "conversation-race-1", "hello a", null, now, null);
+        var turnB = TestTurns.Text(nativeMessageId, SomeParticipant, "conversation-race-1", "hello b", null, now, null);
 
         using var dbA = CreateContext();
         using var dbB = CreateContext();
@@ -76,7 +76,7 @@ public sealed class SqlInboxStoreConcurrencyTests : IDisposable
     public async Task A_conflict_that_is_not_a_duplicate_native_message_id_still_propagates()
     {
         var now = DateTimeOffset.UtcNow;
-        var seededTurn = InboundTurn.Create("native-unrelated-a", SomeParticipant, "conversation-unrelated-a", "hello a", null, now, null);
+        var seededTurn = TestTurns.Text("native-unrelated-a", SomeParticipant, "conversation-unrelated-a", "hello a", null, now, null);
 
         using (var seedDb = CreateContext())
         {
@@ -86,15 +86,8 @@ public sealed class SqlInboxStoreConcurrencyTests : IDisposable
         // Collides on the PRIMARY KEY (TurnId) but has a completely different NativeMessageId: a
         // genuine, unrelated database failure - not the duplicate-delivery race AcceptAsync is
         // designed to absorb - so it must propagate untouched rather than be reported as a duplicate.
-        var conflictingTurn = new InboundTurn
-        {
-            TurnId = seededTurn.TurnId,
-            NativeMessageId = "native-unrelated-b",
-            ParticipantId = SomeParticipant,
-            ChannelConversationId = new ChannelConversationId("conversation-unrelated-b"),
-            ContentText = "hello b",
-            ReceivedAt = now,
-        };
+        var conflictingTurn = TestTurns.Text("native-unrelated-b", SomeParticipant, "conversation-unrelated-b", "hello b", null, now, null)
+            with { TurnId = seededTurn.TurnId };
 
         using var db = CreateContext();
         var store = new SqlInboxStore(db);
@@ -116,11 +109,11 @@ public sealed class SqlInboxStoreConcurrencyTests : IDisposable
         var store = new SqlInboxStore(db);
 
         var mine = await store.AcceptAsync(
-            InboundTurn.Create(nativeMessageId, SomeParticipant, "conversation-scope-a", "hello", null, now, null), CancellationToken.None);
+            TestTurns.Text(nativeMessageId, SomeParticipant, "conversation-scope-a", "hello", null, now, null), CancellationToken.None);
         var otherConversation = await store.AcceptAsync(
-            InboundTurn.Create(nativeMessageId, SomeParticipant, "conversation-scope-b", "hello", null, now, null), CancellationToken.None);
+            TestTurns.Text(nativeMessageId, SomeParticipant, "conversation-scope-b", "hello", null, now, null), CancellationToken.None);
         var otherParticipantTurn = await store.AcceptAsync(
-            InboundTurn.Create(nativeMessageId, otherParticipant, "conversation-scope-a", "hello", null, now, null), CancellationToken.None);
+            TestTurns.Text(nativeMessageId, otherParticipant, "conversation-scope-a", "hello", null, now, null), CancellationToken.None);
 
         Assert.False(otherConversation.WasAlreadyAccepted);
         Assert.False(otherParticipantTurn.WasAlreadyAccepted);
@@ -143,7 +136,7 @@ public sealed class SqlInboxStoreConcurrencyTests : IDisposable
         var store = new SqlInboxStore(db);
 
         var mine = await store.AcceptAsync(
-            InboundTurn.Create(nativeMessageId, SomeParticipant, "conversation-scope-a", "hello", null, now, null), CancellationToken.None);
+            TestTurns.Text(nativeMessageId, SomeParticipant, "conversation-scope-a", "hello", null, now, null), CancellationToken.None);
 
         var mineAgain = await store.FindByNativeMessageIdAsync(
             new NativeMessageKey(SomeParticipant, new ChannelConversationId("conversation-scope-a"), nativeMessageId), CancellationToken.None);
