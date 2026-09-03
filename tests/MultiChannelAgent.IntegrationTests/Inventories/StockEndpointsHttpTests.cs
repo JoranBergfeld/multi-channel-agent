@@ -95,7 +95,6 @@ public sealed class StockEndpointsHttpTests : IAsyncLifetime
             InventoryId = inventoryId,
             UnitId = unit.Id,
             LocationId = null,
-            LocationUniquenessKey = Guid.Empty,
             Name = name,
             NormalizedName = name.ToLowerInvariant(),
             Quantity = quantity,

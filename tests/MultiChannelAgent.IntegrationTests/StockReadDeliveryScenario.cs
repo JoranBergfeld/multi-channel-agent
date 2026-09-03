@@ -79,7 +79,6 @@ internal static class StockReadDeliveryScenario
             InventoryId = inventoryId,
             UnitId = unit.Id,
             LocationId = null,
-            LocationUniquenessKey = Guid.Empty,
             Name = name,
             NormalizedName = name.ToLowerInvariant(),
             Quantity = quantity,

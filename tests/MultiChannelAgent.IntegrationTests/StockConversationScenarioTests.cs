@@ -91,7 +91,6 @@ public sealed class StockConversationScenarioTests : SqlIntegrationTestBase
             InventoryId = inventoryId,
             UnitId = unit.Id,
             LocationId = null,
-            LocationUniquenessKey = Guid.Empty,
             Name = name,
             NormalizedName = name.ToLowerInvariant(),
             Quantity = quantity,

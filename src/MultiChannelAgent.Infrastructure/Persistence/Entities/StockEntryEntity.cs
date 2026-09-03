@@ -1,11 +1,10 @@
 namespace MultiChannelAgent.Infrastructure.Persistence.Entities;
 
 /// <summary>
-/// The durable row for one Stock Entry. <see cref="LocationUniquenessKey"/> mirrors
-/// <see cref="LocationId"/> but is never null (<see cref="Guid.Empty"/> stands in for "unlocated") so
-/// the Equivalent Stock unique index below behaves correctly - SQL Server treats every NULL in a
-/// unique index as distinct from every other NULL, which would otherwise let multiple unlocated rows
-/// for the same normalized name and Unit slip past it.
+/// The durable row for one Stock Entry. Absence of <see cref="LocationId"/> means unlocated, exactly
+/// as the domain expresses it - there is no mirrored sentinel column a caller could forget to
+/// maintain, because Equivalent Stock uniqueness is enforced by two filtered unique indexes over this
+/// very column (see StockEntryEntityConfiguration).
 /// </summary>
 public sealed class StockEntryEntity
 {
@@ -16,8 +15,6 @@ public sealed class StockEntryEntity
     public Guid UnitId { get; set; }
 
     public Guid? LocationId { get; set; }
-
-    public Guid LocationUniquenessKey { get; set; }
 
     public required string Name { get; set; }
 

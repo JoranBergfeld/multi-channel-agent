@@ -37,9 +37,21 @@ public sealed class StockEntryEntityConfiguration : IEntityTypeConfiguration<Sto
             .HasForeignKey(e => e.LocationId)
             .OnDelete(DeleteBehavior.Restrict);
 
-        // Enforces Equivalent Stock: the same normalized name, Unit, and (uniqueness-safe) Location
-        // within the same Inventory is always one row, never a duplicate.
-        builder.HasIndex(e => new { e.InventoryId, e.NormalizedName, e.UnitId, e.LocationUniquenessKey }).IsUnique();
+        // Enforces Equivalent Stock: the same normalized name, Unit, and Location within the same
+        // Inventory is always one row, never a duplicate. It is enforced against the real Location
+        // column rather than a mirrored sentinel one, so no writer can bypass the constraint by
+        // mismaintaining a mirror. Two filtered indexes are needed because a relational unique index
+        // treats every NULL as distinct from every other NULL, which alone would let any number of
+        // unlocated rows for one name and Unit slip past: the first covers placed Stock, the second
+        // covers unlocated Stock, where "no Location" is itself the whole key. The filter text is
+        // written unquoted so it is valid SQL on every provider this model is created on.
+        builder.HasIndex(e => new { e.InventoryId, e.NormalizedName, e.UnitId, e.LocationId })
+            .IsUnique()
+            .HasFilter("LocationId IS NOT NULL");
+
+        builder.HasIndex(e => new { e.InventoryId, e.NormalizedName, e.UnitId })
+            .IsUnique()
+            .HasFilter("LocationId IS NULL");
 
         // Supports List/Find scoping and filtering by Inventory, then by name/Location.
         builder.HasIndex(e => new { e.InventoryId, e.NormalizedName });

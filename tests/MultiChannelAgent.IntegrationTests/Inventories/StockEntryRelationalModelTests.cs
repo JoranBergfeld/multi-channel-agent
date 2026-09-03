@@ -39,24 +39,41 @@ public sealed class StockEntryRelationalModelTests : IDisposable
 
     public void Dispose() => _keepAliveConnection.Dispose();
 
+    // Equivalent Stock uniqueness is enforced against the real Location column, with no mirrored
+    // sentinel column for any caller to forget to maintain (a caller that got the mirror wrong could
+    // insert duplicate Equivalent Stock past the constraint entirely). "Unlocated" is expressed the
+    // way the domain expresses it - no Location at all - and covered by its own filtered index,
+    // because a relational unique index treats each NULL as distinct.
     [Fact]
-    public void StockEntry_still_enforces_the_unique_equivalent_stock_index()
+    public void StockEntry_enforces_equivalent_stock_uniqueness_against_the_real_location_column()
     {
         using var db = CreateContext();
-        var model = db.Model;
-        var stockEntryType = model.FindEntityType(typeof(StockEntryEntity))!;
+        var stockEntryType = db.Model.FindEntityType(typeof(StockEntryEntity))!;
+        var uniqueIndexes = stockEntryType.GetIndexes().Where(i => i.IsUnique).ToList();
 
-        var uniqueIndex = stockEntryType.GetIndexes().SingleOrDefault(i =>
-            i.IsUnique &&
+        var locatedIndex = uniqueIndexes.SingleOrDefault(i =>
             i.Properties.Select(p => p.Name).SequenceEqual(new[]
             {
                 nameof(StockEntryEntity.InventoryId),
                 nameof(StockEntryEntity.NormalizedName),
                 nameof(StockEntryEntity.UnitId),
-                nameof(StockEntryEntity.LocationUniquenessKey),
+                nameof(StockEntryEntity.LocationId),
+            }));
+        var unlocatedIndex = uniqueIndexes.SingleOrDefault(i =>
+            i.Properties.Select(p => p.Name).SequenceEqual(new[]
+            {
+                nameof(StockEntryEntity.InventoryId),
+                nameof(StockEntryEntity.NormalizedName),
+                nameof(StockEntryEntity.UnitId),
             }));
 
-        Assert.NotNull(uniqueIndex);
+        Assert.NotNull(locatedIndex);
+        Assert.NotNull(unlocatedIndex);
+        Assert.Contains("IS NOT NULL", locatedIndex!.GetFilter());
+        Assert.Contains("IS NULL", unlocatedIndex!.GetFilter());
+        Assert.DoesNotContain(
+            stockEntryType.GetProperties(),
+            property => property.Name.Contains("UniquenessKey", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -119,7 +136,6 @@ public sealed class StockEntryRelationalModelTests : IDisposable
                 InventoryId = inventoryId,
                 UnitId = unitId,
                 LocationId = null,
-                LocationUniquenessKey = Guid.Empty,
                 Name = "Steel Bolts",
                 NormalizedName = "steel bolts",
                 Quantity = 5m,
@@ -135,7 +151,6 @@ public sealed class StockEntryRelationalModelTests : IDisposable
             InventoryId = inventoryId,
             UnitId = unitId,
             LocationId = null,
-            LocationUniquenessKey = Guid.Empty,
             Name = "steel   bolts",
             NormalizedName = "steel bolts",
             Quantity = 10m,
@@ -160,7 +175,6 @@ public sealed class StockEntryRelationalModelTests : IDisposable
                 InventoryId = inventoryId,
                 UnitId = unitId,
                 LocationId = null,
-                LocationUniquenessKey = Guid.Empty,
                 Name = "Steel Bolts",
                 NormalizedName = "steel bolts",
                 Quantity = exactQuantity,
@@ -173,5 +187,64 @@ public sealed class StockEntryRelationalModelTests : IDisposable
         var reloaded = await readDb.StockEntries.AsNoTracking().SingleAsync(e => e.Id == stockEntryId);
 
         Assert.Equal(exactQuantity, reloaded.Quantity);
+    }
+    private Guid SeedLocation(Guid inventoryId, string name)
+    {
+        var locationId = Guid.NewGuid();
+        using var db = CreateContext();
+        db.Locations.Add(new LocationEntity
+        {
+            Id = locationId,
+            InventoryId = inventoryId,
+            Name = name,
+            NormalizedName = name.ToLowerInvariant(),
+            CreatedAt = DateTimeOffset.UtcNow,
+        });
+        db.SaveChanges();
+        return locationId;
+    }
+
+    private void AddStockEntry(Guid inventoryId, Guid unitId, Guid? locationId, string normalizedName, decimal quantity)
+    {
+        using var db = CreateContext();
+        db.StockEntries.Add(new StockEntryEntity
+        {
+            Id = Guid.NewGuid(),
+            InventoryId = inventoryId,
+            UnitId = unitId,
+            LocationId = locationId,
+            Name = normalizedName,
+            NormalizedName = normalizedName,
+            Quantity = quantity,
+            CreatedAt = DateTimeOffset.UtcNow,
+        });
+        db.SaveChanges();
+    }
+
+    [Fact]
+    public void Two_stock_entries_in_the_same_location_with_the_same_normalized_name_and_unit_violate_the_unique_index()
+    {
+        var (inventoryId, unitId) = SeedInventoryAndUnit();
+        var shelfA = SeedLocation(inventoryId, "Shelf A");
+        AddStockEntry(inventoryId, unitId, shelfA, "steel bolts", 5m);
+
+        Assert.Throws<DbUpdateException>(() => AddStockEntry(inventoryId, unitId, shelfA, "steel bolts", 10m));
+    }
+
+    // Equivalent Stock includes the Location, so the same name and Unit in two different places - or
+    // one placed and one unlocated - are genuinely different Stock Entries.
+    [Fact]
+    public void The_same_name_and_unit_in_different_locations_are_distinct_stock_entries()
+    {
+        var (inventoryId, unitId) = SeedInventoryAndUnit();
+        var shelfA = SeedLocation(inventoryId, "Shelf A");
+        var shelfB = SeedLocation(inventoryId, "Shelf B");
+
+        AddStockEntry(inventoryId, unitId, shelfA, "steel bolts", 5m);
+        AddStockEntry(inventoryId, unitId, shelfB, "steel bolts", 7m);
+        AddStockEntry(inventoryId, unitId, null, "steel bolts", 9m);
+
+        using var db = CreateContext();
+        Assert.Equal(3, db.StockEntries.Count(e => e.InventoryId == inventoryId));
     }
 }
