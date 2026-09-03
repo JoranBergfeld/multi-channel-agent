@@ -68,9 +68,18 @@ cd src/web && npm run lint && npm run build
 `MultiChannelAgent.IntegrationTests` boots an ephemeral SQL Server container via Testcontainers,
 applies the production EF Core migrations, and submits a synthetic Turn through the real HTTP
 endpoints, driving the hosted-worker duties deterministically (via their internal one-shot
-operations, not sleeps) instead of waiting on the periodic background loop. If Docker is not
-available, these tests report **Skipped** (not failed) with a clear reason; the same tests run for
-real in CI, where GitHub-hosted runners provide Docker.
+operations, not sleeps) instead of waiting on the periodic background loop. Whether these tests may
+skip is governed by an explicit environment contract, not by broadly catching container startup
+failures:
+
+- **`REQUIRE_DOCKER_TESTS=true`** (set by CI) removes the ability to skip: the Docker daemon is
+  positively probed before any container is built, and if it is unreachable the tests **fail** rather
+  than silently skip. Any failure while bringing up the container once the daemon is confirmed
+  reachable (bad image, bad configuration, a broken migration) also fails the tests.
+- Locally, with the variable unset (or not `"true"`), the same positive daemon probe is used: only a
+  genuinely unreachable daemon causes a clean **Skipped** result with a clear reason. Any other
+  failure once the daemon answers still fails the tests, so a real bug is never masked as "Docker is
+  unavailable".
 
 ## Run locally
 

@@ -41,7 +41,11 @@ jobs:
       # Docker is preinstalled and running on GitHub-hosted ubuntu runners, so the Testcontainers
       # SQL Server integration test (the SQL-backed application-boundary scenario) runs for real
       # here, alongside the pure unit/application tests and the architecture tests, in one pass.
+      # REQUIRE_DOCKER_TESTS=true removes this job's ability to silently skip that scenario: a
+      # broken Docker/container startup here fails the build instead of passing as a clean skip.
       - name: Test (unit, application, architecture, SQL-backed application-boundary scenario)
+        env:
+          REQUIRE_DOCKER_TESTS: "true"
         run: dotnet test --no-build --configuration Release --logger "console;verbosity=normal"
 
   frontend:

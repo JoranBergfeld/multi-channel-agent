@@ -1,11 +1,8 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
-using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using MultiChannelAgent.Application.Turns;
-using MultiChannelAgent.Infrastructure.Persistence;
-using Testcontainers.MsSql;
 using Xunit;
 
 namespace MultiChannelAgent.IntegrationTests;
@@ -16,56 +13,14 @@ namespace MultiChannelAgent.IntegrationTests;
 /// EF Core migrations applied, and assert the durable, terminal, externally observable effects
 /// (Outcome + Delivery) - with no sleeps, driving processing deterministically instead.
 /// </summary>
-public sealed class TurnTracerScenarioTests : IAsyncLifetime
+public sealed class TurnTracerScenarioTests : SqlIntegrationTestBase
 {
-    private MsSqlContainer? _sqlContainer;
-    private bool _dockerAvailable = true;
-    private CustomWebApplicationFactory? _factory;
-
-    public async Task InitializeAsync()
-    {
-        try
-        {
-            // Building (not just starting) a Testcontainers container eagerly pings the Docker
-            // endpoint, so both must run inside this guard for a clean skip when Docker is absent.
-            _sqlContainer = new MsSqlBuilder("mcr.microsoft.com/mssql/server:2022-CU14-ubuntu-22.04").Build();
-            await _sqlContainer.StartAsync();
-        }
-        catch (Exception)
-        {
-            // Any failure bringing up the ephemeral SQL Server container in this environment is
-            // treated as "Docker is genuinely unavailable" and the scenario is skipped cleanly,
-            // per xunit's Skippable semantics, rather than reported as a failing test.
-            _dockerAvailable = false;
-            return;
-        }
-
-        _factory = new CustomWebApplicationFactory(_sqlContainer.GetConnectionString());
-
-        using var scope = _factory.Services.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<MultiChannelAgentDbContext>();
-        await db.Database.MigrateAsync();
-    }
-
-    public async Task DisposeAsync()
-    {
-        if (_factory is not null)
-        {
-            await _factory.DisposeAsync();
-        }
-
-        if (_sqlContainer is not null)
-        {
-            await _sqlContainer.DisposeAsync();
-        }
-    }
-
     [SkippableFact]
     public async Task Submitting_a_synthetic_turn_is_durably_accepted_processed_and_produces_a_terminal_outcome_with_delivery()
     {
-        Skip.IfNot(_dockerAvailable, "Docker is not available in this environment; skipping the SQL-backed application-boundary scenario.");
+        Skip.IfNot(DockerAvailable, "Docker is not available in this environment; skipping the SQL-backed application-boundary scenario.");
 
-        var client = _factory!.CreateClient();
+        var client = Factory!.CreateClient();
 
         var submitResponse = await client.PostAsJsonAsync("/api/turns", new
         {
@@ -83,7 +38,7 @@ public sealed class TurnTracerScenarioTests : IAsyncLifetime
 
         // Drive the hosted-worker duties deterministically via their internal one-shot operations,
         // rather than timing the periodic background loop.
-        using (var scope = _factory.Services.CreateScope())
+        using (var scope = Factory!.Services.CreateScope())
         {
             var processingCoordinator = scope.ServiceProvider.GetRequiredService<TurnProcessingCoordinator>();
             var processedCount = await processingCoordinator.ProcessPendingAsync(CancellationToken.None);
@@ -127,9 +82,9 @@ public sealed class TurnTracerScenarioTests : IAsyncLifetime
     [SkippableFact]
     public async Task Health_endpoints_report_healthy_once_the_database_is_reachable()
     {
-        Skip.IfNot(_dockerAvailable, "Docker is not available in this environment; skipping health check verification against real SQL Server.");
+        Skip.IfNot(DockerAvailable, "Docker is not available in this environment; skipping health check verification against real SQL Server.");
 
-        var client = _factory!.CreateClient();
+        var client = Factory!.CreateClient();
 
         var live = await client.GetAsync("/health/live");
         var ready = await client.GetAsync("/health/ready");

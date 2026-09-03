@@ -17,6 +17,7 @@ public static class ServiceCollectionExtensions
         services.AddScoped<IInboxStore, SqlInboxStore>();
         services.AddScoped<IOutcomeStore, SqlOutcomeStore>();
         services.AddScoped<IDeliveryStore, SqlDeliveryStore>();
+        services.AddScoped<ITurnResultStore, SqlTurnResultStore>();
         services.AddScoped<ILeaseCoordinator, SqlLeaseCoordinator>();
         services.AddScoped<IDeliverySender, LoggingDeliverySender>();
         services.AddSingleton(TimeProvider.System);

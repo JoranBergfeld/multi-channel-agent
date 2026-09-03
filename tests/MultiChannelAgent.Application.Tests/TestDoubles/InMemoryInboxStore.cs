@@ -32,6 +32,11 @@ public sealed class InMemoryInboxStore : IInboxStore
         return Task.FromResult<IReadOnlyList<InboundTurn>>(pending);
     }
 
+    /// <summary>
+    /// Not part of <see cref="IInboxStore"/>: only <see cref="InMemoryTurnResultStore"/> calls this,
+    /// mirroring how the SQL-backed store only marks inbox completion from within
+    /// <c>SqlTurnResultStore</c>'s single atomic write.
+    /// </summary>
     public Task MarkCompletedAsync(TurnId turnId, CancellationToken cancellationToken)
     {
         _completed.Add(turnId.Value);

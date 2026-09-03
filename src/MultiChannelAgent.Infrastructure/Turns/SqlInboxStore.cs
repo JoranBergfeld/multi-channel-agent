@@ -49,13 +49,6 @@ public sealed class SqlInboxStore(MultiChannelAgentDbContext db) : IInboxStore
         return pending.Select(ToDomain).ToList();
     }
 
-    public async Task MarkCompletedAsync(TurnId turnId, CancellationToken cancellationToken)
-    {
-        var entity = await db.InboxEntries.FirstAsync(e => e.TurnId == turnId.Value, cancellationToken);
-        entity.Status = InboxEntryStatus.Completed;
-        await db.SaveChangesAsync(cancellationToken);
-    }
-
     private static InboundTurn ToDomain(InboxEntryEntity entity) => new()
     {
         TurnId = new TurnId(entity.TurnId),
