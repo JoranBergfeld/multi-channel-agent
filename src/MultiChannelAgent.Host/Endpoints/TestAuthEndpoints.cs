@@ -6,7 +6,11 @@ using MultiChannelAgent.Host.Authentication;
 namespace MultiChannelAgent.Host.Endpoints;
 
 /// <summary>The wire shape accepted by the deterministic test-only sign-in endpoint.</summary>
-public sealed record TestSignInHttpRequest(string ParticipantId, string DisplayName, bool ActiveTenantMember = true);
+public sealed record TestSignInHttpRequest(
+    string ParticipantId,
+    string DisplayName,
+    bool ActiveTenantMember = true,
+    int? SimulatedAccessTokenSizeBytes = null);
 
 /// <summary>
 /// The deterministic stand-in for the real Entra authorization-code flow: signs a caller-chosen
@@ -31,7 +35,18 @@ public static class TestAuthEndpoints
             };
 
             var identity = new ClaimsIdentity(claims, CookieAuthenticationDefaults.AuthenticationScheme);
-            await httpContext.SignInAsync(CookieAuthenticationDefaults.AuthenticationScheme, new ClaimsPrincipal(identity));
+
+            // Only ever populated by tests that need to reproduce the real Entra OIDC path's
+            // SaveTokens=true behavior (an access/id/refresh token embedded on the ticket's
+            // AuthenticationProperties) without a live token, so cookie-size-sensitive behavior (the
+            // server-side ticket store) can be exercised deterministically.
+            var properties = new AuthenticationProperties();
+            if (request.SimulatedAccessTokenSizeBytes is > 0 and var size)
+            {
+                properties.StoreTokens([new AuthenticationToken { Name = "access_token", Value = new string('a', size) }]);
+            }
+
+            await httpContext.SignInAsync(CookieAuthenticationDefaults.AuthenticationScheme, new ClaimsPrincipal(identity), properties);
 
             return Results.Ok();
         });

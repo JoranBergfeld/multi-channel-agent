@@ -1,7 +1,9 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using MultiChannelAgent.Application.Authentication;
 using MultiChannelAgent.Application.Inventories;
 using MultiChannelAgent.Application.Turns;
+using MultiChannelAgent.Infrastructure.Authentication;
 using MultiChannelAgent.Infrastructure.Inventories;
 using MultiChannelAgent.Infrastructure.Persistence;
 using MultiChannelAgent.Infrastructure.Turns;
@@ -32,6 +34,7 @@ public static class ServiceCollectionExtensions
         services.AddScoped<IParticipantStore, SqlParticipantStore>();
         services.AddScoped<IInventoryStore, SqlInventoryStore>();
         services.AddScoped<IActiveInventorySelectionStore, SqlActiveInventorySelectionStore>();
+        services.AddScoped<IAuthTicketRepository, SqlAuthTicketRepository>();
         services.AddScoped<ParticipantSessionService>();
         services.AddScoped<InventoryCreationService>();
         services.AddScoped<InventoryListingService>();

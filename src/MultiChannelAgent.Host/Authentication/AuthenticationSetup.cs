@@ -80,6 +80,16 @@ public static class AuthenticationSetup
                 };
             });
 
+        // Tokens must never reach the browser: the Cookie scheme's SessionStore makes the "mca_auth"
+        // cookie carry only an opaque server-generated key, while the actual ticket - including any
+        // OIDC access/id/refresh token SaveTokens=true attaches below - is persisted server-side
+        // (SQL-backed, so it survives restarts and works across replicas) and protected at rest with
+        // Data Protection. PostConfigure (rather than Configure) guarantees this runs after the
+        // .AddCookie(...) options above, regardless of DI registration order.
+        services.AddSingleton<ITicketStore, SqlServerTicketStore>();
+        services.AddOptions<CookieAuthenticationOptions>(CookieAuthenticationDefaults.AuthenticationScheme)
+            .PostConfigure<ITicketStore>((options, ticketStore) => options.SessionStore = ticketStore);
+
         if (string.Equals(provider, ProviderSchemes.Test, StringComparison.OrdinalIgnoreCase))
         {
             if (environment.IsProduction())
