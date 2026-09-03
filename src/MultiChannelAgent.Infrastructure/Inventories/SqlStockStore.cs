@@ -9,8 +9,10 @@ namespace MultiChannelAgent.Infrastructure.Inventories;
 /// <summary>
 /// SQL Server-backed <see cref="IStockStore"/>. Every filter, the deterministic display order, keyset
 /// cursor resumption, and the page/candidate cap are expressed in the query itself, so the database
-/// returns only the rows the caller asked for - an Inventory with a hundred thousand Stock Entries
-/// costs the same one bounded query as an empty one. Ordering uses the normalized order-key columns
+/// returns only the rows the caller asked for and this process never materializes an Inventory's
+/// Stock to filter, order, or page it. What the database itself has to do still grows with the
+/// Inventory: the order spans Stock Entries, Units, and Locations, so it may be satisfied by a sort
+/// rather than by an index walk. Ordering uses the normalized order-key columns
 /// (<see cref="StockEntryOrderKey"/>), which carry a binary collation on SQL Server, so the database's
 /// order is exactly the domain's own ordinal order rather than a locale-dependent approximation of it.
 /// </summary>
