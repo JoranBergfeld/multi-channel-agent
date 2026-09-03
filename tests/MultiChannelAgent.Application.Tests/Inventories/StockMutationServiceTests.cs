@@ -274,4 +274,313 @@ public class StockMutationServiceTests
         Assert.Equal("20", second.View!.Quantity);
         Assert.Equal(2, harness.MutationStore.AuditFacts.Count);
     }
+
+    [Fact]
+    public async Task A_Viewer_may_see_the_Inventory_but_may_not_change_its_Stock()
+    {
+        var harness = CreateHarness();
+        harness.StockStore.Add(SomeInventory, Row("Steel Bolts", 5m, "10000000"));
+
+        var result = await MutateAsync(harness, Viewer, new StockMutationRequest
+        {
+            Kind = StockMutationKind.Add,
+            Reference = "Steel Bolts",
+            QuantityText = "1",
+        });
+
+        Assert.Equal(StockMutationResultKind.Forbidden, result.Kind);
+        Assert.Equal("forbidden", result.Code);
+        Assert.Null(result.View);
+        Assert.Equal("5", harness.StockStore.Find(SomeInventory, Row("Steel Bolts", 5m, "10000000").Id)!.Quantity.ToInvariantText());
+    }
+
+    [Fact]
+    public async Task A_non_member_cannot_tell_this_Inventory_apart_from_one_that_does_not_exist()
+    {
+        var harness = CreateHarness();
+        harness.StockStore.Add(SomeInventory, Row("Steel Bolts", 5m, "10000000"));
+
+        var result = await MutateAsync(harness, Stranger, new StockMutationRequest
+        {
+            Kind = StockMutationKind.Add,
+            Reference = "Steel Bolts",
+            QuantityText = "1",
+        });
+
+        Assert.Equal(StockMutationResultKind.NotFound, result.Kind);
+        Assert.Equal("not_found", result.Code);
+        Assert.Null(result.View);
+    }
+
+    [Fact]
+    public async Task An_ambiguous_reference_offers_candidates_and_narrowing_instead_of_guessing()
+    {
+        var harness = CreateHarness();
+        harness.StockStore.Add(SomeInventory, Row("Steel Bolts", 5m, "10000000", locationId: ShelfA));
+        harness.StockStore.Add(SomeInventory, Row("Steel Bolts", 7m, "20000000", locationId: ShelfB));
+
+        var result = await MutateAsync(harness, Editor, new StockMutationRequest
+        {
+            Kind = StockMutationKind.Remove,
+            Reference = "Steel Bolts",
+            QuantityText = "1",
+        });
+
+        Assert.Equal(StockMutationResultKind.Ambiguous, result.Kind);
+        Assert.Equal(2, result.Candidates!.Candidates.Count);
+        Assert.Equal(["Shelf A", "Shelf B"], result.Candidates.NarrowingHints.Locations);
+        Assert.Empty(harness.MutationStore.AuditFacts);
+    }
+
+    [Fact]
+    public async Task Naming_the_Location_makes_an_otherwise_ambiguous_reference_exact()
+    {
+        var harness = CreateHarness();
+        harness.StockStore.Add(SomeInventory, Row("Steel Bolts", 5m, "10000000", locationId: ShelfA));
+        harness.StockStore.Add(SomeInventory, Row("Steel Bolts", 7m, "20000000", locationId: ShelfB));
+
+        var result = await MutateAsync(harness, Editor, new StockMutationRequest
+        {
+            Kind = StockMutationKind.Remove,
+            Reference = "Steel Bolts",
+            QuantityText = "1",
+            LocationReference = "Shelf B",
+        });
+
+        Assert.Equal(StockMutationResultKind.Completed, result.Kind);
+        Assert.Equal("6", result.View!.Quantity);
+        Assert.Equal("Shelf B", result.View.Location);
+    }
+
+    [Fact]
+    public async Task Removing_stock_that_is_not_there_is_simply_not_found()
+    {
+        var harness = CreateHarness();
+
+        var result = await MutateAsync(harness, Editor, new StockMutationRequest
+        {
+            Kind = StockMutationKind.Remove,
+            Reference = "Steel Bolts",
+            QuantityText = "1",
+        });
+
+        Assert.Equal(StockMutationResultKind.NotFound, result.Kind);
+        Assert.Equal("not_found", result.Code);
+    }
+
+    [Fact]
+    public async Task Setting_stock_that_is_not_there_never_quietly_creates_it()
+    {
+        var harness = CreateHarness();
+
+        var result = await MutateAsync(harness, Editor, new StockMutationRequest
+        {
+            Kind = StockMutationKind.Set,
+            Reference = "Steel Bolts",
+            QuantityText = "7",
+        });
+
+        Assert.Equal(StockMutationResultKind.NotFound, result.Kind);
+        Assert.Empty(harness.MutationStore.AuditFacts);
+    }
+
+    [Fact]
+    public async Task Removing_more_than_is_on_hand_is_refused_and_changes_nothing()
+    {
+        var harness = CreateHarness();
+        var row = Row("Steel Bolts", 3m, "10000000");
+        harness.StockStore.Add(SomeInventory, row);
+
+        var result = await MutateAsync(harness, Editor, new StockMutationRequest
+        {
+            Kind = StockMutationKind.Remove,
+            Reference = "Steel Bolts",
+            QuantityText = "3.0000000001",
+        });
+
+        Assert.Equal(StockMutationResultKind.Conflict, result.Kind);
+        Assert.Equal("insufficient_quantity", result.Code);
+        Assert.Equal("3", harness.StockStore.Find(SomeInventory, row.Id)!.Quantity.ToInvariantText());
+        Assert.Empty(harness.MutationStore.AuditFacts);
+    }
+
+    [Fact]
+    public async Task Setting_stock_to_zero_asks_for_confirmation_and_changes_nothing_yet()
+    {
+        var harness = CreateHarness();
+        var row = Row("Steel Bolts", 7m, "10000000");
+        harness.StockStore.Add(SomeInventory, row);
+
+        var result = await MutateAsync(harness, Editor, new StockMutationRequest
+        {
+            Kind = StockMutationKind.Set,
+            Reference = "Steel Bolts",
+            QuantityText = "0",
+        });
+
+        Assert.Equal(StockMutationResultKind.ConfirmationRequired, result.Kind);
+        Assert.Equal("confirmation_required", result.Code);
+        Assert.Null(result.View);
+        Assert.Equal("7", harness.StockStore.Find(SomeInventory, row.Id)!.Quantity.ToInvariantText());
+        Assert.Empty(harness.MutationStore.AuditFacts);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("lots")]
+    [InlineData("1,5")]
+    [InlineData("-3")]
+    public async Task A_Quantity_that_is_not_exact_invariant_decimal_text_is_refused(string? quantityText)
+    {
+        var harness = CreateHarness();
+        harness.StockStore.Add(SomeInventory, Row("Steel Bolts", 5m, "10000000"));
+
+        var result = await MutateAsync(harness, Editor, new StockMutationRequest
+        {
+            Kind = StockMutationKind.Add,
+            Reference = "Steel Bolts",
+            QuantityText = quantityText,
+        });
+
+        Assert.Equal(StockMutationResultKind.Invalid, result.Kind);
+        Assert.Equal("invalid_quantity", result.Code);
+    }
+
+    [Fact]
+    public async Task Adding_zero_is_not_an_Add_and_is_refused_as_invalid()
+    {
+        var harness = CreateHarness();
+        harness.StockStore.Add(SomeInventory, Row("Steel Bolts", 5m, "10000000"));
+
+        var result = await MutateAsync(harness, Editor, new StockMutationRequest
+        {
+            Kind = StockMutationKind.Add,
+            Reference = "Steel Bolts",
+            QuantityText = "0",
+        });
+
+        Assert.Equal(StockMutationResultKind.Invalid, result.Kind);
+        Assert.Equal("invalid_quantity", result.Code);
+    }
+
+    [Fact]
+    public async Task A_request_that_names_no_Stock_Entry_at_all_is_refused_as_invalid()
+    {
+        var harness = CreateHarness();
+
+        var result = await MutateAsync(harness, Editor, new StockMutationRequest
+        {
+            Kind = StockMutationKind.Add,
+            Reference = "   ",
+            QuantityText = "1",
+        });
+
+        Assert.Equal(StockMutationResultKind.Invalid, result.Kind);
+        Assert.Equal("invalid_reference", result.Code);
+    }
+
+    [Fact]
+    public async Task A_Unit_this_Inventory_does_not_have_is_reported_rather_than_created()
+    {
+        var harness = CreateHarness();
+
+        var result = await MutateAsync(harness, Editor, new StockMutationRequest
+        {
+            Kind = StockMutationKind.Add,
+            Reference = "Steel Bolts",
+            QuantityText = "1",
+            UnitReference = "pallet",
+        });
+
+        Assert.Equal(StockMutationResultKind.ReferenceNotFound, result.Kind);
+        Assert.Equal("reference_not_found", result.Code);
+        Assert.Equal(StockReferenceKind.Unit, result.UnresolvedReference);
+        Assert.Empty(harness.MutationStore.AuditFacts);
+    }
+
+    [Fact]
+    public async Task A_Location_this_Inventory_does_not_have_is_reported_rather_than_created()
+    {
+        var harness = CreateHarness();
+
+        var result = await MutateAsync(harness, Editor, new StockMutationRequest
+        {
+            Kind = StockMutationKind.Add,
+            Reference = "Steel Bolts",
+            QuantityText = "1",
+            LocationReference = "Loading Bay",
+        });
+
+        Assert.Equal(StockMutationResultKind.ReferenceNotFound, result.Kind);
+        Assert.Equal(StockReferenceKind.Location, result.UnresolvedReference);
+    }
+
+    [Fact]
+    public async Task An_opaque_identity_that_matches_nothing_is_not_found_rather_than_an_invitation_to_create()
+    {
+        var harness = CreateHarness();
+
+        var result = await MutateAsync(harness, Editor, new StockMutationRequest
+        {
+            Kind = StockMutationKind.Add,
+            Reference = Guid.Parse("dddddddd-dddd-dddd-dddd-dddddddddddd").ToString(),
+            QuantityText = "1",
+        });
+
+        Assert.Equal(StockMutationResultKind.NotFound, result.Kind);
+        Assert.Empty(harness.MutationStore.AuditFacts);
+    }
+
+    [Fact]
+    public async Task A_target_that_changed_since_the_request_was_planned_is_refused_without_disclosing_why()
+    {
+        var harness = CreateHarness();
+        harness.StockStore.Add(SomeInventory, Row("Steel Bolts", 5m, "10000000"));
+        harness.MutationStore.ForceStateChanged = true;
+
+        var result = await MutateAsync(harness, Editor, new StockMutationRequest
+        {
+            Kind = StockMutationKind.Add,
+            Reference = "Steel Bolts",
+            QuantityText = "1",
+        });
+
+        Assert.Equal(StockMutationResultKind.Conflict, result.Kind);
+        Assert.Equal("state_changed", result.Code);
+        Assert.Null(result.View);
+    }
+
+    [Fact]
+    public async Task A_Note_longer_than_a_Note_may_be_is_refused_before_it_reaches_a_column()
+    {
+        var harness = CreateHarness();
+
+        var result = await MutateAsync(harness, Editor, new StockMutationRequest
+        {
+            Kind = StockMutationKind.Add,
+            Reference = "Steel Bolts",
+            QuantityText = "1",
+            Note = new string('n', StockEntry.MaxNoteLength + 1),
+        });
+
+        Assert.Equal(StockMutationResultKind.Invalid, result.Kind);
+        Assert.Equal("invalid_note", result.Code);
+    }
+
+    [Fact]
+    public async Task A_name_longer_than_a_name_may_be_is_refused_before_it_reaches_a_column()
+    {
+        var harness = CreateHarness();
+
+        var result = await MutateAsync(harness, Editor, new StockMutationRequest
+        {
+            Kind = StockMutationKind.Add,
+            Reference = new string('n', StockEntry.MaxNameLength + 1),
+            QuantityText = "1",
+        });
+
+        Assert.Equal(StockMutationResultKind.Invalid, result.Kind);
+        Assert.Equal("invalid_name", result.Code);
+    }
 }
