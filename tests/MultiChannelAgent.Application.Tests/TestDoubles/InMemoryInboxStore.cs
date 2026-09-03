@@ -6,6 +6,7 @@ namespace MultiChannelAgent.Application.Tests.TestDoubles;
 /// <summary>Minimal in-memory <see cref="IInboxStore"/> for Application-layer unit tests.</summary>
 public sealed class InMemoryInboxStore : IInboxStore
 {
+    private readonly object _gate = new();
     private readonly List<InboundTurn> _turns = [];
     private readonly HashSet<Guid> _completed = [];
 
@@ -13,14 +14,34 @@ public sealed class InMemoryInboxStore : IInboxStore
 
     public Task<InboundTurn?> FindByNativeMessageIdAsync(string nativeMessageId, CancellationToken cancellationToken)
     {
-        var match = _turns.FirstOrDefault(t => t.NativeMessageId == nativeMessageId);
+        InboundTurn? match;
+        lock (_gate)
+        {
+            match = _turns.FirstOrDefault(t => t.NativeMessageId == nativeMessageId);
+        }
+
         return Task.FromResult(match);
     }
 
-    public Task AcceptAsync(InboundTurn turn, CancellationToken cancellationToken)
+    /// <summary>
+    /// Mirrors the atomicity <see cref="IInboxStore.AcceptAsync"/> requires from a real store: a lock
+    /// makes the "is one already accepted for this NativeMessageId" check and the insert a single
+    /// indivisible step, so concurrent callers racing this method converge on whichever Turn actually
+    /// wins, exactly like the real unique index at the database does.
+    /// </summary>
+    public Task<InboxAcceptResult> AcceptAsync(InboundTurn turn, CancellationToken cancellationToken)
     {
-        _turns.Add(turn);
-        return Task.CompletedTask;
+        lock (_gate)
+        {
+            var existing = _turns.FirstOrDefault(t => t.NativeMessageId == turn.NativeMessageId);
+            if (existing is not null)
+            {
+                return Task.FromResult(new InboxAcceptResult(existing, WasAlreadyAccepted: true));
+            }
+
+            _turns.Add(turn);
+            return Task.FromResult(new InboxAcceptResult(turn, WasAlreadyAccepted: false));
+        }
     }
 
     public Task<IReadOnlyList<InboundTurn>> ClaimPendingAsync(int maxCount, CancellationToken cancellationToken)

@@ -31,8 +31,8 @@ public sealed class TurnAcceptanceService(IInboxStore inboxStore)
             receivedAt,
             request.TraceId);
 
-        await inboxStore.AcceptAsync(turn, cancellationToken);
+        var accepted = await inboxStore.AcceptAsync(turn, cancellationToken);
 
-        return new TurnAcceptanceResult(turn.TurnId, WasAlreadyAccepted: false);
+        return new TurnAcceptanceResult(accepted.Turn.TurnId, accepted.WasAlreadyAccepted);
     }
 }

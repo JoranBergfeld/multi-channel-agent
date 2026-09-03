@@ -38,4 +38,30 @@ public class TurnAcceptanceServiceTests
         Assert.True(second.WasAlreadyAccepted);
         Assert.Single(store.Turns);
     }
+
+    [Fact]
+    public async Task Two_concurrent_deliveries_of_the_same_native_message_id_both_observing_absence_converge_on_one_turn()
+    {
+        var store = new InMemoryInboxStore();
+        var request = new SubmitTurnRequest("native-race-1", "conversation-race-1", "hello", "en-US", "trace-1");
+
+        // Both parties are gated so that each only proceeds into AcceptAsync once BOTH have already
+        // called FindByNativeMessageIdAsync and observed nothing - the exact "two simultaneous
+        // deliveries both observe absence" race the durable-acceptance contract must survive, forced
+        // deterministically instead of left to thread-scheduling luck.
+        var readyA = new TaskCompletionSource();
+        var readyB = new TaskCompletionSource();
+        var serviceA = new TurnAcceptanceService(new TwoPartyGatedInboxStore(store, readyA, readyB.Task));
+        var serviceB = new TurnAcceptanceService(new TwoPartyGatedInboxStore(store, readyB, readyA.Task));
+
+        var taskA = serviceA.AcceptAsync(request, ReceivedAt, CancellationToken.None);
+        var taskB = serviceB.AcceptAsync(request, ReceivedAt, CancellationToken.None);
+
+        var results = await Task.WhenAll(taskA, taskB);
+
+        Assert.Equal(results[0].TurnId, results[1].TurnId);
+        Assert.Single(results, r => !r.WasAlreadyAccepted);
+        Assert.Single(results, r => r.WasAlreadyAccepted);
+        Assert.Single(store.Turns);
+    }
 }
