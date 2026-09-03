@@ -85,7 +85,11 @@ namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
                 UPDATE InboxEntries
                 SET Channel = 'web',
                     PrincipalKind = 'EntraUser',
-                    PrincipalSubject = CONVERT(nvarchar(36), ParticipantId),
+                    -- LOWER, because SQL Server renders a uniqueidentifier in uppercase hex while
+                    -- .NET renders the same Guid in lowercase: without it, migrated rows would carry
+                    -- a subject that never equals the one the application writes for that very same
+                    -- Participant.
+                    PrincipalSubject = LOWER(CONVERT(nvarchar(36), ParticipantId)),
                     Capabilities = 7;
                 """);
 
