@@ -3,12 +3,24 @@ using MultiChannelAgent.Domain.Inventories;
 namespace MultiChannelAgent.Domain.Turns;
 
 /// <summary>
+/// The full scope a native message identifier is deduplicated within. A channel's own message
+/// identifier is only ever unique inside the scope that issued it - two Participants, or two
+/// conversations of one Participant, can legitimately carry the same opaque string - so at-least-once
+/// deduplication always keys on this whole triple, never on the bare
+/// <see cref="NativeMessageId"/>. Keying on the bare id would silently drop an unrelated Participant's
+/// real request and hand them someone else's recorded Outcome.
+/// </summary>
+public readonly record struct NativeMessageKey(
+    ParticipantId ParticipantId, ChannelConversationId ChannelConversationId, string NativeMessageId);
+
+/// <summary>
 /// A normalized, channel-neutral inbound Turn. Every adapter translates validated native input into
 /// this shape before it is durably accepted. The <see cref="TurnId"/> is generated once at
-/// acceptance; the <see cref="NativeMessageId"/> is the stable native identity used to detect
-/// duplicate delivery. <see cref="ParticipantId"/> and <see cref="ChannelConversationId"/> are the
-/// application-owned identities the adapter resolved from trusted context (authenticated claims and
-/// the channel's own conversation identifier) - never accepted as untrusted caller input.
+/// acceptance; the <see cref="NativeMessageKey"/> is the stable native identity, scoped to its
+/// issuing Participant and ChannelConversation, used to detect duplicate delivery.
+/// <see cref="ParticipantId"/> and <see cref="ChannelConversationId"/> are the application-owned
+/// identities the adapter resolved from trusted context (authenticated claims and the channel's own
+/// conversation identifier) - never accepted as untrusted caller input.
 /// </summary>
 public sealed record InboundTurn
 {
@@ -27,6 +39,9 @@ public sealed record InboundTurn
     public string? TraceId { get; init; }
 
     public required DateTimeOffset ReceivedAt { get; init; }
+
+    /// <summary>The scope-complete identity duplicate native delivery is detected by.</summary>
+    public NativeMessageKey NativeMessageKey => new(ParticipantId, ChannelConversationId, NativeMessageId);
 
     public static InboundTurn Create(
         string? nativeMessageId,

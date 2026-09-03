@@ -1,9 +1,11 @@
 namespace MultiChannelAgent.Infrastructure.Persistence.Entities;
 
 /// <summary>
-/// The durable inbox row for one accepted Turn. <see cref="NativeMessageId"/> carries a unique
-/// constraint so duplicate at-least-once delivery cannot create a second row (idempotency at the
-/// Turn boundary). <see cref="Status"/> tracks workflow processing state.
+/// The durable inbox row for one accepted Turn. (<see cref="ParticipantId"/>,
+/// <see cref="ChannelConversationId"/>, <see cref="NativeMessageId"/>) carries a unique constraint so
+/// duplicate at-least-once delivery cannot create a second row (idempotency at the Turn boundary),
+/// scoped the way a native message id is actually unique. <see cref="Status"/> tracks workflow
+/// processing state.
 /// </summary>
 public sealed class InboxEntryEntity
 {

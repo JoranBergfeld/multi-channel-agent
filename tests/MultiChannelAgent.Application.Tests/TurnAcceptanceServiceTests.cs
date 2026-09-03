@@ -67,4 +67,41 @@ public class TurnAcceptanceServiceTests
         Assert.Single(results, r => r.WasAlreadyAccepted);
         Assert.Single(store.Turns);
     }
+
+    // A native message id is only unique within the scope that issued it. Two Participants (or two
+    // conversations of one Participant) that happen to mint the same opaque id are unrelated
+    // messages, and collapsing them into one Turn would silently drop a real request - and, worse,
+    // hand one Participant another Participant's recorded Outcome.
+    [Fact]
+    public async Task The_same_native_message_id_from_a_different_participant_is_accepted_as_its_own_turn()
+    {
+        var otherParticipant = new ParticipantId(Guid.Parse("22222222-2222-2222-2222-222222222222"));
+        var store = new InMemoryInboxStore();
+        var service = new TurnAcceptanceService(store);
+
+        var mine = await service.AcceptAsync(
+            new SubmitTurnRequest("native-shared", SomeParticipant, "conversation-1", "hello", null, null), ReceivedAt, CancellationToken.None);
+        var theirs = await service.AcceptAsync(
+            new SubmitTurnRequest("native-shared", otherParticipant, "conversation-1", "hello", null, null), ReceivedAt, CancellationToken.None);
+
+        Assert.NotEqual(mine.TurnId, theirs.TurnId);
+        Assert.False(theirs.WasAlreadyAccepted);
+        Assert.Equal(2, store.Turns.Count);
+    }
+
+    [Fact]
+    public async Task The_same_native_message_id_in_a_different_conversation_is_accepted_as_its_own_turn()
+    {
+        var store = new InMemoryInboxStore();
+        var service = new TurnAcceptanceService(store);
+
+        var first = await service.AcceptAsync(
+            new SubmitTurnRequest("native-shared", SomeParticipant, "conversation-1", "hello", null, null), ReceivedAt, CancellationToken.None);
+        var second = await service.AcceptAsync(
+            new SubmitTurnRequest("native-shared", SomeParticipant, "conversation-2", "hello", null, null), ReceivedAt, CancellationToken.None);
+
+        Assert.NotEqual(first.TurnId, second.TurnId);
+        Assert.False(second.WasAlreadyAccepted);
+        Assert.Equal(2, store.Turns.Count);
+    }
 }

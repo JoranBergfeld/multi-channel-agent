@@ -12,12 +12,12 @@ public sealed class InMemoryInboxStore : IInboxStore
 
     public IReadOnlyList<InboundTurn> Turns => _turns;
 
-    public Task<InboundTurn?> FindByNativeMessageIdAsync(string nativeMessageId, CancellationToken cancellationToken)
+    public Task<InboundTurn?> FindByNativeMessageIdAsync(NativeMessageKey key, CancellationToken cancellationToken)
     {
         InboundTurn? match;
         lock (_gate)
         {
-            match = _turns.FirstOrDefault(t => t.NativeMessageId == nativeMessageId);
+            match = _turns.FirstOrDefault(t => t.NativeMessageKey == key);
         }
 
         return Task.FromResult(match);
@@ -36,7 +36,7 @@ public sealed class InMemoryInboxStore : IInboxStore
 
     /// <summary>
     /// Mirrors the atomicity <see cref="IInboxStore.AcceptAsync"/> requires from a real store: a lock
-    /// makes the "is one already accepted for this NativeMessageId" check and the insert a single
+    /// makes the "is one already accepted for this native message key" check and the insert a single
     /// indivisible step, so concurrent callers racing this method converge on whichever Turn actually
     /// wins, exactly like the real unique index at the database does.
     /// </summary>
@@ -44,7 +44,7 @@ public sealed class InMemoryInboxStore : IInboxStore
     {
         lock (_gate)
         {
-            var existing = _turns.FirstOrDefault(t => t.NativeMessageId == turn.NativeMessageId);
+            var existing = _turns.FirstOrDefault(t => t.NativeMessageKey == turn.NativeMessageKey);
             if (existing is not null)
             {
                 return Task.FromResult(new InboxAcceptResult(existing, WasAlreadyAccepted: true));

@@ -18,9 +18,11 @@ public sealed class InboxEntryEntityConfiguration : IEntityTypeConfiguration<Inb
         builder.Property(e => e.TraceId).HasMaxLength(128);
         builder.Property(e => e.Status).HasConversion<string>().HasMaxLength(32);
 
-        // Enforces idempotency at the Turn boundary: at-least-once redelivery of the same native
-        // message can never create a second durable Turn.
-        builder.HasIndex(e => e.NativeMessageId).IsUnique();
+        // Enforces idempotency at the Turn boundary, scoped the way a native message id is actually
+        // unique: within the Participant and ChannelConversation that issued it. At-least-once
+        // redelivery of the same native message in the same scope can never create a second durable
+        // Turn, while the same opaque id issued in a different scope stays a distinct Turn.
+        builder.HasIndex(e => new { e.ParticipantId, e.ChannelConversationId, e.NativeMessageId }).IsUnique();
 
         // Supports claiming pending work in FIFO (received) order.
         builder.HasIndex(e => new { e.Status, e.ReceivedAt });

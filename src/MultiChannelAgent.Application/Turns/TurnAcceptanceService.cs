@@ -7,8 +7,10 @@ public sealed record TurnAcceptanceResult(TurnId TurnId, bool WasAlreadyAccepted
 
 /// <summary>
 /// Durably accepts normalized synthetic Turns. Ingress is at-least-once: submitting the same
-/// <see cref="SubmitTurnRequest.NativeMessageId"/> again returns the originally recorded Turn identity
-/// instead of creating a duplicate, so retries never rerun processing once accepted.
+/// <see cref="SubmitTurnRequest.NativeMessageId"/> again, within the same Participant and
+/// ChannelConversation scope, returns the originally recorded Turn identity instead of creating a
+/// duplicate, so retries never rerun processing once accepted. The same native id issued in a
+/// different scope is a different message and is accepted on its own.
 /// </summary>
 public sealed class TurnAcceptanceService(IInboxStore inboxStore)
 {
@@ -17,7 +19,10 @@ public sealed class TurnAcceptanceService(IInboxStore inboxStore)
         DateTimeOffset receivedAt,
         CancellationToken cancellationToken)
     {
-        var existing = await inboxStore.FindByNativeMessageIdAsync(request.NativeMessageId, cancellationToken);
+        var key = new NativeMessageKey(
+            request.ParticipantId, new ChannelConversationId(request.ChannelConversationId), request.NativeMessageId);
+
+        var existing = await inboxStore.FindByNativeMessageIdAsync(key, cancellationToken);
         if (existing is not null)
         {
             return new TurnAcceptanceResult(existing.TurnId, WasAlreadyAccepted: true);

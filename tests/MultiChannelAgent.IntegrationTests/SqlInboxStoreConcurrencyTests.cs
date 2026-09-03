@@ -102,6 +102,61 @@ public sealed class SqlInboxStoreConcurrencyTests : IDisposable
         await Assert.ThrowsAsync<DbUpdateException>(() => store.AcceptAsync(conflictingTurn, CancellationToken.None));
     }
 
+    // Deduplication is scoped to (Participant, ChannelConversation, native message id): the database
+    // constraint itself must permit the same opaque native id in a different scope, because a native
+    // id is only ever unique within the channel scope that issued it.
+    [Fact]
+    public async Task The_same_native_message_id_in_a_different_scope_is_accepted_as_its_own_row()
+    {
+        const string nativeMessageId = "native-shared-1";
+        var otherParticipant = new ParticipantId(Guid.Parse("22222222-2222-2222-2222-222222222222"));
+        var now = DateTimeOffset.UtcNow;
+
+        using var db = CreateContext();
+        var store = new SqlInboxStore(db);
+
+        var mine = await store.AcceptAsync(
+            InboundTurn.Create(nativeMessageId, SomeParticipant, "conversation-scope-a", "hello", null, now, null), CancellationToken.None);
+        var otherConversation = await store.AcceptAsync(
+            InboundTurn.Create(nativeMessageId, SomeParticipant, "conversation-scope-b", "hello", null, now, null), CancellationToken.None);
+        var otherParticipantTurn = await store.AcceptAsync(
+            InboundTurn.Create(nativeMessageId, otherParticipant, "conversation-scope-a", "hello", null, now, null), CancellationToken.None);
+
+        Assert.False(otherConversation.WasAlreadyAccepted);
+        Assert.False(otherParticipantTurn.WasAlreadyAccepted);
+        Assert.Equal(3, new HashSet<TurnId> { mine.Turn.TurnId, otherConversation.Turn.TurnId, otherParticipantTurn.Turn.TurnId }.Count);
+
+        using var verifyDb = CreateContext();
+        Assert.Equal(3, await verifyDb.InboxEntries.AsNoTracking().CountAsync(e => e.NativeMessageId == nativeMessageId));
+    }
+
+    // Looking a duplicate up must use the whole scope too: a lookup keyed on the bare native id
+    // would hand one Participant another Participant's Turn identity (and so their Outcome).
+    [Fact]
+    public async Task Finding_by_native_message_key_never_returns_another_scopes_turn()
+    {
+        const string nativeMessageId = "native-shared-2";
+        var otherParticipant = new ParticipantId(Guid.Parse("22222222-2222-2222-2222-222222222222"));
+        var now = DateTimeOffset.UtcNow;
+
+        using var db = CreateContext();
+        var store = new SqlInboxStore(db);
+
+        var mine = await store.AcceptAsync(
+            InboundTurn.Create(nativeMessageId, SomeParticipant, "conversation-scope-a", "hello", null, now, null), CancellationToken.None);
+
+        var mineAgain = await store.FindByNativeMessageIdAsync(
+            new NativeMessageKey(SomeParticipant, new ChannelConversationId("conversation-scope-a"), nativeMessageId), CancellationToken.None);
+        var strangersLookup = await store.FindByNativeMessageIdAsync(
+            new NativeMessageKey(otherParticipant, new ChannelConversationId("conversation-scope-a"), nativeMessageId), CancellationToken.None);
+        var otherConversationLookup = await store.FindByNativeMessageIdAsync(
+            new NativeMessageKey(SomeParticipant, new ChannelConversationId("conversation-scope-b"), nativeMessageId), CancellationToken.None);
+
+        Assert.Equal(mine.Turn.TurnId, mineAgain!.TurnId);
+        Assert.Null(strangersLookup);
+        Assert.Null(otherConversationLookup);
+    }
+
     private MultiChannelAgentDbContext CreateContext()
     {
         var options = new DbContextOptionsBuilder<MultiChannelAgentDbContext>()

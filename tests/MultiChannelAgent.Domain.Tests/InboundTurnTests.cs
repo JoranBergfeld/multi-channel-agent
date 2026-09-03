@@ -111,4 +111,31 @@ public class InboundTurnTests
 
         Assert.NotEqual(first.TurnId, second.TurnId);
     }
+
+    // A native message identifier is only ever unique within the channel scope that issued it: two
+    // different channel adapters (or two conversations within one adapter) can legitimately mint the
+    // same opaque string. Deduplication therefore keys on the whole scope, never on the bare id.
+    [Fact]
+    public void The_native_message_key_carries_the_full_participant_and_conversation_scope()
+    {
+        var turn = InboundTurn.Create("native-123", SomeParticipant, "conversation-abc", "hello", null, DateTimeOffset.UtcNow, null);
+
+        Assert.Equal(
+            new NativeMessageKey(SomeParticipant, new ChannelConversationId("conversation-abc"), "native-123"),
+            turn.NativeMessageKey);
+    }
+
+    [Fact]
+    public void The_same_native_message_id_in_a_different_scope_is_a_different_key()
+    {
+        var otherParticipant = new ParticipantId(Guid.Parse("22222222-2222-2222-2222-222222222222"));
+        var receivedAt = DateTimeOffset.UtcNow;
+
+        var mine = InboundTurn.Create("native-123", SomeParticipant, "conversation-abc", "hello", null, receivedAt, null);
+        var otherConversation = InboundTurn.Create("native-123", SomeParticipant, "conversation-xyz", "hello", null, receivedAt, null);
+        var otherParticipantTurn = InboundTurn.Create("native-123", otherParticipant, "conversation-abc", "hello", null, receivedAt, null);
+
+        Assert.NotEqual(mine.NativeMessageKey, otherConversation.NativeMessageKey);
+        Assert.NotEqual(mine.NativeMessageKey, otherParticipantTurn.NativeMessageKey);
+    }
 }
