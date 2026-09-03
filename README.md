@@ -18,11 +18,13 @@ Inventory workspace refetches its authoritative Stock projection from
 
 ```text
 src/
-  MultiChannelAgent.Domain/          Pure domain model: InboundTurn, Outcome, Delivery, the Inventory
-                                      aggregate (Participant, Inventory, Membership, Unit,
+  MultiChannelAgent.Domain/          Pure domain model: the InboundTurn contract (typed ChannelPrincipal
+                                      evidence, ordered content parts with provenance, declared channel
+                                      capabilities), Outcome with its semantic category, Delivery, the
+                                      Inventory aggregate (Participant, Inventory, Membership, Unit,
                                       ActiveInventorySelection), and the Stock Entry model (Location,
-                                      StockEntry, Quantity, StockEntrySummary, deterministic display
-                                      ordering, the opaque list cursor, and the Find candidate
+                                      StockEntry, Quantity, StockEntrySummary, the deterministic order
+                                      key, the shape-bound list cursor, and the Find candidate
                                       outcome). No dependencies.
   MultiChannelAgent.Application/     Application boundary: TurnAcceptanceService, TurnProcessingCoordinator,
                                       DeliveryDispatchCoordinator, TurnOutcomeReader, the scripted model
@@ -36,7 +38,8 @@ src/
                                       migrations, and the SQL-backed repositories/lease coordinator,
                                       including SqlStockStore and SqlFoundryConversationBindingStore.
                                       Depends on Domain and Application.
-  MultiChannelAgent.Host/            ASP.NET Core: HTTP endpoints, health checks, hosted workers,
+  MultiChannelAgent.Host/            ASP.NET Core: HTTP endpoints, health checks, hosted workers
+                                      (Turn processing, Delivery dispatch, Outcome payload cleanup),
                                       the Entra/Test authentication contract, CSRF-protected session,
                                       Inventory, and Stock projection endpoints, and the published
                                       React/Vite client (wwwroot). Depends on all of the above.
@@ -172,17 +175,41 @@ Then:
 - `POST /api/inventories/{inventoryId}/select` — explicitly switch the Active Inventory for the
   current web conversation. `404` (never a distinct signal) when the Inventory does not exist or is
   not authorized for the caller; selecting never itself grants access.
-- `POST /api/turns` — submit a normalized synthetic `InboundTurn`:
-  `{ "nativeMessageId": "...", "channelConversationId": "...", "contentText": "...", "locale": "en-US", "traceId": "..." }`.
-  Returns `202 Accepted` with `{ "turnId": "...", "alreadyAccepted": false }`. Resubmitting the same
-  `nativeMessageId` returns the original `turnId` with `alreadyAccepted: true` instead of duplicating
-  acceptance or reprocessing.
+- `POST /api/turns` — submit a normalized `InboundTurn`:
+  `{ "nativeMessageId": "...", "contentText": "...", "locale": "en-US", "traceId": "..." }`. Participant,
+  ChannelConversation, channel, typed principal evidence, and channel capabilities all come from the
+  authenticated session and the web adapter - never from the body. Returns `202 Accepted` with
+  `{ "turnId": "...", "alreadyAccepted": false }`. Resubmitting the same `nativeMessageId` (within the
+  same Participant and conversation - the scope a native id is actually unique in) never duplicates
+  acceptance or reprocesses: it returns `202` while the Turn is still being processed, and `200` with
+  that Turn's recorded terminal Outcome once it has one.
 - `GET /api/turns/{turnId}/outcome` — the recorded terminal Outcome and its Deliveries once hosted
   processing completes (`404` until then).
 
-The scripted model boundary (`ScriptedModelBoundary`) echoes ordinary content back as one requested
-Delivery; a Turn whose content is exactly `trigger-scripted-failure` produces a failed Outcome with no
-Delivery, so both terminal paths are reproducible without any external model dependency.
+An Outcome reports both `status` - whether processing produced an answer at all - and `category`, the
+semantic shape of that answer (`completed`, `ambiguous`, `not_found`, `forbidden`, `conflict`,
+`invalid`, `confirmation_required`, `transient_failure`). A deterministic answer such as "nothing
+matched" or "select an Inventory first" is completed processing with its own category; `status` is
+only `failed` when the system, the model, or a dependency failed to answer. Answers also record one
+channel-neutral response part as a Delivery, dispatched and retried independently of processing, and
+a typed result payload is retained for 24 hours (a scheduled cleanup pass discards it afterwards -
+current SQL state is authoritative, the payload is only a convenience for resuming an answer).
+
+The scripted model boundary (`ScriptedModelBoundary`) stands in for a Foundry-backed model and
+understands a small bounded grammar, always under the trusted context the application injects:
+
+```text
+list stock [including zero] [named <text>] [unit <unit>] [in <location>] [unlocated]
+           [page size <n>] [after <cursor>]
+find <name or Stock Entry id> [unit <unit>] [in <location>] [unlocated]
+```
+
+Unit and Location references resolve exactly - by opaque identifier, exact name, or (for a Unit) an
+active alias - and an unknown one is answered `reference_not_found` rather than created or ignored.
+A page's `nextCursor` may only be resumed by an identically shaped request. Anything else is echoed
+back as one Delivery; a Turn whose content is exactly `trigger-scripted-failure` produces a failed
+Outcome with no Delivery, so both terminal paths are reproducible without any external model
+dependency.
 
 ## Container image
 
