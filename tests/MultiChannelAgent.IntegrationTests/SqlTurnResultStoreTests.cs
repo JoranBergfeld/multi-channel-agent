@@ -16,6 +16,13 @@ namespace MultiChannelAgent.IntegrationTests;
 /// separate writes could leave the Outcome recorded but the inbox entry still Pending, so a retry
 /// reran model planning, created new Delivery rows, and then hit the Outcome's primary-key constraint
 /// forever.
+///
+/// Also covers, against the same real SQL Server engine, the related cross-Turn
+/// <see cref="Microsoft.EntityFrameworkCore.ChangeTracker"/> isolation invariant: a failed Turn's
+/// record attempt must not leave stale tracked entities that contaminate a later Turn's record
+/// attempt against the SAME scope/<see cref="MultiChannelAgentDbContext"/> instance - the shape
+/// <see cref="Application.Turns.TurnProcessingCoordinator"/> uses when it processes a whole claimed
+/// batch of Turns through one DI scope.
 /// </summary>
 public sealed class SqlTurnResultStoreTests : SqlIntegrationTestBase
 {
@@ -94,6 +101,87 @@ public sealed class SqlTurnResultStoreTests : SqlIntegrationTestBase
 
             var finalInboxEntry = await finalDb.InboxEntries.AsNoTracking().FirstAsync(e => e.TurnId == turn.TurnId.Value);
             Assert.Equal(InboxEntryStatus.Completed, finalInboxEntry.Status);
+        }
+    }
+
+    [SkippableFact]
+    public async Task A_failed_record_attempt_does_not_contaminate_a_later_turns_record_attempt_in_the_same_scope()
+    {
+        Skip.IfNot(DockerAvailable, "Docker is not available in this environment; skipping the real SQL cross-Turn contamination scenario.");
+
+        var turnA = InboundTurn.Create("native-contamination-a", "conversation-contamination-a", "hello a", null, DateTimeOffset.UtcNow, null);
+        var turnB = InboundTurn.Create("native-contamination-b", "conversation-contamination-b", "hello b", null, DateTimeOffset.UtcNow, null);
+
+        using (var seedScope = Factory!.Services.CreateScope())
+        {
+            var seedDb = seedScope.ServiceProvider.GetRequiredService<MultiChannelAgentDbContext>();
+            foreach (var turn in new[] { turnA, turnB })
+            {
+                seedDb.InboxEntries.Add(new InboxEntryEntity
+                {
+                    TurnId = turn.TurnId.Value,
+                    NativeMessageId = turn.NativeMessageId,
+                    ChannelConversationId = turn.ChannelConversationId,
+                    ContentText = turn.ContentText,
+                    ReceivedAt = turn.ReceivedAt,
+                    CreatedAt = turn.ReceivedAt,
+                    Status = InboxEntryStatus.Pending,
+                });
+            }
+
+            await seedDb.SaveChangesAsync();
+        }
+
+        var now = DateTimeOffset.UtcNow;
+
+        // Both RecordAsync calls below share ONE scope (and therefore one MultiChannelAgentDbContext
+        // instance, since it is registered scoped) - the exact production shape of
+        // TurnProcessingCoordinator.ProcessPendingAsync, which processes an entire claimed batch of
+        // Turns through a single scoped DbContext resolved once at the start of the pass.
+        using var sharedScope = Factory.Services.CreateScope();
+        var turnResultStore = sharedScope.ServiceProvider.GetRequiredService<ITurnResultStore>();
+
+        var outcomeA = Outcome.Completed(turnA.TurnId, "echoed", "Echoed: hello a", now);
+        var validDeliveryA = Delivery.Request(turnA.TurnId, "synthetic", "Echoed: hello a", now);
+
+        // A rogue Delivery for a Turn with no InboxEntry row violates the real foreign-key constraint
+        // at the database, guaranteeing SaveChangesAsync fails mid-write for Turn A - after the valid
+        // Outcome insert, the valid Delivery insert, and the inbox completion update were all already
+        // staged in the same unit of work.
+        var rogueDelivery = Delivery.Request(TurnId.NewId(), "synthetic", "orphaned", now);
+
+        await Assert.ThrowsAsync<DbUpdateException>(() => turnResultStore.RecordAsync(
+            outcomeA,
+            [validDeliveryA, rogueDelivery],
+            CancellationToken.None));
+
+        // Turn B is a completely independent, valid record attempt. Before the ChangeTracker is
+        // cleared on Turn A's failure, this call fails too: EF Core resends every still-tracked
+        // Added/Modified entity from the failed Turn A attempt (including the rogue Delivery) on the
+        // next SaveChangesAsync in the same DbContext, so the same foreign-key violation recurs even
+        // though Turn B's own data is entirely valid.
+        var outcomeB = Outcome.Completed(turnB.TurnId, "echoed", "Echoed: hello b", now);
+        var deliveryB = Delivery.Request(turnB.TurnId, "synthetic", "Echoed: hello b", now);
+
+        await turnResultStore.RecordAsync(outcomeB, [deliveryB], CancellationToken.None);
+
+        using (var verifyScope = Factory.Services.CreateScope())
+        {
+            var verifyDb = verifyScope.ServiceProvider.GetRequiredService<MultiChannelAgentDbContext>();
+
+            // Turn A left no partial state: it remains exactly as it was before the failed attempt.
+            Assert.Null(await verifyDb.Outcomes.AsNoTracking().FirstOrDefaultAsync(o => o.TurnId == turnA.TurnId.Value));
+            Assert.Empty(await verifyDb.Deliveries.AsNoTracking().Where(d => d.TurnId == turnA.TurnId.Value).ToListAsync());
+            var inboxEntryA = await verifyDb.InboxEntries.AsNoTracking().FirstAsync(e => e.TurnId == turnA.TurnId.Value);
+            Assert.Equal(InboxEntryStatus.Pending, inboxEntryA.Status);
+
+            // Turn B is fully and correctly recorded.
+            var savedOutcomeB = await verifyDb.Outcomes.AsNoTracking().FirstAsync(o => o.TurnId == turnB.TurnId.Value);
+            Assert.Equal("echoed", savedOutcomeB.Code);
+            var savedDeliveryB = await verifyDb.Deliveries.AsNoTracking().SingleAsync(d => d.TurnId == turnB.TurnId.Value);
+            Assert.Equal(DeliveryEntityStatus.Pending, savedDeliveryB.Status);
+            var inboxEntryB = await verifyDb.InboxEntries.AsNoTracking().FirstAsync(e => e.TurnId == turnB.TurnId.Value);
+            Assert.Equal(InboxEntryStatus.Completed, inboxEntryB.Status);
         }
     }
 }

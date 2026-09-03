@@ -13,7 +13,7 @@ FROM mcr.microsoft.com/dotnet/sdk:10.0 AS backend-build
 WORKDIR /src
 
 COPY Directory.Build.props ./
-COPY MultiChannelAgent.sln ./
+COPY MultiChannelAgent.slnx ./
 COPY src/MultiChannelAgent.Domain/MultiChannelAgent.Domain.csproj src/MultiChannelAgent.Domain/
 COPY src/MultiChannelAgent.Application/MultiChannelAgent.Application.csproj src/MultiChannelAgent.Application/
 COPY src/MultiChannelAgent.Infrastructure/MultiChannelAgent.Infrastructure.csproj src/MultiChannelAgent.Infrastructure/

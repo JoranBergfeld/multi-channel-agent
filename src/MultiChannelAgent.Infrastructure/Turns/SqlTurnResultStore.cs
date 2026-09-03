@@ -12,7 +12,11 @@ namespace MultiChannelAgent.Infrastructure.Turns;
 /// them with a single <see cref="DbContext.SaveChangesAsync(CancellationToken)"/> call, which SQL
 /// Server executes as one transaction: either all three durable effects are recorded together, or
 /// none of them are, and a Turn stays claimable by <see cref="SqlInboxStore.ClaimPendingAsync"/> until
-/// that happens.
+/// that happens. On failure, the <see cref="DbContext.ChangeTracker"/> is cleared before rethrowing so
+/// this Turn's failed attempt cannot leave stale tracked entities behind to contaminate a later Turn's
+/// <c>RecordAsync</c> call against the same shared <see cref="MultiChannelAgentDbContext"/> - the
+/// situation one <see cref="Application.Turns.TurnProcessingCoordinator"/> pass creates when it
+/// processes a whole batch of Turns through one DI scope.
 /// </summary>
 public sealed class SqlTurnResultStore(MultiChannelAgentDbContext db) : ITurnResultStore
 {
@@ -45,6 +49,22 @@ public sealed class SqlTurnResultStore(MultiChannelAgentDbContext db) : ITurnRes
             });
         }
 
-        await db.SaveChangesAsync(cancellationToken);
+        try
+        {
+            await db.SaveChangesAsync(cancellationToken);
+        }
+        catch
+        {
+            // EF Core does not roll back change tracking when SaveChangesAsync fails - only the
+            // database transaction. Left alone, the Outcome/Delivery Added entries and the InboxEntry
+            // Modified entry staged above for this Turn would remain tracked in this DbContext and be
+            // resent (and can fail again) on the very next SaveChangesAsync call. Because one
+            // TurnProcessingCoordinator pass shares a single scoped DbContext across a whole batch of
+            // Turns, that would let one Turn's failure contaminate every later Turn's record attempt
+            // in the same batch. Clearing the tracker confines the failure to this Turn only, so the
+            // next RecordAsync call in the same scope starts from a clean tracker.
+            db.ChangeTracker.Clear();
+            throw;
+        }
     }
 }

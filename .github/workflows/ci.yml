@@ -48,6 +48,43 @@ jobs:
           REQUIRE_DOCKER_TESTS: "true"
         run: dotnet test --no-build --configuration Release --logger "console;verbosity=normal"
 
+  container:
+    name: Container image build and liveness smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Gates the ticket's "one runnable containerized application" acceptance criterion for real:
+      # the multi-stage Dockerfile must actually build the web client, restore/publish the backend,
+      # and assemble the runtime image, on the same Docker engine GitHub-hosted ubuntu runners
+      # preinstall and run for the Testcontainers-backed tests in the backend job above.
+      - name: Build container image
+        run: docker build --tag multi-channel-agent:ci .
+
+      # A connection string is required at startup (see Program.cs) but is never connected to for
+      # /health/live, which has no external dependencies - so a placeholder value is enough to prove
+      # the built image actually starts and serves traffic, without needing a real SQL Server here.
+      - name: Smoke test the container's liveness endpoint
+        run: |
+          set -e
+          container_id=$(docker run -d \
+            -p 8080:8080 \
+            -e ConnectionStrings__MultiChannelAgent="Server=placeholder;Database=placeholder;TrustServerCertificate=True" \
+            multi-channel-agent:ci)
+          trap 'docker logs "$container_id" || true; docker rm -f "$container_id" >/dev/null 2>&1 || true' EXIT
+
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent --output /dev/null http://localhost:8080/health/live; then
+              echo "Container is live."
+              exit 0
+            fi
+            sleep 1
+          done
+
+          echo "Container did not become live in time." >&2
+          exit 1
+
   frontend:
     name: Web client build and lint
     runs-on: ubuntu-latest
