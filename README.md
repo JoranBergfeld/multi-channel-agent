@@ -5,30 +5,44 @@ through production-style SQL migrations and hosted workers, and exposes its reco
 Outcome through one application boundary ([issue #27](https://github.com/JoranBergfeld/multi-channel-agent/issues/27)).
 It also implements the signed-in web BFF session contract and the first slice of the Inventory
 domain - explicit Inventory creation, listing, and selection
-([issue #28](https://github.com/JoranBergfeld/multi-channel-agent/issues/28)). See the parent spec
+([issue #28](https://github.com/JoranBergfeld/multi-channel-agent/issues/28)). It delivers the first
+real conversational Inventory path: a signed-in web Participant converses ("list stock", "find
+&lt;name&gt;"), a scripted Foundry-double boundary proposes a bounded `list_stock`/`find_stock` tool
+call, and a trusted application tool dispatcher - never the model itself - executes it against SQL
+under a freshly rechecked authorization, returning a typed semantic result the web renders and the
+Inventory workspace refetches its authoritative Stock projection from
+([issue #30](https://github.com/JoranBergfeld/multi-channel-agent/issues/30)). See the parent spec
 (issue #26) and the domain vocabulary in `CONTEXT.md`.
 
 ## Solution layout
 
 ```text
 src/
-  MultiChannelAgent.Domain/          Pure domain model: InboundTurn, Outcome, Delivery, and the
-                                      Inventory aggregate (Participant, Inventory, Membership, Unit,
-                                      ActiveInventorySelection). No dependencies.
+  MultiChannelAgent.Domain/          Pure domain model: InboundTurn, Outcome, Delivery, the Inventory
+                                      aggregate (Participant, Inventory, Membership, Unit,
+                                      ActiveInventorySelection), and the Stock Entry model (Location,
+                                      StockEntry, Quantity, StockEntrySummary, deterministic display
+                                      ordering, the opaque list cursor, and the Find candidate
+                                      outcome). No dependencies.
   MultiChannelAgent.Application/     Application boundary: TurnAcceptanceService, TurnProcessingCoordinator,
                                       DeliveryDispatchCoordinator, TurnOutcomeReader, the scripted model
-                                      boundary, the Inventory bootstrap/creation/listing/selection
-                                      services, and the repository/lease/model/delivery abstractions
-                                      Infrastructure implements. Depends only on Domain.
+                                      boundary and its ToolCallProposal/IToolDispatcher seam, the trusted
+                                      TurnExecutionContext/TurnExecutionContextFactory, the Inventory
+                                      bootstrap/creation/listing/selection services, the authorized
+                                      StockListingService/StockFindingService/StockToolDispatcher, and
+                                      the repository/lease/model/delivery abstractions Infrastructure
+                                      implements. Depends only on Domain.
   MultiChannelAgent.Infrastructure/  EF Core SQL Server DbContext, entity configurations, production
-                                      migrations, and the SQL-backed repositories/lease coordinator.
+                                      migrations, and the SQL-backed repositories/lease coordinator,
+                                      including SqlStockStore and SqlFoundryConversationBindingStore.
                                       Depends on Domain and Application.
   MultiChannelAgent.Host/            ASP.NET Core: HTTP endpoints, health checks, hosted workers,
-                                      the Entra/Test authentication contract, CSRF-protected session
-                                      and Inventory endpoints, and the published React/Vite client
-                                      (wwwroot). Depends on all of the above.
+                                      the Entra/Test authentication contract, CSRF-protected session,
+                                      Inventory, and Stock projection endpoints, and the published
+                                      React/Vite client (wwwroot). Depends on all of the above.
   web/                               React + TypeScript + Vite client: signed-in onboarding, Inventory
-                                      create/list/select, and the Turn tracer.
+                                      create/list/select, the conversation Turn tracer (rendering typed
+                                      List/Find results), and the Stock workspace projection.
 tests/
   MultiChannelAgent.Domain.Tests/         Pure unit tests for domain types.
   MultiChannelAgent.Application.Tests/    Application-layer tests against in-memory fakes and the
