@@ -17,6 +17,14 @@ public sealed class InboxEntryEntity
 
     public required string ChannelConversationId { get; set; }
 
+    /// <summary>
+    /// The durable, strictly increasing acceptance order of this Turn within its
+    /// <see cref="ChannelConversationId"/>, assigned once at acceptance and never reused. Wall-clock
+    /// <see cref="ReceivedAt"/> is not an ordering key: two Turns can share an instant (or arrive out
+    /// of clock order across replicas), so this is what deterministically orders a conversation.
+    /// </summary>
+    public long ConversationSequence { get; set; }
+
     public required string ContentText { get; set; }
 
     public string? Locale { get; set; }

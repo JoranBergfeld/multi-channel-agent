@@ -39,5 +39,13 @@ public interface IInboxStore
     /// </summary>
     Task<InboxAcceptResult> AcceptAsync(InboundTurn turn, CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Offers pending work in a shape that makes per-ChannelConversation FIFO impossible to break:
+    /// each ChannelConversation contributes at most its head - the earliest-accepted Turn that has
+    /// not yet completed - so a later Turn is never claimable while an earlier one in the same
+    /// conversation is still outstanding, whatever the batch limit, pass count, or lease boundary.
+    /// Acceptance order is durable and monotonic per conversation, so Turns accepted in the same
+    /// instant still order deterministically. Different ChannelConversations never block each other.
+    /// </summary>
     Task<IReadOnlyList<InboundTurn>> ClaimPendingAsync(int maxCount, CancellationToken cancellationToken);
 }

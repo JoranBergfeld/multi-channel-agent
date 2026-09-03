@@ -24,11 +24,17 @@ public sealed class InboxEntryEntityConfiguration : IEntityTypeConfiguration<Inb
         // Turn, while the same opaque id issued in a different scope stays a distinct Turn.
         builder.HasIndex(e => new { e.ParticipantId, e.ChannelConversationId, e.NativeMessageId }).IsUnique();
 
-        // Supports claiming pending work in FIFO (received) order.
+        // The durable acceptance order within a ChannelConversation. Uniqueness is what makes
+        // assigning it race-safe: two concurrent acceptances that compute the same next sequence
+        // cannot both commit, so the loser recomputes instead of silently duplicating an order key
+        // that per-conversation FIFO depends on being total.
+        builder.HasIndex(e => new { e.ChannelConversationId, e.ConversationSequence }).IsUnique();
+
+        // Supports claiming pending work in acceptance order.
         builder.HasIndex(e => new { e.Status, e.ReceivedAt });
 
-        // Supports resolving, for a given ChannelConversation, whether an earlier Turn is still
-        // pending - the check that enforces per-conversation FIFO processing order.
-        builder.HasIndex(e => new { e.ChannelConversationId, e.Status, e.ReceivedAt });
+        // Supports the conversation-head claim: for a candidate Turn, resolving whether its
+        // ChannelConversation still has an earlier outstanding (pending or in-flight) Turn.
+        builder.HasIndex(e => new { e.ChannelConversationId, e.Status, e.ConversationSequence });
     }
 }

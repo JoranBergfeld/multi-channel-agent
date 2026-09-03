@@ -55,12 +55,24 @@ public sealed class InMemoryInboxStore : IInboxStore
         }
     }
 
+    /// <summary>
+    /// Mirrors the SQL store's conversation-head selection: each ChannelConversation offers at most
+    /// its earliest still-outstanding Turn, in acceptance order, so a later Turn is never claimable
+    /// while an earlier one in the same conversation is unfinished.
+    /// </summary>
     public Task<IReadOnlyList<InboundTurn>> ClaimPendingAsync(int maxCount, CancellationToken cancellationToken)
     {
-        var pending = _turns
-            .Where(t => !_completed.Contains(t.TurnId.Value))
-            .Take(maxCount)
-            .ToList();
+        List<InboundTurn> pending;
+        lock (_gate)
+        {
+            pending = _turns
+                .Where(t => !_completed.Contains(t.TurnId.Value))
+                .GroupBy(t => t.ChannelConversationId)
+                .Select(conversation => conversation.First())
+                .Take(maxCount)
+                .ToList();
+        }
+
         return Task.FromResult<IReadOnlyList<InboundTurn>>(pending);
     }
 
