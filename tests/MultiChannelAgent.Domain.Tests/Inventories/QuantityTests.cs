@@ -73,4 +73,72 @@ public class QuantityTests
 
         Assert.Equal(quantity.ToInvariantText(), quantity.ToString());
     }
+
+    [Theory]
+    [InlineData("0", "0")]
+    [InlineData("12", "12")]
+    [InlineData("12.5", "12.5")]
+    [InlineData("  12.50  ", "12.5")]
+    [InlineData("0.0000000001", "0.0000000001")]
+    public void Invariant_decimal_text_parses_to_that_exact_amount(string text, string expected)
+    {
+        Assert.True(Quantity.TryParseInvariant(text, out var quantity));
+        Assert.Equal(expected, quantity.ToInvariantText());
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData("abc")]
+    [InlineData("1,5")]
+    [InlineData("1 000")]
+    [InlineData("1e3")]
+    [InlineData("-1")]
+    [InlineData("0.00000000001")]
+    [InlineData("1000000000000000000")]
+    public void Text_that_is_not_a_storable_non_negative_decimal_does_not_parse(string? text)
+    {
+        Assert.False(Quantity.TryParseInvariant(text, out var quantity));
+        Assert.Equal("0", quantity.ToInvariantText());
+    }
+
+    [Fact]
+    public void Adding_two_amounts_keeps_every_decimal_digit()
+    {
+        Assert.True(Quantity.Create(12.5m).TryAdd(Quantity.Create(2.25m), out var sum));
+
+        Assert.Equal("14.75", sum.ToInvariantText());
+    }
+
+    [Fact]
+    public void Adding_beyond_the_storable_range_is_refused_rather_than_silently_wrapped()
+    {
+        var nearLimit = Quantity.Create(999_999_999_999_999_999m);
+
+        Assert.False(nearLimit.TryAdd(Quantity.Create(1m), out _));
+    }
+
+    [Fact]
+    public void Subtracting_within_the_amount_on_hand_keeps_every_decimal_digit()
+    {
+        Assert.True(Quantity.Create(14.75m).TrySubtract(Quantity.Create(4.75m), out var result));
+
+        Assert.Equal("10", result.ToInvariantText());
+    }
+
+    [Fact]
+    public void Subtracting_more_than_the_amount_on_hand_is_refused_and_never_goes_negative()
+    {
+        Assert.False(Quantity.Create(3m).TrySubtract(Quantity.Create(3.0000000001m), out var result));
+
+        Assert.Equal("0", result.ToInvariantText());
+    }
+
+    [Fact]
+    public void Zero_is_an_amount_that_is_not_on_hand()
+    {
+        Assert.Equal("0", Quantity.Zero.ToInvariantText());
+        Assert.False(Quantity.Zero.IsOnHand);
+    }
 }
