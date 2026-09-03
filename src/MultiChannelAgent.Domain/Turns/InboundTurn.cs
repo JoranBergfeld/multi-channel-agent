@@ -22,9 +22,9 @@ public sealed record InboundTurn
     public required DateTimeOffset ReceivedAt { get; init; }
 
     public static InboundTurn Create(
-        string nativeMessageId,
-        string channelConversationId,
-        string contentText,
+        string? nativeMessageId,
+        string? channelConversationId,
+        string? contentText,
         string? locale,
         DateTimeOffset receivedAt,
         string? traceId)
@@ -45,15 +45,14 @@ public sealed record InboundTurn
         };
     }
 
-    private static string RequireNonBlank(string value, string parameterName)
+    private static string RequireNonBlank(string? value, string parameterName)
     {
-        var trimmed = value.Trim();
-        if (trimmed.Length == 0)
+        if (string.IsNullOrWhiteSpace(value))
         {
             throw new ArgumentException("Value must not be blank.", parameterName);
         }
 
-        return trimmed;
+        return value.Trim();
     }
 
     private static string? NormalizeOptional(string? value)

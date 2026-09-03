@@ -54,6 +54,45 @@ public class InboundTurnTests
             traceId: null));
     }
 
+    // Non-HTTP callers (a null NativeMessageId/ChannelConversationId/ContentText can arrive from any
+    // adapter, not just a JSON-bound HTTP request) must get the same clear ArgumentException a blank
+    // string produces, never an NRE from Trim() on a null reference.
+    [Fact]
+    public void Create_rejects_null_native_message_id_without_throwing_a_null_reference_exception()
+    {
+        Assert.Throws<ArgumentException>(() => InboundTurn.Create(
+            nativeMessageId: null!,
+            channelConversationId: "conversation-abc",
+            contentText: "hello",
+            locale: null,
+            receivedAt: DateTimeOffset.UtcNow,
+            traceId: null));
+    }
+
+    [Fact]
+    public void Create_rejects_null_channel_conversation_id_without_throwing_a_null_reference_exception()
+    {
+        Assert.Throws<ArgumentException>(() => InboundTurn.Create(
+            nativeMessageId: "native-123",
+            channelConversationId: null!,
+            contentText: "hello",
+            locale: null,
+            receivedAt: DateTimeOffset.UtcNow,
+            traceId: null));
+    }
+
+    [Fact]
+    public void Create_rejects_null_content_text_without_throwing_a_null_reference_exception()
+    {
+        Assert.Throws<ArgumentException>(() => InboundTurn.Create(
+            nativeMessageId: "native-123",
+            channelConversationId: "conversation-abc",
+            contentText: null!,
+            locale: null,
+            receivedAt: DateTimeOffset.UtcNow,
+            traceId: null));
+    }
+
     [Fact]
     public void Two_turns_created_for_the_same_native_message_get_distinct_turn_ids()
     {
