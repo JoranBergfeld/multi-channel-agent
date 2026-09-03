@@ -195,4 +195,14 @@ public sealed class StockConversationScenarioTests : SqlIntegrationTestBase
 
         await PerConversationFifoScenario.RunAsync(Factory!);
     }
+    // A conversational read must leave a durable, channel-neutral response part behind - exactly one,
+    // with its own identity - and neither duplicate submission nor Delivery retries may duplicate it
+    // or rerun processing. StockReadDeliverySqliteTests proves the identical behavior Docker-free.
+    [SkippableFact]
+    public async Task An_answered_read_records_exactly_one_channel_neutral_response_part()
+    {
+        Skip.IfNot(DockerAvailable, "Docker is not available in this environment; skipping the SQL-backed read Delivery scenario.");
+
+        await StockReadDeliveryScenario.RunAsync(Factory!);
+    }
 }

@@ -18,6 +18,13 @@ public sealed class StockToolDispatcher(StockListingService listingService, Stoc
     public const string ListStockToolName = "list_stock";
     public const string FindStockToolName = "find_stock";
 
+    /// <summary>
+    /// The channel-neutral response part every answered read leaves behind. It names the conversation
+    /// itself, not any one channel: each adapter renders this same part for its own medium, and
+    /// Delivery dispatch retries it independently of the processing that produced it.
+    /// </summary>
+    public const string ResponseChannel = "conversation";
+
     private static readonly JsonSerializerOptions PayloadOptions = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
 
     public async Task<ModelDecision> DispatchAsync(
@@ -115,6 +122,10 @@ public sealed class StockToolDispatcher(StockListingService listingService, Stoc
         Code = code,
         Summary = summary,
         Payload = payload,
+
+        // The typed payload is the answer's channel-neutral content; the summary alone would lose the
+        // rows/candidates the Participant asked for.
+        Deliveries = [new RequestedDelivery(ResponseChannel, payload)],
     };
 
     // A deterministic domain answer the Participant asked for - "nothing matched", "you may not see
@@ -125,8 +136,14 @@ public sealed class StockToolDispatcher(StockListingService listingService, Stoc
         Category = category,
         Code = code,
         Summary = summary,
+
+        // A semantic answer is still an answer the Participant is owed, so it leaves the same durable
+        // response part behind - here the summary is the whole answer.
+        Deliveries = [new RequestedDelivery(ResponseChannel, summary)],
     };
 
+    // A failure has produced no answer yet, and the Turn stays retryable, so it deliberately leaves
+    // no response part: sending one would tell the Participant something a later retry contradicts.
     private static ModelDecision SystemFailure(string code, string summary) => new()
     {
         Category = OutcomeCategory.TransientFailure,

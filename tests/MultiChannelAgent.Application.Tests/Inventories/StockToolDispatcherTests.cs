@@ -151,4 +151,61 @@ public class StockToolDispatcherTests
         Assert.Equal(OutcomeCategory.TransientFailure, decision.Category);
         Assert.Equal("unknown_tool", decision.Code);
     }
+    // A read answer is a response the Participant is owed, so it must leave a durable, channel-
+    // neutral response part behind - the record Delivery dispatch (and its independent retries) work
+    // from. Without one, a completed read produced nothing to send and the conversation silently
+    // showed no answer at all.
+    [Fact]
+    public async Task A_list_answer_requests_exactly_one_channel_neutral_response_part()
+    {
+        var (dispatcher, stockStore) = CreateDispatcher();
+        stockStore.Add(SomeInventory, Row("Bolts", 5m, "10000000"));
+        var proposal = new ToolCallProposal("list_stock", new Dictionary<string, string>());
+
+        var decision = await dispatcher.DispatchAsync(proposal, Context(Viewer, SomeInventory), Now, CancellationToken.None);
+
+        var response = Assert.Single(decision.Deliveries);
+        Assert.Equal(StockToolDispatcher.ResponseChannel, response.Channel);
+        Assert.Contains("Bolts", response.Payload);
+    }
+
+    [Fact]
+    public async Task A_find_answer_requests_exactly_one_channel_neutral_response_part()
+    {
+        var (dispatcher, stockStore) = CreateDispatcher();
+        stockStore.Add(SomeInventory, Row("Bolts", 5m, "10000000"));
+        var proposal = new ToolCallProposal("find_stock", new Dictionary<string, string> { ["reference"] = "Bolts" });
+
+        var decision = await dispatcher.DispatchAsync(proposal, Context(Viewer, SomeInventory), Now, CancellationToken.None);
+
+        var response = Assert.Single(decision.Deliveries);
+        Assert.Equal(StockToolDispatcher.ResponseChannel, response.Channel);
+    }
+
+    // Semantic answers are answers too: the Participant must be told "nothing matched" or "select an
+    // Inventory first", so those also leave a response part behind.
+    [Fact]
+    public async Task A_semantic_answer_still_requests_a_response_part()
+    {
+        var (dispatcher, _) = CreateDispatcher();
+        var proposal = new ToolCallProposal("list_stock", new Dictionary<string, string>());
+
+        var decision = await dispatcher.DispatchAsync(proposal, Context(Viewer, activeInventoryId: null), Now, CancellationToken.None);
+
+        var response = Assert.Single(decision.Deliveries);
+        Assert.Equal(decision.Summary, response.Payload);
+    }
+
+    // A model/system failure has produced no answer yet and will be retried, so requesting a response
+    // part for it would send the Participant something the retry then contradicts.
+    [Fact]
+    public async Task A_system_failure_requests_no_response_part()
+    {
+        var (dispatcher, _) = CreateDispatcher();
+        var proposal = new ToolCallProposal("delete_everything", new Dictionary<string, string>());
+
+        var decision = await dispatcher.DispatchAsync(proposal, Context(Viewer, SomeInventory), Now, CancellationToken.None);
+
+        Assert.Empty(decision.Deliveries);
+    }
 }

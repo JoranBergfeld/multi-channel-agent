@@ -38,10 +38,18 @@ public sealed class SqlDeliveryStore(MultiChannelAgentDbContext db) : IDeliveryS
 
     public async Task<IReadOnlyList<Delivery>> ClaimPendingAsync(int maxCount, CancellationToken cancellationToken)
     {
-        var pending = await db.Deliveries
-            .AsNoTracking()
-            .Where(e => e.Status == DeliveryEntityStatus.Pending)
-            .OrderBy(e => e.CreatedAt)
+        // Ordered by the Turn's durable per-conversation acceptance sequence, so one conversation's
+        // response parts are always dispatched in the order their Turns were answered. (Cross-
+        // conversation order is deliberately unconstrained - conversations are independent - and the
+        // Delivery id breaks ties.) The Turn's own sequence is used rather than the Delivery's
+        // creation instant because a DateTimeOffset is not orderable on every relational provider,
+        // and this claim must behave identically wherever it runs.
+        var pending = await (
+            from delivery in db.Deliveries.AsNoTracking()
+            where delivery.Status == DeliveryEntityStatus.Pending
+            join inboxEntry in db.InboxEntries.AsNoTracking() on delivery.TurnId equals inboxEntry.TurnId
+            orderby inboxEntry.ConversationSequence, delivery.DeliveryId
+            select delivery)
             .Take(maxCount)
             .ToListAsync(cancellationToken);
 
