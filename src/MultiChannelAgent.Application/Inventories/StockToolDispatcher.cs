@@ -6,17 +6,24 @@ using MultiChannelAgent.Domain.Turns;
 namespace MultiChannelAgent.Application.Inventories;
 
 /// <summary>
-/// Executes list_stock/find_stock tool calls proposed by the model boundary, always under the trusted
+/// Executes list_stock/find_stock/add_stock/remove_stock/set_stock tool calls proposed by the model
+/// boundary, always under the trusted
 /// <see cref="TurnExecutionContext"/> assembled by <see cref="TurnExecutionContextFactory"/> - never
 /// the proposal's own untrusted arguments, which are only ever free-form filter text (for example
 /// <c>includeZero</c> or <c>reference</c>), never identity. A malicious or buggy proposal cannot widen
 /// access by smuggling a Participant/Inventory id into its args: this dispatcher never reads any such
 /// key from them.
 /// </summary>
-public sealed class StockToolDispatcher(StockListingService listingService, StockFindingService findingService) : IToolDispatcher
+public sealed class StockToolDispatcher(
+    StockListingService listingService,
+    StockFindingService findingService,
+    StockMutationService mutationService) : IToolDispatcher
 {
     public const string ListStockToolName = "list_stock";
     public const string FindStockToolName = "find_stock";
+    public const string AddStockToolName = "add_stock";
+    public const string RemoveStockToolName = "remove_stock";
+    public const string SetStockToolName = "set_stock";
 
     /// <summary>
     /// The channel-neutral response part every answered read leaves behind. It names the conversation
@@ -41,6 +48,12 @@ public sealed class StockToolDispatcher(StockListingService listingService, Stoc
         {
             ListStockToolName => await DispatchListAsync(proposal.UntrustedArgs, context, inventoryId, now, cancellationToken),
             FindStockToolName => await DispatchFindAsync(proposal.UntrustedArgs, context, inventoryId, now, cancellationToken),
+            AddStockToolName => await DispatchMutationAsync(
+                Domain.Inventories.StockMutationKind.Add, proposal, context, inventoryId, now, cancellationToken),
+            RemoveStockToolName => await DispatchMutationAsync(
+                Domain.Inventories.StockMutationKind.Remove, proposal, context, inventoryId, now, cancellationToken),
+            SetStockToolName => await DispatchMutationAsync(
+                Domain.Inventories.StockMutationKind.Set, proposal, context, inventoryId, now, cancellationToken),
 
             // An unrecognized tool name is the model proposing something this application cannot
             // execute - a model/system failure, not an answer to the Participant's request.
@@ -133,6 +146,121 @@ public sealed class StockToolDispatcher(StockListingService listingService, Stoc
             _ => Semantic(OutcomeCategory.Forbidden, "forbidden", "That request could not be completed."),
         };
     }
+
+    private async Task<ModelDecision> DispatchMutationAsync(
+        Domain.Inventories.StockMutationKind kind,
+        ToolCallProposal proposal,
+        TurnExecutionContext context,
+        Domain.Inventories.InventoryId inventoryId,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        var untrustedArgs = proposal.UntrustedArgs;
+
+        // Every value here is untrusted: a name, an amount as text, exact Unit/Location references, a
+        // Note. None of them is identity, and none of them can widen what this Turn is allowed to
+        // touch - the Inventory and the Participant come from trusted context alone.
+        var request = new StockMutationRequest
+        {
+            Kind = kind,
+            Reference = untrustedArgs.GetValueOrDefault("reference"),
+            QuantityText = untrustedArgs.GetValueOrDefault("quantity"),
+            UnitReference = untrustedArgs.GetValueOrDefault("unit"),
+            LocationReference = untrustedArgs.GetValueOrDefault("location"),
+            UnlocatedOnly = ParseFlag(untrustedArgs, "unlocated"),
+            Note = untrustedArgs.GetValueOrDefault("note"),
+        };
+
+        // The operation's identity is derived from the durably accepted Turn and the tool being
+        // executed - both trusted, both stable across retries - so replaying this Turn re-reports the
+        // recorded effect instead of applying a second one. Nothing the model proposes contributes to
+        // it, so a hostile proposal can neither mint a fresh identity nor collide with another's.
+        var operationId = Domain.Inventories.StockOperationId.Derive(context.TurnId, proposal.ToolName, sequence: 0);
+
+        var result = await mutationService.MutateAsync(
+            context.ParticipantId, inventoryId, operationId, request, context.ChannelConversationId.Value, now, cancellationToken);
+
+        return result.Kind switch
+        {
+            StockMutationResultKind.Completed => Completed(
+                "completed",
+                SummarizeMutation(kind, result.View!),
+                JsonSerializer.Serialize(
+                    new StockMutationPayload(1, "stock_mutation", OperationName(kind), result.View!), PayloadOptions)),
+            StockMutationResultKind.ConfirmationRequired => Semantic(
+                OutcomeCategory.ConfirmationRequired,
+                "confirmation_required",
+                "Setting Stock to zero clears it, so it needs your explicit confirmation first."),
+            StockMutationResultKind.Ambiguous => Ambiguous(
+                "ambiguous",
+                SummarizeAmbiguity(result.Candidates!),
+                JsonSerializer.Serialize(
+                    new StockFindPayload(
+                        1,
+                        "stock_find",
+                        result.Candidates!.Candidates,
+                        result.Candidates.HasMoreCandidates,
+                        NarrowingHintsPayload.From(result.Candidates.NarrowingHints)),
+                    PayloadOptions)),
+            StockMutationResultKind.NotFound => Semantic(OutcomeCategory.NotFound, "not_found", "No matching Stock Entry was found."),
+            StockMutationResultKind.ReferenceNotFound => Semantic(
+                OutcomeCategory.NotFound, "reference_not_found", UnresolvedReferenceSummary(result.UnresolvedReference)),
+            StockMutationResultKind.Conflict => Semantic(OutcomeCategory.Conflict, result.Code, ConflictSummary(result.Code)),
+            StockMutationResultKind.Invalid => Semantic(OutcomeCategory.Invalid, result.Code, InvalidMutationSummary(result.Code)),
+            _ => Semantic(OutcomeCategory.Forbidden, "forbidden", "That request could not be completed."),
+        };
+    }
+
+    /// <summary>The stable machine name for the mutation a payload describes.</summary>
+    private static string OperationName(Domain.Inventories.StockMutationKind kind) => kind switch
+    {
+        Domain.Inventories.StockMutationKind.Add => "add",
+        Domain.Inventories.StockMutationKind.Remove => "remove",
+        Domain.Inventories.StockMutationKind.Set => "set",
+        _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, "Unhandled stock mutation kind."),
+    };
+
+    /// <summary>
+    /// The exact read-back a clear low-risk mutation owes the Participant: what changed, where, and
+    /// what it now is. When a proposed Note was deliberately not applied, it says so rather than
+    /// letting the Note disappear without comment.
+    /// </summary>
+    private static string SummarizeMutation(Domain.Inventories.StockMutationKind kind, StockMutationView view)
+    {
+        var placement = view.Location is null ? "unlocated" : $"in {view.Location}";
+        var opening = kind switch
+        {
+            Domain.Inventories.StockMutationKind.Add => view.Created
+                ? $"Created {view.Name} ({placement}) at {view.Quantity} {view.Unit}."
+                : $"Added to {view.Name} ({placement}): now {view.Quantity} {view.Unit}.",
+            Domain.Inventories.StockMutationKind.Remove => $"Removed from {view.Name} ({placement}): now {view.Quantity} {view.Unit}.",
+            Domain.Inventories.StockMutationKind.Set => $"Set {view.Name} ({placement}) to {view.Quantity} {view.Unit}.",
+            _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, "Unhandled stock mutation kind."),
+        };
+
+        return view.NotePreserved ? $"{opening} Its existing Note was kept unchanged." : opening;
+    }
+
+    /// <summary>Names the current-state conflict a refused mutation ran into, without disclosing anything else about it.</summary>
+    private static string ConflictSummary(string code) => code switch
+    {
+        "insufficient_quantity" => "That is more than the Quantity on hand, so nothing was changed.",
+        "state_changed" => "That Stock changed while this request was being prepared, so nothing was changed. Ask again.",
+        _ => "That request conflicts with current Stock, so nothing was changed.",
+    };
+
+    /// <summary>Names the bound a rejected mutation violated, rather than only that it was rejected.</summary>
+    private static string InvalidMutationSummary(string code) => code switch
+    {
+        "invalid_quantity" => "State a Quantity as a plain decimal number - positive for Add and Remove.",
+        "quantity_out_of_bounds" =>
+            $"That Quantity is larger than an Inventory can record ({Domain.Inventories.Quantity.MaxIntegerDigits} digits "
+            + $"before the decimal point and {Domain.Inventories.Quantity.MaxScale} after it).",
+        "invalid_name" => $"A Stock Entry name must be 1 to {Domain.Inventories.StockEntry.MaxNameLength} characters.",
+        "invalid_note" => $"A Note must not exceed {Domain.Inventories.StockEntry.MaxNoteLength} characters.",
+        "invalid_reference" => "Name the Stock Entry to change.",
+        _ => "That request could not be understood.",
+    };
 
     /// <summary>Names the reference that did not resolve, so the Participant can correct that one.</summary>
     private static string UnresolvedReferenceSummary(StockReferenceKind? reference) => reference switch
@@ -249,6 +377,9 @@ public sealed class StockToolDispatcher(StockListingService listingService, Stoc
     };
 
     private sealed record StockListPayload(int Version, string Kind, IReadOnlyList<StockRowView> Rows, string? NextCursor, bool HasMore);
+
+    /// <summary>The typed read-back one applied mutation leaves behind, versioned like every other payload.</summary>
+    private sealed record StockMutationPayload(int Version, string Kind, string Operation, StockMutationView Entry);
 
     private sealed record StockFindPayload(
         int Version,

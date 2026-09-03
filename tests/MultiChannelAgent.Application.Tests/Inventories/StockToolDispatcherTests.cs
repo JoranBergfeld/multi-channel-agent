@@ -29,17 +29,29 @@ public class StockToolDispatcherTests
 
     private static (StockToolDispatcher Dispatcher, InMemoryStockStore StockStore) CreateDispatcher()
     {
+        var (dispatcher, stockStore, _) = CreateDispatcherWithMutations(Viewer, MembershipRole.Viewer);
+        return (dispatcher, stockStore);
+    }
+
+    private static (StockToolDispatcher Dispatcher, InMemoryStockStore StockStore, InMemoryStockMutationStore MutationStore)
+        CreateDispatcherWithMutations(ParticipantId participantId, MembershipRole role)
+    {
         var inventoryStore = new InMemoryInventoryStore(_ => "Owner Name");
-        inventoryStore.GrantMembership(SomeInventory, Viewer, MembershipRole.Viewer, Now);
+        inventoryStore.GrantMembership(SomeInventory, participantId, role, Now);
         var auditStore = new InMemoryInventoryAuthorizationAuditStore(new InMemoryActiveInventorySelectionStore());
         var authorizationService = new InventoryAuthorizationService(inventoryStore, auditStore);
         var stockStore = new InMemoryStockStore();
         var referenceStore = new InMemoryInventoryReferenceStore();
+        referenceStore.AddUnit(SomeInventory, EachUnit, "each", "piece", "pieces", "pc", "pcs");
+        var mutationStore = new InMemoryStockMutationStore(stockStore);
+        mutationStore.NameUnit(EachUnit, "each");
+
         var dispatcher = new StockToolDispatcher(
             new StockListingService(stockStore, referenceStore, authorizationService),
-            new StockFindingService(stockStore, referenceStore, authorizationService));
+            new StockFindingService(stockStore, referenceStore, authorizationService),
+            new StockMutationService(stockStore, mutationStore, referenceStore, authorizationService));
 
-        return (dispatcher, stockStore);
+        return (dispatcher, stockStore, mutationStore);
     }
 
     private static TurnExecutionContext Context(ParticipantId participantId, InventoryId? activeInventoryId) => new(
@@ -270,5 +282,120 @@ public class StockToolDispatcherTests
 
         // Names the reference actually at fault, so the Participant corrects that one.
         Assert.Equal("That Location does not exist in this Inventory.", decision.Summary);
+    }
+
+    [Fact]
+    public async Task Add_stock_tool_call_returns_a_completed_decision_with_a_typed_mutation_payload()
+    {
+        var (dispatcher, _, _) = CreateDispatcherWithMutations(Viewer, MembershipRole.Editor);
+        var proposal = new ToolCallProposal(
+            "add_stock", new Dictionary<string, string> { ["reference"] = "Steel Bolts", ["quantity"] = "12.5" });
+
+        var decision = await dispatcher.DispatchAsync(proposal, Context(Viewer, SomeInventory), Now, CancellationToken.None);
+
+        Assert.Equal(OutcomeCategory.Completed, decision.Category);
+        Assert.Contains("\"kind\":\"stock_mutation\"", decision.Payload);
+        Assert.Contains("\"operation\":\"add\"", decision.Payload);
+        Assert.Contains("\"quantity\":\"12.5\"", decision.Payload);
+        Assert.Single(decision.Deliveries);
+    }
+
+    [Fact]
+    public async Task Remove_stock_tool_call_that_underflows_returns_a_conflict_that_changed_nothing()
+    {
+        var (dispatcher, stockStore, mutationStore) = CreateDispatcherWithMutations(Viewer, MembershipRole.Editor);
+        stockStore.Add(SomeInventory, Row("Bolts", 3m, "10000000"));
+        var proposal = new ToolCallProposal(
+            "remove_stock", new Dictionary<string, string> { ["reference"] = "Bolts", ["quantity"] = "4" });
+
+        var decision = await dispatcher.DispatchAsync(proposal, Context(Viewer, SomeInventory), Now, CancellationToken.None);
+
+        Assert.Equal(OutcomeCategory.Conflict, decision.Category);
+        Assert.Equal("insufficient_quantity", decision.Code);
+        Assert.Null(decision.Payload);
+        Assert.Empty(mutationStore.AuditFacts);
+    }
+
+    [Fact]
+    public async Task Set_stock_to_zero_returns_confirmation_required_rather_than_clearing_stock()
+    {
+        var (dispatcher, stockStore, mutationStore) = CreateDispatcherWithMutations(Viewer, MembershipRole.Editor);
+        stockStore.Add(SomeInventory, Row("Bolts", 7m, "10000000"));
+        var proposal = new ToolCallProposal(
+            "set_stock", new Dictionary<string, string> { ["reference"] = "Bolts", ["quantity"] = "0" });
+
+        var decision = await dispatcher.DispatchAsync(proposal, Context(Viewer, SomeInventory), Now, CancellationToken.None);
+
+        Assert.Equal(OutcomeCategory.ConfirmationRequired, decision.Category);
+        Assert.Equal("confirmation_required", decision.Code);
+        Assert.Empty(mutationStore.AuditFacts);
+    }
+
+    [Fact]
+    public async Task A_Viewer_proposing_a_mutation_is_refused_without_the_Inventory_being_touched()
+    {
+        var (dispatcher, stockStore, mutationStore) = CreateDispatcherWithMutations(Viewer, MembershipRole.Viewer);
+        stockStore.Add(SomeInventory, Row("Bolts", 3m, "10000000"));
+        var proposal = new ToolCallProposal(
+            "add_stock", new Dictionary<string, string> { ["reference"] = "Bolts", ["quantity"] = "1" });
+
+        var decision = await dispatcher.DispatchAsync(proposal, Context(Viewer, SomeInventory), Now, CancellationToken.None);
+
+        Assert.Equal(OutcomeCategory.Forbidden, decision.Category);
+        Assert.Empty(mutationStore.AuditFacts);
+    }
+
+    [Fact]
+    public async Task An_ambiguous_mutation_reference_is_answered_with_the_same_candidate_payload_a_Find_uses()
+    {
+        var (dispatcher, stockStore, _) = CreateDispatcherWithMutations(Viewer, MembershipRole.Editor);
+        stockStore.Add(SomeInventory, Row("Bolts", 3m, "10000000"));
+        stockStore.Add(SomeInventory, Row("Bolts", 4m, "20000000") with { LocationId = new LocationId(Guid.NewGuid()), LocationName = "Shelf A" });
+        var proposal = new ToolCallProposal(
+            "add_stock", new Dictionary<string, string> { ["reference"] = "Bolts", ["quantity"] = "1" });
+
+        var decision = await dispatcher.DispatchAsync(proposal, Context(Viewer, SomeInventory), Now, CancellationToken.None);
+
+        Assert.Equal(OutcomeCategory.Ambiguous, decision.Category);
+        Assert.Contains("\"kind\":\"stock_find\"", decision.Payload);
+    }
+
+    // The same security property the read tools already guarantee: identity comes only from the
+    // trusted TurnExecutionContext, so args claiming another Participant or Inventory change nothing.
+    [Fact]
+    public async Task Malicious_untrusted_mutation_args_claiming_another_participant_or_inventory_are_ignored()
+    {
+        var (dispatcher, _, _) = CreateDispatcherWithMutations(Viewer, MembershipRole.Editor);
+        var proposal = new ToolCallProposal("add_stock", new Dictionary<string, string>
+        {
+            ["reference"] = "Bolts",
+            ["quantity"] = "1",
+            ["participantId"] = Stranger.ToString(),
+            ["inventoryId"] = Guid.NewGuid().ToString(),
+        });
+
+        var decision = await dispatcher.DispatchAsync(proposal, Context(Viewer, SomeInventory), Now, CancellationToken.None);
+
+        Assert.Equal(OutcomeCategory.Completed, decision.Category);
+        Assert.Contains("\"stockEntryId\"", decision.Payload);
+    }
+
+    // Two dispatches of the SAME Turn and tool must derive the same operation identity, so the second
+    // re-reports the first's effect rather than adding to stock again.
+    [Fact]
+    public async Task Dispatching_the_same_Turns_mutation_twice_never_applies_it_twice()
+    {
+        var (dispatcher, stockStore, mutationStore) = CreateDispatcherWithMutations(Viewer, MembershipRole.Editor);
+        stockStore.Add(SomeInventory, Row("Bolts", 10m, "10000000"));
+        var context = Context(Viewer, SomeInventory);
+        var proposal = new ToolCallProposal(
+            "add_stock", new Dictionary<string, string> { ["reference"] = "Bolts", ["quantity"] = "5" });
+
+        var first = await dispatcher.DispatchAsync(proposal, context, Now, CancellationToken.None);
+        var retry = await dispatcher.DispatchAsync(proposal, context, Now, CancellationToken.None);
+
+        Assert.Contains("\"quantity\":\"15\"", first.Payload);
+        Assert.Contains("\"quantity\":\"15\"", retry.Payload);
+        Assert.Single(mutationStore.AuditFacts);
     }
 }
