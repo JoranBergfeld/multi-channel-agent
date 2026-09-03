@@ -20,7 +20,7 @@ public class ScriptedModelBoundaryTests
 
         Assert.Equal(ModelProposalKind.Direct, proposal.Kind);
         var decision = proposal.Direct!;
-        Assert.Equal(OutcomeStatus.Completed, decision.Status);
+        Assert.Equal(OutcomeCategory.Completed, decision.Category);
         Assert.Equal("echoed", decision.Code);
         Assert.Equal("Echoed: hello", decision.Summary);
         var delivery = Assert.Single(decision.Deliveries);
@@ -37,7 +37,8 @@ public class ScriptedModelBoundaryTests
 
         Assert.Equal(ModelProposalKind.Direct, proposal.Kind);
         var decision = proposal.Direct!;
-        Assert.Equal(OutcomeStatus.Failed, decision.Status);
+        // A model that cannot answer is a model failure, and only that kind of result is Failed.
+        Assert.Equal(OutcomeCategory.TransientFailure, decision.Category);
         Assert.Equal("scripted_failure", decision.Code);
         Assert.Empty(decision.Deliveries);
     }

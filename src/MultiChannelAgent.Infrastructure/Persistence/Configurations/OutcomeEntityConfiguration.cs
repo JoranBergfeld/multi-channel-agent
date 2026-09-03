@@ -12,6 +12,7 @@ public sealed class OutcomeEntityConfiguration : IEntityTypeConfiguration<Outcom
         builder.HasKey(e => e.TurnId);
 
         builder.Property(e => e.Status).HasConversion<string>().HasMaxLength(32);
+        builder.Property(e => e.Category).HasConversion<string>().HasMaxLength(32);
         builder.Property(e => e.Code).HasMaxLength(128).IsRequired();
         builder.Property(e => e.Summary).HasMaxLength(4 * 1024).IsRequired();
         builder.Property(e => e.Payload).HasMaxLength(32 * 1024);

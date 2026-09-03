@@ -14,22 +14,64 @@ public class OutcomeTests
 
         Assert.Equal(turnId, outcome.TurnId);
         Assert.Equal(OutcomeStatus.Completed, outcome.Status);
+        Assert.Equal(OutcomeCategory.Completed, outcome.Category);
         Assert.Equal("echoed", outcome.Code);
         Assert.Equal("Echoed: hello", outcome.Summary);
         Assert.Equal(createdAt, outcome.CreatedAt);
     }
 
-    [Fact]
-    public void Failed_outcome_reports_failed_status()
+    // A Turn whose request was understood, authorized, and answered has been processed successfully,
+    // even when the semantic answer is "nothing matched" or "you may not see that". Recording those
+    // as Failed would conflate a deterministic domain answer with a broken system, hiding real
+    // outages behind ordinary conversational results.
+    [Theory]
+    [InlineData(OutcomeCategory.NotFound)]
+    [InlineData(OutcomeCategory.Ambiguous)]
+    [InlineData(OutcomeCategory.Forbidden)]
+    [InlineData(OutcomeCategory.Invalid)]
+    [InlineData(OutcomeCategory.Conflict)]
+    [InlineData(OutcomeCategory.ConfirmationRequired)]
+    public void Semantic_categories_are_recorded_as_completed_processing(OutcomeCategory category)
     {
-        var turnId = TurnId.NewId();
-        var createdAt = DateTimeOffset.UtcNow;
+        var outcome = Outcome.Record(TurnId.NewId(), category, "some_code", "A semantic answer.", DateTimeOffset.UtcNow);
 
-        var outcome = Outcome.Failed(turnId, code: "model_error", summary: "The scripted model rejected the turn.", createdAt);
+        Assert.Equal(OutcomeStatus.Completed, outcome.Status);
+        Assert.Equal(category, outcome.Category);
+    }
+
+    // Failed is reserved for the system itself failing to produce an answer.
+    [Fact]
+    public void Only_a_system_or_model_failure_is_recorded_as_failed()
+    {
+        var outcome = Outcome.SystemFailure(TurnId.NewId(), "model_error", "The model could not answer.", DateTimeOffset.UtcNow);
 
         Assert.Equal(OutcomeStatus.Failed, outcome.Status);
-        Assert.Equal("model_error", outcome.Code);
+        Assert.Equal(OutcomeCategory.TransientFailure, outcome.Category);
     }
+
+    [Fact]
+    public void Every_category_except_transient_failure_reports_completed_processing()
+    {
+        foreach (var category in Enum.GetValues<OutcomeCategory>())
+        {
+            var outcome = Outcome.Record(TurnId.NewId(), category, "some_code", "summary", DateTimeOffset.UtcNow);
+            var expected = category == OutcomeCategory.TransientFailure ? OutcomeStatus.Failed : OutcomeStatus.Completed;
+
+            Assert.Equal(expected, outcome.Status);
+        }
+    }
+
+    [Theory]
+    [InlineData(OutcomeCategory.Completed, "completed")]
+    [InlineData(OutcomeCategory.ConfirmationRequired, "confirmation_required")]
+    [InlineData(OutcomeCategory.Ambiguous, "ambiguous")]
+    [InlineData(OutcomeCategory.NotFound, "not_found")]
+    [InlineData(OutcomeCategory.Forbidden, "forbidden")]
+    [InlineData(OutcomeCategory.Conflict, "conflict")]
+    [InlineData(OutcomeCategory.Invalid, "invalid")]
+    [InlineData(OutcomeCategory.TransientFailure, "transient_failure")]
+    public void Categories_expose_a_stable_machine_text(OutcomeCategory category, string expected) =>
+        Assert.Equal(expected, category.ToMachineText());
 
     [Fact]
     public void Completed_outcome_defaults_to_no_payload()

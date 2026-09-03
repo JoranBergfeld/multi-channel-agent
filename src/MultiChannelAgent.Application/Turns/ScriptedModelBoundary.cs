@@ -26,9 +26,9 @@ public sealed class ScriptedModelBoundary : IModelBoundary
         {
             return Task.FromResult(ModelProposal.Directly(new ModelDecision
             {
-                Status = OutcomeStatus.Failed,
+                Category = OutcomeCategory.TransientFailure,
                 Code = "scripted_failure",
-                Summary = "The scripted model boundary rejected this Turn.",
+                Summary = "The scripted model boundary could not answer this Turn.",
             }));
         }
 
@@ -56,7 +56,7 @@ public sealed class ScriptedModelBoundary : IModelBoundary
 
         return Task.FromResult(ModelProposal.Directly(new ModelDecision
         {
-            Status = OutcomeStatus.Completed,
+            Category = OutcomeCategory.Completed,
             Code = "echoed",
             Summary = summary,
             Deliveries = [new RequestedDelivery("synthetic", summary)],

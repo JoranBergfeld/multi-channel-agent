@@ -25,14 +25,19 @@ public sealed class StockToolDispatcher(StockListingService listingService, Stoc
     {
         if (context.ActiveInventoryId is not { } inventoryId)
         {
-            return Failed("no_active_inventory", "Select an Inventory in this conversation first.");
+            // Guidance, not a failure: the Participant simply has no Inventory selected for this
+            // conversation yet, and the answer tells them how to proceed.
+            return Semantic(OutcomeCategory.Invalid, "no_active_inventory", "Select an Inventory in this conversation first.");
         }
 
         return proposal.ToolName switch
         {
             ListStockToolName => await DispatchListAsync(proposal.UntrustedArgs, context, inventoryId, now, cancellationToken),
             FindStockToolName => await DispatchFindAsync(proposal.UntrustedArgs, context, inventoryId, now, cancellationToken),
-            _ => Failed("unknown_tool", $"'{proposal.ToolName}' is not a recognized tool."),
+
+            // An unrecognized tool name is the model proposing something this application cannot
+            // execute - a model/system failure, not an answer to the Participant's request.
+            _ => SystemFailure("unknown_tool", $"'{proposal.ToolName}' is not a recognized tool."),
         };
     }
 
@@ -57,9 +62,9 @@ public sealed class StockToolDispatcher(StockListingService listingService, Stoc
                 "completed",
                 Summarize(result.View!),
                 JsonSerializer.Serialize(new StockListPayload(1, "stock_list", result.View!.Rows, result.View.NextCursor, result.View.HasMore), PayloadOptions)),
-            StockAccessOutcomeKind.NotFound => Failed("not_found", "No accessible Inventory is selected."),
-            StockAccessOutcomeKind.Invalid => Failed("invalid_query", "That request could not be understood."),
-            _ => Failed("forbidden", "That request could not be completed."),
+            StockAccessOutcomeKind.NotFound => Semantic(OutcomeCategory.NotFound, "not_found", "No accessible Inventory is selected."),
+            StockAccessOutcomeKind.Invalid => Semantic(OutcomeCategory.Invalid, "invalid_query", "That request could not be understood."),
+            _ => Semantic(OutcomeCategory.Forbidden, "forbidden", "That request could not be completed."),
         };
     }
 
@@ -81,13 +86,13 @@ public sealed class StockToolDispatcher(StockListingService listingService, Stoc
                 "completed",
                 $"Found {result.View!.Candidates[0].Name}.",
                 JsonSerializer.Serialize(new StockFindPayload(1, "stock_find", result.View.Candidates, false), PayloadOptions)),
-            StockFindResultKind.Ambiguous => Completed(
+            StockFindResultKind.Ambiguous => Ambiguous(
                 "ambiguous",
                 $"{result.View!.Candidates.Count} Stock Entries matched; narrow your request.",
                 JsonSerializer.Serialize(new StockFindPayload(1, "stock_find", result.View.Candidates, result.View.HasMoreCandidates), PayloadOptions)),
-            StockFindResultKind.NotFound => Failed("not_found", "No matching Stock Entry was found."),
-            StockFindResultKind.Invalid => Failed("invalid_reference", "That request could not be understood."),
-            _ => Failed("forbidden", "That request could not be completed."),
+            StockFindResultKind.NotFound => Semantic(OutcomeCategory.NotFound, "not_found", "No matching Stock Entry was found."),
+            StockFindResultKind.Invalid => Semantic(OutcomeCategory.Invalid, "invalid_reference", "That request could not be understood."),
+            _ => Semantic(OutcomeCategory.Forbidden, "forbidden", "That request could not be completed."),
         };
     }
 
@@ -98,17 +103,33 @@ public sealed class StockToolDispatcher(StockListingService listingService, Stoc
         var n => $"{n} Stock Entries found.",
     };
 
-    private static ModelDecision Completed(string code, string summary, string payload) => new()
+    private static ModelDecision Completed(string code, string summary, string payload) =>
+        Answered(OutcomeCategory.Completed, code, summary, payload);
+
+    private static ModelDecision Ambiguous(string code, string summary, string payload) =>
+        Answered(OutcomeCategory.Ambiguous, code, summary, payload);
+
+    private static ModelDecision Answered(OutcomeCategory category, string code, string summary, string payload) => new()
     {
-        Status = OutcomeStatus.Completed,
+        Category = category,
         Code = code,
         Summary = summary,
         Payload = payload,
     };
 
-    private static ModelDecision Failed(string code, string summary) => new()
+    // A deterministic domain answer the Participant asked for - "nothing matched", "you may not see
+    // that", "that could not be understood" - is a completed piece of processing carrying its own
+    // semantic category, never the system reporting that it failed.
+    private static ModelDecision Semantic(OutcomeCategory category, string code, string summary) => new()
     {
-        Status = OutcomeStatus.Failed,
+        Category = category,
+        Code = code,
+        Summary = summary,
+    };
+
+    private static ModelDecision SystemFailure(string code, string summary) => new()
+    {
+        Category = OutcomeCategory.TransientFailure,
         Code = code,
         Summary = summary,
     };

@@ -46,6 +46,12 @@ export type TurnOutcomePayload = StockListPayload | StockFindPayload;
 export interface TurnOutcomeView {
   turnId: string;
   status: string;
+  /**
+   * The semantic shape of the answer ('completed', 'not_found', 'ambiguous', 'invalid', ...).
+   * `status` only says whether processing itself succeeded: a deterministic answer such as
+   * 'not_found' is completed processing, never a failure.
+   */
+  category: string;
   code: string;
   summary: string;
   payload: TurnOutcomePayload | null;

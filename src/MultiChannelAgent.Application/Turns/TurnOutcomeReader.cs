@@ -17,6 +17,7 @@ public sealed record DeliveryView(Guid DeliveryId, string Channel, string Status
 public sealed record TurnOutcomeView(
     TurnId TurnId,
     string Status,
+    string Category,
     string Code,
     string Summary,
     JsonElement? Payload,
@@ -50,6 +51,7 @@ public sealed class TurnOutcomeReader(IInboxStore inboxStore, IOutcomeStore outc
         return new TurnOutcomeView(
             turnId,
             outcome.Status.ToString().ToLowerInvariant(),
+            outcome.Category.ToMachineText(),
             outcome.Code,
             outcome.Summary,
             outcome.Payload is null ? null : JsonSerializer.Deserialize<JsonElement>(outcome.Payload),

@@ -6,12 +6,15 @@ namespace MultiChannelAgent.Application.Turns;
 public sealed record RequestedDelivery(string Channel, string Payload);
 
 /// <summary>
-/// A terminal semantic decision for one Turn: a status/code/summary, an optional versioned JSON
-/// payload (see <see cref="Domain.Turns.Outcome.Payload"/>), and zero or more requested Deliveries.
+/// A terminal semantic decision for one Turn: a semantic <see cref="Category"/> with its machine
+/// <see cref="Code"/> and human summary, an optional versioned JSON payload (see
+/// <see cref="Domain.Turns.Outcome.Payload"/>), and zero or more requested Deliveries. The processing
+/// status is never chosen here - it follows from the category - so a deterministic semantic answer
+/// can never be recorded as the system having failed.
 /// </summary>
 public sealed record ModelDecision
 {
-    public required OutcomeStatus Status { get; init; }
+    public required OutcomeCategory Category { get; init; }
 
     public required string Code { get; init; }
 

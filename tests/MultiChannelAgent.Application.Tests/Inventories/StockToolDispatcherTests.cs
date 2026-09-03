@@ -53,7 +53,7 @@ public class StockToolDispatcherTests
 
         var decision = await dispatcher.DispatchAsync(proposal, Context(Viewer, SomeInventory), Now, CancellationToken.None);
 
-        Assert.Equal(OutcomeStatus.Completed, decision.Status);
+        Assert.Equal(OutcomeCategory.Completed, decision.Category);
         Assert.NotNull(decision.Payload);
         Assert.Contains("\"kind\":\"stock_list\"", decision.Payload);
         Assert.Contains("Bolts", decision.Payload);
@@ -92,7 +92,7 @@ public class StockToolDispatcherTests
         // never the maliciously-claimed identity in the args.
         var decision = await dispatcher.DispatchAsync(proposal, Context(Viewer, SomeInventory), Now, CancellationToken.None);
 
-        Assert.Equal(OutcomeStatus.Completed, decision.Status);
+        Assert.Equal(OutcomeCategory.Completed, decision.Category);
         Assert.Contains("Bolts", decision.Payload);
     }
 
@@ -104,7 +104,9 @@ public class StockToolDispatcherTests
 
         var decision = await dispatcher.DispatchAsync(proposal, Context(Viewer, activeInventoryId: null), Now, CancellationToken.None);
 
-        Assert.Equal(OutcomeStatus.Failed, decision.Status);
+        // Guidance the Participant can act on, not a system failure: processing completed and
+        // answered, with an Invalid semantic category.
+        Assert.Equal(OutcomeCategory.Invalid, decision.Category);
         Assert.Equal("no_active_inventory", decision.Code);
     }
 
@@ -117,7 +119,7 @@ public class StockToolDispatcherTests
 
         var decision = await dispatcher.DispatchAsync(proposal, Context(Stranger, SomeInventory), Now, CancellationToken.None);
 
-        Assert.Equal(OutcomeStatus.Failed, decision.Status);
+        Assert.Equal(OutcomeCategory.NotFound, decision.Category);
         Assert.Equal("not_found", decision.Code);
         Assert.DoesNotContain("Bolts", decision.Summary);
     }
@@ -132,7 +134,7 @@ public class StockToolDispatcherTests
 
         var decision = await dispatcher.DispatchAsync(proposal, Context(Viewer, SomeInventory), Now, CancellationToken.None);
 
-        Assert.Equal(OutcomeStatus.Completed, decision.Status);
+        Assert.Equal(OutcomeCategory.Ambiguous, decision.Category);
         Assert.Equal("ambiguous", decision.Code);
         Assert.Contains("\"kind\":\"stock_find\"", decision.Payload);
     }
@@ -145,7 +147,8 @@ public class StockToolDispatcherTests
 
         var decision = await dispatcher.DispatchAsync(proposal, Context(Viewer, SomeInventory), Now, CancellationToken.None);
 
-        Assert.Equal(OutcomeStatus.Failed, decision.Status);
+        // The model proposing something this application cannot execute IS a model failure.
+        Assert.Equal(OutcomeCategory.TransientFailure, decision.Category);
         Assert.Equal("unknown_tool", decision.Code);
     }
 }

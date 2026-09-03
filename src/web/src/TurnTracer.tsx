@@ -134,6 +134,8 @@ function TurnTracer({ csrfToken, onTerminalOutcome }: TurnTracerProps) {
           <dl>
             <dt>Status</dt>
             <dd>{outcome.status}</dd>
+            <dt>Result</dt>
+            <dd>{outcome.category}</dd>
             <dt>Code</dt>
             <dd>{outcome.code}</dd>
             <dt>Summary</dt>

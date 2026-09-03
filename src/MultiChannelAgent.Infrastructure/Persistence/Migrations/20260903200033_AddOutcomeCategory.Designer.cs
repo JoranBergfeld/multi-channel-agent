@@ -3,6 +3,7 @@ using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using MultiChannelAgent.Infrastructure.Persistence;
 
@@ -11,9 +12,11 @@ using MultiChannelAgent.Infrastructure.Persistence;
 namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
 {
     [DbContext(typeof(MultiChannelAgentDbContext))]
-    partial class MultiChannelAgentDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260903200033_AddOutcomeCategory")]
+    partial class AddOutcomeCategory
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder

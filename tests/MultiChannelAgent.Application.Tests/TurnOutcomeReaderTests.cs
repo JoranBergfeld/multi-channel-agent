@@ -47,6 +47,7 @@ public class TurnOutcomeReaderTests
         Assert.NotNull(view);
         Assert.Equal(turnId, view!.TurnId);
         Assert.Equal("completed", view.Status);
+        Assert.Equal("completed", view.Category);
         Assert.Equal("echoed", view.Code);
         Assert.Equal("Echoed: hello", view.Summary);
         var deliveryView = Assert.Single(view.Deliveries);
@@ -92,5 +93,45 @@ public class TurnOutcomeReaderTests
         Assert.NotNull(view!.Payload);
         Assert.Equal(1, view.Payload!.Value.GetProperty("version").GetInt32());
         Assert.Equal("stock_list", view.Payload.Value.GetProperty("kind").GetString());
+    }
+
+    // A deterministic domain answer reaches the caller as completed processing carrying its own
+    // semantic category, so a client (or an operator's alerting) can tell "nothing matched" apart
+    // from "the system broke" without parsing prose.
+    [Fact]
+    public async Task A_semantic_answer_is_exposed_as_completed_processing_with_its_own_category()
+    {
+        var inbox = new InMemoryInboxStore();
+        var outcomeStore = new InMemoryOutcomeStore();
+        var deliveryStore = new InMemoryDeliveryStore();
+        var turn = InboundTurn.Create("native-3", Owner, "conversation-1", "find nothing", null, Now, null);
+        await inbox.AcceptAsync(turn, CancellationToken.None);
+        await outcomeStore.SaveAsync(
+            Outcome.Record(turn.TurnId, OutcomeCategory.NotFound, "not_found", "No matching Stock Entry was found.", Now),
+            CancellationToken.None);
+        var reader = new TurnOutcomeReader(inbox, outcomeStore, deliveryStore);
+
+        var view = await reader.GetAsync(turn.TurnId, Owner, CancellationToken.None);
+
+        Assert.Equal("completed", view!.Status);
+        Assert.Equal("not_found", view.Category);
+    }
+
+    [Fact]
+    public async Task A_system_failure_is_exposed_as_failed_processing()
+    {
+        var inbox = new InMemoryInboxStore();
+        var outcomeStore = new InMemoryOutcomeStore();
+        var deliveryStore = new InMemoryDeliveryStore();
+        var turn = InboundTurn.Create("native-4", Owner, "conversation-1", "hello", null, Now, null);
+        await inbox.AcceptAsync(turn, CancellationToken.None);
+        await outcomeStore.SaveAsync(
+            Outcome.SystemFailure(turn.TurnId, "model_error", "The model could not answer.", Now), CancellationToken.None);
+        var reader = new TurnOutcomeReader(inbox, outcomeStore, deliveryStore);
+
+        var view = await reader.GetAsync(turn.TurnId, Owner, CancellationToken.None);
+
+        Assert.Equal("failed", view!.Status);
+        Assert.Equal("transient_failure", view.Category);
     }
 }
