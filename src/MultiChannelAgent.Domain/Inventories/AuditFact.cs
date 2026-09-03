@@ -13,6 +13,15 @@ public enum AuditEventType
     OwnershipTransferred,
     OrphanOwnershipRecovered,
     AccessDenied,
+
+    /// <summary>Stock was created or increased. The fact records that it happened, never what or how much.</summary>
+    StockAdded,
+
+    /// <summary>Stock was decreased.</summary>
+    StockRemoved,
+
+    /// <summary>Stock was set to an exact amount.</summary>
+    StockSet,
 }
 
 /// <summary>
