@@ -132,13 +132,12 @@ public static class AuthenticationSetup
                 {
                     var identity = (ClaimsIdentity)context.Principal!.Identity!;
 
-                    // Single tenant, active members only: a B2B guest's ID token carries the optional
-                    // "acct" claim with a non-zero value when the app registration requests it. No
-                    // "acct" claim present means the tenant/app is not configured to distinguish guests
-                    // from members, so this defaults open to "member" rather than failing every sign-in;
-                    // operators who need guest exclusion enforced must configure the optional claim.
-                    var accountType = context.Principal.FindFirst("acct")?.Value;
-                    var isActiveTenantMember = accountType is null or "0";
+                    // Fail closed: only explicit, trustworthy evidence (see
+                    // EntraTenantMembershipEvidence) grants active-tenant-member status. A missing or
+                    // conflicting claim still lets the caller authenticate (sign-in succeeds), but the
+                    // ActiveTenantMember authorization policy then refuses with a generic,
+                    // non-disclosing response instead of ever defaulting to "member".
+                    var isActiveTenantMember = EntraTenantMembershipEvidence.IsActiveTenantMember(context.Principal, tenantId);
 
                     identity.AddClaim(new Claim(
                         ParticipantClaims.ActiveTenantMember,

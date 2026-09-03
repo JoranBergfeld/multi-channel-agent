@@ -21,4 +21,19 @@ public sealed class TestChallengeAuthenticationHandler(
 {
     protected override Task<AuthenticateResult> HandleAuthenticateAsync() =>
         Task.FromResult(AuthenticateResult.NoResult());
+
+    /// <summary>
+    /// Surfaces the <see cref="AuthenticationProperties.RedirectUri"/> the challenge actually
+    /// received as a response header, purely so tests can verify the real `/auth/sign-in` mapping
+    /// (including its returnUrl sanitization) end to end without a live IdP redirect to follow.
+    /// </summary>
+    protected override Task HandleChallengeAsync(AuthenticationProperties properties)
+    {
+        if (properties.RedirectUri is not null)
+        {
+            Response.Headers["X-Test-Challenge-Redirect-Uri"] = properties.RedirectUri;
+        }
+
+        return base.HandleChallengeAsync(properties);
+    }
 }

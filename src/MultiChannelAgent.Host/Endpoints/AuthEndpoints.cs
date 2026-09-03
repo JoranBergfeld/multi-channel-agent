@@ -12,7 +12,7 @@ public static class AuthEndpoints
     {
         endpoints.MapGet("/auth/sign-in", (string? returnUrl) =>
             Results.Challenge(
-                new AuthenticationProperties { RedirectUri = string.IsNullOrWhiteSpace(returnUrl) ? "/" : returnUrl },
+                new AuthenticationProperties { RedirectUri = LocalReturnUrl.Resolve(returnUrl) },
                 [challengeScheme]));
 
         endpoints.MapPost("/auth/sign-out", async (HttpContext httpContext) =>
