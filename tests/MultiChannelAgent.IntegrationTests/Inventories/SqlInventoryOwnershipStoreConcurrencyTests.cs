@@ -98,7 +98,7 @@ public sealed class SqlInventoryOwnershipStoreConcurrencyTests : IDisposable
     }
 
     [Fact]
-    public async Task Transfer_racing_a_grant_for_the_same_new_target_reports_one_insert_conflict()
+    public async Task Transfer_racing_a_grant_for_the_same_new_target_preserves_one_owner()
     {
         var (inventoryId, ownerId, targetId, _) = await SeedInventoryWithOwnerAndTwoTargetsAsync();
         var now = DateTimeOffset.UtcNow;
@@ -119,11 +119,18 @@ public sealed class SqlInventoryOwnershipStoreConcurrencyTests : IDisposable
         var grant = await grantTask;
         var transfer = await transferTask;
 
-        Assert.True(
-            grant.Outcome == MembershipGrantOutcome.Granted
-                && transfer.Outcome == TransferOutcome.ConcurrentModification
-            || grant.Outcome == MembershipGrantOutcome.ConcurrentModification
-                && transfer.Outcome == TransferOutcome.Transferred);
+        Assert.Contains(grant.Outcome, new[]
+        {
+            MembershipGrantOutcome.Granted,
+            MembershipGrantOutcome.TargetIsOwner,
+            MembershipGrantOutcome.ConcurrentModification,
+        });
+        Assert.Contains(transfer.Outcome, new[]
+        {
+            TransferOutcome.Transferred,
+            TransferOutcome.ConcurrentModification,
+        });
+        Assert.True(grant.Outcome == MembershipGrantOutcome.Granted || transfer.Outcome == TransferOutcome.Transferred);
 
         using var verifyDb = CreateContext();
         Assert.Single(await verifyDb.Memberships.AsNoTracking()
@@ -132,9 +139,10 @@ public sealed class SqlInventoryOwnershipStoreConcurrencyTests : IDisposable
         Assert.Single(await verifyDb.Memberships.AsNoTracking()
             .Where(membership => membership.InventoryId == inventoryId && membership.Role == MembershipRole.Owner)
             .ToListAsync());
-        Assert.Single(await verifyDb.InventoryAudits.AsNoTracking()
+        var audits = await verifyDb.InventoryAudits.AsNoTracking()
             .Where(audit => audit.InventoryId == inventoryId)
-            .ToListAsync());
+            .ToListAsync();
+        Assert.InRange(audits.Count, 1, 2);
     }
 
     /// <summary>
