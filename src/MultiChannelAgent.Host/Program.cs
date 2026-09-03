@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
+using MultiChannelAgent.Application.Inventories;
 using MultiChannelAgent.Host.Authentication;
 using MultiChannelAgent.Host.Authorization;
 using MultiChannelAgent.Host.Endpoints;
@@ -14,12 +15,20 @@ var builder = WebApplication.CreateBuilder(args);
 var connectionString = builder.Configuration.GetConnectionString("MultiChannelAgent")
     ?? throw new InvalidOperationException("Missing required 'ConnectionStrings:MultiChannelAgent' configuration value.");
 
-builder.Services.AddMultiChannelAgentInfrastructure(connectionString);
+builder.Services.AddMultiChannelAgentInfrastructure(connectionString, builder.Configuration);
 
 var authenticationProvider = builder.Configuration["Authentication:Provider"] ?? "Entra";
 var challengeScheme = string.Equals(authenticationProvider, "Test", StringComparison.OrdinalIgnoreCase)
     ? ProviderSchemes.Test
     : ProviderSchemes.Entra;
+
+if (challengeScheme == ProviderSchemes.Test)
+{
+    // Overrides the production Microsoft Graph-backed directory adapter with a deterministic double
+    // tests control entirely through HTTP (see TestAuthEndpoints) - never exercising the real
+    // Microsoft Graph boundary (or requiring Graph credentials/network access) outside Production.
+    builder.Services.AddSingleton<ITenantMemberDirectory, TestTenantMemberDirectory>();
+}
 
 builder.Services.AddMultiChannelAgentAuthentication(builder.Configuration, builder.Environment);
 builder.Services.AddMultiChannelAgentAuthorization();
@@ -58,6 +67,8 @@ app.UseAuthorization();
 app.MapTurnEndpoints();
 app.MapSessionEndpoints();
 app.MapInventoryEndpoints();
+app.MapInventoryGovernanceEndpoints();
+app.MapInventoryRecoveryEndpoints();
 app.MapAuthEndpoints(challengeScheme);
 
 if (challengeScheme == ProviderSchemes.Test)

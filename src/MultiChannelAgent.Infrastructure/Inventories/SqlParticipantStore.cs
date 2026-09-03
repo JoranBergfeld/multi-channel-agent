@@ -24,6 +24,7 @@ public sealed class SqlParticipantStore(MultiChannelAgentDbContext db, TimeProvi
             {
                 Id = participant.Id.Value,
                 DisplayName = participant.DisplayName,
+                IsActive = true,
                 CreatedAt = now,
                 UpdatedAt = now,
             });
@@ -31,6 +32,10 @@ public sealed class SqlParticipantStore(MultiChannelAgentDbContext db, TimeProvi
         else
         {
             existing.DisplayName = participant.DisplayName;
+            // Every call site (sign-in, or a fresh grant/transfer directory resolution) already
+            // implies this Participant was just confirmed active - self-heal a previously
+            // recovery-flagged inactive Participant here too.
+            existing.IsActive = true;
             existing.UpdatedAt = now;
         }
 

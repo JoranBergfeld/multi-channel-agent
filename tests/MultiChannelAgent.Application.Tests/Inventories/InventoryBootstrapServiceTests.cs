@@ -19,7 +19,8 @@ public class InventoryBootstrapServiceTests
 
         var participantSession = new ParticipantSessionService(participantStore);
         var listing = new InventoryListingService(inventoryStore);
-        var selection = new InventorySelectionService(inventoryStore, selectionStore);
+        var authorizationService = new InventoryAuthorizationService(inventoryStore, new InMemoryInventoryAuthorizationAuditStore(selectionStore));
+        var selection = new InventorySelectionService(authorizationService, selectionStore);
         var creation = new InventoryCreationService(inventoryStore);
 
         return (new InventoryBootstrapService(participantSession, listing, selection), inventoryStore, selectionStore, creation);
@@ -81,7 +82,8 @@ public class InventoryBootstrapServiceTests
         var (service, inventoryStore, selectionStore, creation) = CreateService();
         await creation.CreateAsync(Participant, "Test Participant", "Warehouse A", "req-1", Now, CancellationToken.None);
         var second = await creation.CreateAsync(Participant, "Test Participant", "Warehouse B", "req-2", Now, CancellationToken.None);
-        var selectionService = new InventorySelectionService(inventoryStore, selectionStore);
+        var selectionService = new InventorySelectionService(
+            new InventoryAuthorizationService(inventoryStore, new InMemoryInventoryAuthorizationAuditStore(selectionStore)), selectionStore);
         await selectionService.SelectAsync(Participant, new InventoryId(Guid.Parse(second.Id)), ConversationId, Now, CancellationToken.None);
 
         var view = await service.BootstrapAsync(Participant, "Test Participant", ConversationId, Now, CancellationToken.None);

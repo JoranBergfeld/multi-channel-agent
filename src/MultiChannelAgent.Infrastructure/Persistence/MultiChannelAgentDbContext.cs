@@ -32,6 +32,8 @@ public sealed class MultiChannelAgentDbContext(DbContextOptions<MultiChannelAgen
 
     public DbSet<AuthTicketEntity> AuthTickets => Set<AuthTicketEntity>();
 
+    public DbSet<InventoryAuditEntity> InventoryAudits => Set<InventoryAuditEntity>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.ApplyConfigurationsFromAssembly(typeof(MultiChannelAgentDbContext).Assembly);

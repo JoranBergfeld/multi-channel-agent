@@ -12,6 +12,7 @@ public sealed class MembershipEntityConfiguration : IEntityTypeConfiguration<Mem
         builder.HasKey(e => new { e.InventoryId, e.ParticipantId });
 
         builder.Property(e => e.Role).HasConversion<string>().HasMaxLength(32);
+        builder.Property(e => e.ConcurrencyStamp).IsConcurrencyToken();
 
         builder.HasOne<InventoryEntity>()
             .WithMany()

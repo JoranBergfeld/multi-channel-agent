@@ -16,4 +16,15 @@ public sealed class MembershipEntity
     public MembershipRole Role { get; set; }
 
     public DateTimeOffset CreatedAt { get; set; }
+
+    /// <summary>
+    /// Optimistic concurrency guard, regenerated on every role change: a plain compared column - not
+    /// a provider-specific rowversion type - so the same concurrency check works identically against
+    /// SQLite (fast tests) and SQL Server (production). Ownership transfer and orphan recovery both
+    /// read this row, do their business/directory checks, then write conditioned on the value they
+    /// read; a concurrent writer changes it first, so the loser's save fails with
+    /// <see cref="Microsoft.EntityFrameworkCore.DbUpdateConcurrencyException"/> instead of both
+    /// silently succeeding.
+    /// </summary>
+    public Guid ConcurrencyStamp { get; set; } = Guid.NewGuid();
 }

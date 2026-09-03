@@ -15,4 +15,13 @@ public sealed class InMemoryParticipantStore : IParticipantStore
         _participants[participant.Id] = participant;
         return Task.CompletedTask;
     }
+
+    /// <summary>Test-only helper mirroring the recovery store's directory-revalidation side effect on <see cref="Participant.IsActive"/>.</summary>
+    public void SetActive(ParticipantId participantId, bool isActive)
+    {
+        if (_participants.TryGetValue(participantId, out var existing))
+        {
+            _participants[participantId] = existing with { IsActive = isActive };
+        }
+    }
 }

@@ -11,11 +11,14 @@ public enum InventorySelectionOutcome
 public sealed record InventorySelectionResult(InventorySelectionOutcome Outcome, InventoryId? InventoryId);
 
 /// <summary>
-/// Selects the Active Inventory for one Participant/ChannelConversation and reads it back. Selection
-/// always rechecks Membership - it never grants access by itself - and a Participant who is not (or
-/// no longer) a member gets the same non-disclosing outcome whether the Inventory exists or not.
+/// Selects the Active Inventory for one Participant/ChannelConversation and reads it back. Every
+/// authorization check flows through <see cref="InventoryAuthorizationService"/> - the single seam
+/// that always rechecks current SQL Membership, records a non-disclosing AccessDenied audit fact on
+/// denial, and clears the stale selection on access loss - so selection never grants access by
+/// itself, and a Participant who is not (or no longer) a member gets the same non-disclosing outcome
+/// whether the Inventory exists or not.
 /// </summary>
-public sealed class InventorySelectionService(IInventoryStore inventoryStore, IActiveInventorySelectionStore selectionStore)
+public sealed class InventorySelectionService(InventoryAuthorizationService authorizationService, IActiveInventorySelectionStore selectionStore)
 {
     public async Task<InventorySelectionResult> SelectAsync(
         ParticipantId participantId,
@@ -24,8 +27,9 @@ public sealed class InventorySelectionService(IInventoryStore inventoryStore, IA
         DateTimeOffset now,
         CancellationToken cancellationToken)
     {
-        var role = await inventoryStore.FindRoleAsync(inventoryId, participantId, cancellationToken);
-        if (role is null)
+        var authorization = await authorizationService.AuthorizeAsync(
+            participantId, inventoryId, requiredRole: null, channelConversationId, now, cancellationToken);
+        if (authorization.Outcome != InventoryAuthorizationOutcome.Authorized)
         {
             return new InventorySelectionResult(InventorySelectionOutcome.NotAuthorized, null);
         }
@@ -60,13 +64,9 @@ public sealed class InventorySelectionService(IInventoryStore inventoryStore, IA
             return null;
         }
 
-        var role = await inventoryStore.FindRoleAsync(existing.InventoryId, participantId, cancellationToken);
-        if (role is null)
-        {
-            await selectionStore.ClearAsync(participantId, channelConversationId, cancellationToken);
-            return null;
-        }
+        var authorization = await authorizationService.AuthorizeAsync(
+            participantId, existing.InventoryId, requiredRole: null, channelConversationId, now, cancellationToken);
 
-        return existing.InventoryId;
+        return authorization.Outcome == InventoryAuthorizationOutcome.Authorized ? existing.InventoryId : null;
     }
 }

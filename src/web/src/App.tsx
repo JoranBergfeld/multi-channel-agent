@@ -7,6 +7,7 @@ import {
   type BootstrapResponse,
   type InventoryView,
 } from './sessionApi';
+import InventoryGovernance from './InventoryGovernance';
 import TurnTracer from './TurnTracer';
 
 type SessionState =
@@ -182,6 +183,18 @@ function App() {
           </button>
         </form>
       </section>
+
+      {(() => {
+        const activeInventory = bootstrap.inventories.find((i) => i.id === bootstrap.activeInventoryId);
+        return activeInventory?.role === 'Owner' ? (
+          <InventoryGovernance
+            key={activeInventory.id}
+            inventoryId={activeInventory.id}
+            csrfToken={session.csrfToken}
+            onOwnershipChanged={() => void loadSession()}
+          />
+        ) : null;
+      })()}
 
       <TurnTracer />
     </main>
