@@ -1,2 +1,21 @@
 .worktrees/
 .superpowers/
+
+# .NET
+bin/
+obj/
+*.user
+[Tt]est[Rr]esult*/
+
+# Node / web client
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# Editor / OS
+.vs/
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
