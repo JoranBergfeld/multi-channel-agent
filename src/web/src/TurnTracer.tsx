@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   getTurnOutcome,
   submitTurn,
+  type StockMutationPayload,
   type StockNarrowingHints,
   type StockRowView,
   type TurnOutcomeView,
@@ -53,6 +54,35 @@ function NarrowingHints({ hints }: { hints: StockNarrowingHints }) {
   return <p>Narrow by {suggestions.join(' or ')}.</p>;
 }
 
+function StockMutationResult({ payload }: { payload: StockMutationPayload }) {
+  const { entry } = payload;
+
+  return (
+    <>
+      <h3>{entry.created ? 'Created' : 'Updated'}</h3>
+      <dl>
+        <dt>Stock Entry</dt>
+        <dd>{entry.name}</dd>
+        <dt>Unit</dt>
+        <dd>{entry.unit}</dd>
+        <dt>Location</dt>
+        <dd>{entry.location ?? 'Unlocated'}</dd>
+        <dt>Quantity</dt>
+        <dd>
+          {entry.previousQuantity} → {entry.quantity}
+        </dd>
+        {entry.note !== null && (
+          <>
+            <dt>Note</dt>
+            <dd>{entry.note}</dd>
+          </>
+        )}
+      </dl>
+      {entry.notePreserved && <p>The existing Note was kept unchanged.</p>}
+    </>
+  );
+}
+
 interface TurnTracerProps {
   csrfToken: string;
   /** Called once a terminal Outcome arrives, so the workspace can refetch its authoritative projection. */
@@ -61,9 +91,11 @@ interface TurnTracerProps {
 
 /**
  * Submits a Turn to the application boundary and renders its recorded terminal Outcome, including
- * the typed semantic List/Find payload when the Outcome carries one - the first real conversational
- * Inventory read path (see issue #30). Participant/ChannelConversation identity is always derived
- * server-side; this component never supplies either.
+ * the typed semantic List/Find/mutation payload when the Outcome carries one. Every terminal Outcome
+ * also signals the parent, which is what invalidates and refetches the authoritative Inventory
+ * workspace - so a mutation made in the conversation is visible in the workspace immediately.
+ * Participant/ChannelConversation identity is always derived server-side; this component never
+ * supplies either.
  */
 function TurnTracer({ csrfToken, onTerminalOutcome }: TurnTracerProps) {
   const [contentText, setContentText] = useState('list stock');
@@ -130,9 +162,15 @@ function TurnTracer({ csrfToken, onTerminalOutcome }: TurnTracerProps) {
     <section>
       <h2>Conversation</h2>
       <p>
-        Try <code>list stock</code>, <code>list stock including zero</code>, <code>list stock in &lt;location&gt;</code>,{' '}
+        Read: <code>list stock</code>, <code>list stock including zero</code>, <code>list stock in &lt;location&gt;</code>,{' '}
         <code>list stock unit &lt;unit&gt;</code>, <code>list stock unlocated</code>,{' '}
         <code>list stock page size &lt;n&gt;</code>, or <code>find &lt;name&gt;</code>.
+      </p>
+      <p>
+        Change: <code>add stock &lt;name&gt; quantity &lt;n&gt;</code>,{' '}
+        <code>remove stock &lt;name&gt; quantity &lt;n&gt;</code>, or <code>set stock &lt;name&gt; quantity &lt;n&gt;</code>.
+        Add <code>unit &lt;unit&gt;</code>, <code>in &lt;location&gt;</code>, <code>unlocated</code>, or{' '}
+        <code>note &lt;text&gt;</code> to any of them.
       </p>
       <form onSubmit={handleSubmit}>
         <label htmlFor="contentText">Message</label>
@@ -197,6 +235,8 @@ function TurnTracer({ csrfToken, onTerminalOutcome }: TurnTracerProps) {
               <NarrowingHints hints={outcome.payload.narrowingHints} />
             </>
           )}
+
+          {outcome.payload?.kind === 'stock_mutation' && <StockMutationResult payload={outcome.payload} />}
 
           {outcome.deliveries.length > 0 && (
             <>

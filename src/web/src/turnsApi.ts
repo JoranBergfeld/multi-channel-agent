@@ -59,7 +59,28 @@ export interface StockFindPayload {
   narrowingHints: StockNarrowingHints;
 }
 
-export type TurnOutcomePayload = StockListPayload | StockFindPayload;
+/** One Stock Entry as it stands after a mutation. Quantities are exact decimal text, never numbers. */
+export interface StockMutationEntryView {
+  stockEntryId: string;
+  name: string;
+  unit: string;
+  location: string | null;
+  note: string | null;
+  previousQuantity: string;
+  quantity: string;
+  created: boolean;
+  /** True when a proposed Note was deliberately not applied because the Stock Entry already existed. */
+  notePreserved: boolean;
+}
+
+export interface StockMutationPayload {
+  version: number;
+  kind: 'stock_mutation';
+  operation: 'add' | 'remove' | 'set';
+  entry: StockMutationEntryView;
+}
+
+export type TurnOutcomePayload = StockListPayload | StockFindPayload | StockMutationPayload;
 
 export interface TurnOutcomeView {
   turnId: string;
