@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
 using Microsoft.AspNetCore.Mvc.Testing;
+using MultiChannelAgent.Domain.Turns;
 using MultiChannelAgent.IntegrationTests.Inventories;
 
 namespace MultiChannelAgent.IntegrationTests;
@@ -176,5 +177,103 @@ public sealed class MalformedTurnSubmissionTests : IAsyncLifetime
         var response = await _client.SendAsync(request);
 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+    // Length is as much a contract as presence: a client-supplied value longer than the Turn can
+    // durably hold must be refused here, with the same controlled 400 shape, rather than travelling
+    // all the way to the database and surfacing as an unhandled 500 nobody can act on.
+    [Fact]
+    public async Task Content_text_at_its_exact_maximum_length_is_accepted()
+    {
+        var (jar, csrfToken) = await SignInAndBootstrapAsync();
+
+        var response = await PostTurnAsync(jar, csrfToken, new
+        {
+            nativeMessageId = "native-content-max",
+            contentText = new string('a', TurnContentPart.MaxTextLength),
+        });
+
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Content_text_one_character_past_its_maximum_is_rejected_with_400_instead_of_500()
+    {
+        var (jar, csrfToken) = await SignInAndBootstrapAsync();
+
+        var response = await PostTurnAsync(jar, csrfToken, new
+        {
+            nativeMessageId = "native-content-over",
+            contentText = new string('a', TurnContentPart.MaxTextLength + 1),
+        });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var problem = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.True(problem.GetProperty("errors").TryGetProperty("contentText", out _));
+    }
+
+    [Fact]
+    public async Task A_native_message_id_at_its_exact_maximum_length_is_accepted()
+    {
+        var (jar, csrfToken) = await SignInAndBootstrapAsync();
+
+        var response = await PostTurnAsync(jar, csrfToken, new
+        {
+            nativeMessageId = new string('n', InboundTurn.MaxNativeMessageIdLength),
+            contentText = "hello",
+        });
+
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task A_native_message_id_one_character_past_its_maximum_is_rejected_with_400_instead_of_500()
+    {
+        var (jar, csrfToken) = await SignInAndBootstrapAsync();
+
+        var response = await PostTurnAsync(jar, csrfToken, new
+        {
+            nativeMessageId = new string('n', InboundTurn.MaxNativeMessageIdLength + 1),
+            contentText = "hello",
+        });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var problem = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.True(problem.GetProperty("errors").TryGetProperty("nativeMessageId", out _));
+    }
+
+    // The optional client-supplied fields are stored on the same durable row, so they are bounded
+    // here for exactly the same reason.
+    [Fact]
+    public async Task An_oversized_locale_is_rejected_with_400_instead_of_500()
+    {
+        var (jar, csrfToken) = await SignInAndBootstrapAsync();
+
+        var response = await PostTurnAsync(jar, csrfToken, new
+        {
+            nativeMessageId = "native-locale-over",
+            contentText = "hello",
+            locale = new string('l', InboundTurn.MaxLocaleLength + 1),
+        });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var problem = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.True(problem.GetProperty("errors").TryGetProperty("locale", out _));
+    }
+
+    [Fact]
+    public async Task An_oversized_trace_id_is_rejected_with_400_instead_of_500()
+    {
+        var (jar, csrfToken) = await SignInAndBootstrapAsync();
+
+        var response = await PostTurnAsync(jar, csrfToken, new
+        {
+            nativeMessageId = "native-trace-over",
+            contentText = "hello",
+            traceId = new string('t', InboundTurn.MaxTraceIdLength + 1),
+        });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var problem = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.True(problem.GetProperty("errors").TryGetProperty("traceId", out _));
     }
 }

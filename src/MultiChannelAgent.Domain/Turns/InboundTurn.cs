@@ -93,6 +93,25 @@ public sealed record InboundTurnDraft
 /// </summary>
 public sealed record InboundTurn
 {
+    /// <summary>
+    /// The authoritative maximum length of a channel's own message identifier, matching the persisted
+    /// column so an over-long one is rejected here - as a validation error a caller can act on - long
+    /// before it could reach the database as an unhandled failure.
+    /// </summary>
+    public const int MaxNativeMessageIdLength = 256;
+
+    /// <summary>The authoritative maximum length of a ChannelConversation identifier, for the same reason.</summary>
+    public const int MaxChannelConversationIdLength = 256;
+
+    /// <summary>The authoritative maximum length of a channel name, for the same reason.</summary>
+    public const int MaxChannelLength = 32;
+
+    /// <summary>The authoritative maximum length of a Turn's locale tag, for the same reason.</summary>
+    public const int MaxLocaleLength = 32;
+
+    /// <summary>The authoritative maximum length of a Turn's trace identifier, for the same reason.</summary>
+    public const int MaxTraceIdLength = 128;
+
     public required TurnId TurnId { get; init; }
 
     public required string NativeMessageId { get; init; }
@@ -130,9 +149,14 @@ public sealed record InboundTurn
     {
         ArgumentNullException.ThrowIfNull(draft);
 
-        var normalizedNativeMessageId = RequireNonBlank(draft.NativeMessageId, nameof(draft.NativeMessageId));
-        var normalizedChannelConversationId = RequireNonBlank(draft.ChannelConversationId, nameof(draft.ChannelConversationId));
-        var normalizedChannel = RequireNonBlank(draft.Channel, nameof(draft.Channel));
+        var normalizedNativeMessageId = RequireWithinBounds(
+            RequireNonBlank(draft.NativeMessageId, nameof(draft.NativeMessageId)), MaxNativeMessageIdLength, nameof(draft.NativeMessageId));
+        var normalizedChannelConversationId = RequireWithinBounds(
+            RequireNonBlank(draft.ChannelConversationId, nameof(draft.ChannelConversationId)),
+            MaxChannelConversationIdLength,
+            nameof(draft.ChannelConversationId));
+        var normalizedChannel = RequireWithinBounds(
+            RequireNonBlank(draft.Channel, nameof(draft.Channel)), MaxChannelLength, nameof(draft.Channel));
         var contentParts = RequireOrderedContent(draft.ContentParts);
 
         if (!draft.Capabilities.HasFlag(ChannelCapabilities.Text))
@@ -152,8 +176,8 @@ public sealed record InboundTurn
             Principal = draft.Principal,
             Capabilities = draft.Capabilities,
             ContentParts = contentParts,
-            Locale = NormalizeOptional(draft.Locale),
-            TraceId = NormalizeOptional(draft.TraceId),
+            Locale = RequireOptionalWithinBounds(draft.Locale, MaxLocaleLength, nameof(draft.Locale)),
+            TraceId = RequireOptionalWithinBounds(draft.TraceId, MaxTraceIdLength, nameof(draft.TraceId)),
             ReceivedAt = draft.ReceivedAt,
         };
     }
@@ -190,6 +214,22 @@ public sealed record InboundTurn
         }
 
         return value.Trim();
+    }
+
+    private static string RequireWithinBounds(string value, int maxLength, string parameterName)
+    {
+        if (value.Length > maxLength)
+        {
+            throw new ArgumentException($"Value must not exceed {maxLength} characters.", parameterName);
+        }
+
+        return value;
+    }
+
+    private static string? RequireOptionalWithinBounds(string? value, int maxLength, string parameterName)
+    {
+        var normalized = NormalizeOptional(value);
+        return normalized is null ? null : RequireWithinBounds(normalized, maxLength, parameterName);
     }
 
     private static string? NormalizeOptional(string? value)

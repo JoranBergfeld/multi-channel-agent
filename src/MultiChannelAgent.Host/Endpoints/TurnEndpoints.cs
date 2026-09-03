@@ -109,9 +109,11 @@ public static class TurnEndpoints
         return endpoints;
     }
 
-    // Missing/null/blank required fields must never reach InboundTurn.Create: this is the endpoint's
-    // one authoritative place to reject malformed client input with a controlled, RFC 7807-shaped 400
-    // instead of letting an ArgumentException (or, before the domain guard, an NRE) escape as a 500.
+    // Malformed client input must never reach InboundTurn.Create: this is the endpoint's one
+    // authoritative place to reject it with a controlled, RFC 7807-shaped 400 instead of letting an
+    // ArgumentException (or, further down, a database failure on an over-long column) escape as a
+    // 500 no caller can act on. Every bound is the domain's own constant, so this can never drift
+    // from what a Turn - or the row behind it - actually accepts.
     private static Dictionary<string, string[]> ValidateSubmitTurnRequest(SubmitTurnHttpRequest request)
     {
         var errors = new Dictionary<string, string[]>();
@@ -120,10 +122,28 @@ public static class TurnEndpoints
         {
             errors["nativeMessageId"] = ["nativeMessageId is required and must not be blank."];
         }
+        else if (request.NativeMessageId.Trim().Length > InboundTurn.MaxNativeMessageIdLength)
+        {
+            errors["nativeMessageId"] = [$"nativeMessageId must not exceed {InboundTurn.MaxNativeMessageIdLength} characters."];
+        }
 
         if (string.IsNullOrWhiteSpace(request.ContentText))
         {
             errors["contentText"] = ["contentText is required and must not be blank."];
+        }
+        else if (request.ContentText.Trim().Length > TurnContentPart.MaxTextLength)
+        {
+            errors["contentText"] = [$"contentText must not exceed {TurnContentPart.MaxTextLength} characters."];
+        }
+
+        if (request.Locale is { } locale && locale.Trim().Length > InboundTurn.MaxLocaleLength)
+        {
+            errors["locale"] = [$"locale must not exceed {InboundTurn.MaxLocaleLength} characters."];
+        }
+
+        if (request.TraceId is { } traceId && traceId.Trim().Length > InboundTurn.MaxTraceIdLength)
+        {
+            errors["traceId"] = [$"traceId must not exceed {InboundTurn.MaxTraceIdLength} characters."];
         }
 
         return errors;

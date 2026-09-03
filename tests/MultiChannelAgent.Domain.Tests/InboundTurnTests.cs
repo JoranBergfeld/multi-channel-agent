@@ -208,4 +208,39 @@ public class InboundTurnTests
         Assert.NotEqual(mine.NativeMessageKey, otherConversation.NativeMessageKey);
         Assert.NotEqual(mine.NativeMessageKey, otherParticipantTurn.NativeMessageKey);
     }
+    // Every bound a durable Turn has lives here, so no adapter can accept something the row behind it
+    // cannot hold and discover that only when the database refuses it.
+    [Fact]
+    public void A_native_message_id_at_its_exact_maximum_length_is_accepted()
+    {
+        var turn = InboundTurn.Create(Draft(nativeMessageId: new string('n', InboundTurn.MaxNativeMessageIdLength)));
+
+        Assert.Equal(InboundTurn.MaxNativeMessageIdLength, turn.NativeMessageId.Length);
+    }
+
+    [Fact]
+    public void A_native_message_id_past_its_maximum_length_is_rejected() =>
+        Assert.Throws<ArgumentException>(() =>
+            InboundTurn.Create(Draft(nativeMessageId: new string('n', InboundTurn.MaxNativeMessageIdLength + 1))));
+
+    [Fact]
+    public void A_channel_conversation_id_past_its_maximum_length_is_rejected() =>
+        Assert.Throws<ArgumentException>(() =>
+            InboundTurn.Create(Draft(channelConversationId: new string('c', InboundTurn.MaxChannelConversationIdLength + 1))));
+
+    [Fact]
+    public void A_channel_name_past_its_maximum_length_is_rejected() =>
+        Assert.Throws<ArgumentException>(() => InboundTurn.Create(Draft(channel: new string('w', InboundTurn.MaxChannelLength + 1))));
+
+    [Fact]
+    public void A_locale_past_its_maximum_length_is_rejected() =>
+        Assert.Throws<ArgumentException>(() => InboundTurn.Create(Draft(locale: new string('l', InboundTurn.MaxLocaleLength + 1))));
+
+    [Fact]
+    public void A_trace_id_past_its_maximum_length_is_rejected() =>
+        Assert.Throws<ArgumentException>(() => InboundTurn.Create(Draft(traceId: new string('t', InboundTurn.MaxTraceIdLength + 1))));
+
+    [Fact]
+    public void Content_past_its_maximum_length_is_rejected() =>
+        Assert.Throws<ArgumentException>(() => InboundTurn.Create(Draft(contentText: new string('a', TurnContentPart.MaxTextLength + 1))));
 }
