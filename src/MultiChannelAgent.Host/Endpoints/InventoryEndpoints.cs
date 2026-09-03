@@ -43,10 +43,18 @@ public static class InventoryEndpoints
             {
                 errors["name"] = ["name is required and must not be blank."];
             }
+            else if (request.Name.Trim().Length > Inventory.MaxNameLength)
+            {
+                errors["name"] = [$"name must not exceed {Inventory.MaxNameLength} characters."];
+            }
 
             if (string.IsNullOrWhiteSpace(request.ClientRequestId))
             {
                 errors["clientRequestId"] = ["clientRequestId is required and must not be blank."];
+            }
+            else if (request.ClientRequestId.Trim().Length > Inventory.MaxClientRequestIdLength)
+            {
+                errors["clientRequestId"] = [$"clientRequestId must not exceed {Inventory.MaxClientRequestIdLength} characters."];
             }
 
             if (errors.Count > 0)

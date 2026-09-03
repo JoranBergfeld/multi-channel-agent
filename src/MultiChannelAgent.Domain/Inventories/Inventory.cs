@@ -8,6 +8,20 @@ namespace MultiChannelAgent.Domain.Inventories;
 /// </summary>
 public sealed record Inventory
 {
+    /// <summary>
+    /// The authoritative maximum length for <see cref="Name"/>, matching the EF Core column's
+    /// <c>HasMaxLength</c> configuration so an oversized name is rejected here - as a domain
+    /// validation error - long before it could ever reach the database as an unhandled
+    /// <see cref="System.Exception"/>.
+    /// </summary>
+    public const int MaxNameLength = 200;
+
+    /// <summary>
+    /// The authoritative maximum length for <see cref="ClientRequestId"/>, matching the EF Core
+    /// column's <c>HasMaxLength</c> configuration for the same reason as <see cref="MaxNameLength"/>.
+    /// </summary>
+    public const int MaxClientRequestIdLength = 100;
+
     public required InventoryId Id { get; init; }
 
     public required string Name { get; init; }
@@ -27,9 +41,10 @@ public sealed record Inventory
         return new Inventory
         {
             Id = new InventoryId(Guid.NewGuid()),
-            Name = RequireNonBlank(name, nameof(name)),
+            Name = RequireWithinBounds(RequireNonBlank(name, nameof(name)), MaxNameLength, nameof(name)),
             CreatedByParticipantId = createdBy,
-            ClientRequestId = RequireNonBlank(clientRequestId, nameof(clientRequestId)),
+            ClientRequestId = RequireWithinBounds(
+                RequireNonBlank(clientRequestId, nameof(clientRequestId)), MaxClientRequestIdLength, nameof(clientRequestId)),
             CreatedAt = createdAt,
         };
     }
@@ -42,5 +57,15 @@ public sealed record Inventory
         }
 
         return value.Trim();
+    }
+
+    private static string RequireWithinBounds(string value, int maxLength, string parameterName)
+    {
+        if (value.Length > maxLength)
+        {
+            throw new ArgumentException($"Value must not exceed {maxLength} characters.", parameterName);
+        }
+
+        return value;
     }
 }

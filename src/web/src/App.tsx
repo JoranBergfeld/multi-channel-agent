@@ -3,6 +3,7 @@ import {
   createInventory,
   fetchBootstrap,
   selectInventory,
+  MAX_INVENTORY_NAME_LENGTH,
   type BootstrapResponse,
   type InventoryView,
 } from './sessionApi';
@@ -40,7 +41,14 @@ function App() {
   }, []);
 
   useEffect(() => {
-    void loadSession();
+    // oxlint(react/set-state-in-effect) only recognizes an inline async IIFE's await boundary, not
+    // one behind a named function reference - even though every setState call inside loadSession
+    // already happens after its own internal await, never synchronously during this effect. Wrapping
+    // the call this way keeps loadSession reusable (retries, and the post-create/post-select
+    // refreshes below) while making that already-true post-await ordering visible to the linter too.
+    void (async () => {
+      await loadSession();
+    })();
   }, [loadSession]);
 
   async function handleCreateInventory(event: React.FormEvent) {
@@ -166,6 +174,7 @@ function App() {
             id="newInventoryName"
             value={newInventoryName}
             onChange={(event) => setNewInventoryName(event.target.value)}
+            maxLength={MAX_INVENTORY_NAME_LENGTH}
             required
           />
           <button type="submit" disabled={creating || newInventoryName.trim().length === 0}>

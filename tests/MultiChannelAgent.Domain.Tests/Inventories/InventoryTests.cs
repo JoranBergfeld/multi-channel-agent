@@ -41,6 +41,44 @@ public class InventoryTests
     }
 
     [Fact]
+    public void Create_accepts_a_name_at_the_maximum_length()
+    {
+        var name = new string('a', Inventory.MaxNameLength);
+
+        var inventory = Inventory.Create(name, Creator, "req-1", DateTimeOffset.UtcNow);
+
+        Assert.Equal(name, inventory.Name);
+    }
+
+    [Fact]
+    public void Create_rejects_a_name_over_the_maximum_length()
+    {
+        var name = new string('a', Inventory.MaxNameLength + 1);
+
+        var exception = Assert.Throws<ArgumentException>(() => Inventory.Create(name, Creator, "req-1", DateTimeOffset.UtcNow));
+        Assert.Equal("name", exception.ParamName);
+    }
+
+    [Fact]
+    public void Create_accepts_a_client_request_id_at_the_maximum_length()
+    {
+        var clientRequestId = new string('r', Inventory.MaxClientRequestIdLength);
+
+        var inventory = Inventory.Create("Warehouse", Creator, clientRequestId, DateTimeOffset.UtcNow);
+
+        Assert.Equal(clientRequestId, inventory.ClientRequestId);
+    }
+
+    [Fact]
+    public void Create_rejects_a_client_request_id_over_the_maximum_length()
+    {
+        var clientRequestId = new string('r', Inventory.MaxClientRequestIdLength + 1);
+
+        var exception = Assert.Throws<ArgumentException>(() => Inventory.Create("Warehouse", Creator, clientRequestId, DateTimeOffset.UtcNow));
+        Assert.Equal("clientRequestId", exception.ParamName);
+    }
+
+    [Fact]
     public void Create_rejects_a_null_name_without_throwing_a_null_reference_exception()
     {
         Assert.Throws<ArgumentException>(() => Inventory.Create(null!, Creator, "req-1", DateTimeOffset.UtcNow));

@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
+using MultiChannelAgent.Domain.Inventories;
 using MultiChannelAgent.Infrastructure.Persistence.Entities;
 
 namespace MultiChannelAgent.Infrastructure.Persistence.Configurations;
@@ -11,9 +12,9 @@ public sealed class InventoryEntityConfiguration : IEntityTypeConfiguration<Inve
         builder.ToTable("Inventories");
         builder.HasKey(e => e.Id);
 
-        builder.Property(e => e.Name).HasMaxLength(200).IsRequired();
-        builder.Property(e => e.NormalizedName).HasMaxLength(200).IsRequired();
-        builder.Property(e => e.ClientRequestId).HasMaxLength(100).IsRequired();
+        builder.Property(e => e.Name).HasMaxLength(Inventory.MaxNameLength).IsRequired();
+        builder.Property(e => e.NormalizedName).HasMaxLength(Inventory.MaxNameLength).IsRequired();
+        builder.Property(e => e.ClientRequestId).HasMaxLength(Inventory.MaxClientRequestIdLength).IsRequired();
 
         builder.HasOne<ParticipantEntity>()
             .WithMany()

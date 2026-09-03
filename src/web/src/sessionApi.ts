@@ -1,3 +1,11 @@
+/**
+ * Mirrors the authoritative `Inventory.MaxNameLength` domain constant (see
+ * `MultiChannelAgent.Domain.Inventories.Inventory`) so the create-Inventory form can stop a
+ * Participant from typing past the limit, instead of only discovering it from a 400 after
+ * submitting.
+ */
+export const MAX_INVENTORY_NAME_LENGTH = 200;
+
 export interface InventoryView {
   id: string;
   shortId: string;

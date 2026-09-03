@@ -188,6 +188,70 @@ public sealed class InventorySessionHttpTests : IAsyncLifetime
         Assert.Equal(8, view.GetProperty("shortId").GetString()!.Length);
     }
 
+    // Oversized input must be rejected as a domain validation error (RFC 7807 400 with a
+    // field-specific message), never allowed to reach EF Core's bounded columns and surface as an
+    // unhandled DbUpdateException/500 - and it must never create a row.
+    [Fact]
+    public async Task Creating_an_inventory_with_a_name_over_the_maximum_length_is_a_400_and_creates_no_row()
+    {
+        var (jar, csrfToken, _) = await SignInAndBootstrapAsync(Guid.NewGuid().ToString(), "Ada Lovelace");
+
+        var createRequest = Request(HttpMethod.Post, "/api/inventories");
+        createRequest.Content = JsonContent.Create(new
+        {
+            name = new string('a', 201),
+            clientRequestId = "req-oversized-name",
+        });
+        var response = await SendAsync(jar, createRequest, csrfToken);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var problem = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.True(problem.GetProperty("errors").GetProperty("name").GetArrayLength() > 0);
+
+        using var scope = _factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<MultiChannelAgentDbContext>();
+        Assert.Empty(db.Inventories);
+    }
+
+    [Fact]
+    public async Task Creating_an_inventory_with_a_client_request_id_over_the_maximum_length_is_a_400_and_creates_no_row()
+    {
+        var (jar, csrfToken, _) = await SignInAndBootstrapAsync(Guid.NewGuid().ToString(), "Ada Lovelace");
+
+        var createRequest = Request(HttpMethod.Post, "/api/inventories");
+        createRequest.Content = JsonContent.Create(new
+        {
+            name = "Warehouse",
+            clientRequestId = new string('r', 101),
+        });
+        var response = await SendAsync(jar, createRequest, csrfToken);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var problem = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.True(problem.GetProperty("errors").GetProperty("clientRequestId").GetArrayLength() > 0);
+
+        using var scope = _factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<MultiChannelAgentDbContext>();
+        Assert.Empty(db.Inventories);
+    }
+
+    [Fact]
+    public async Task Creating_an_inventory_with_boundary_length_name_and_client_request_id_succeeds()
+    {
+        var (jar, csrfToken, _) = await SignInAndBootstrapAsync(Guid.NewGuid().ToString(), "Ada Lovelace");
+
+        var name = new string('a', 200);
+        var clientRequestId = new string('r', 100);
+
+        var createRequest = Request(HttpMethod.Post, "/api/inventories");
+        createRequest.Content = JsonContent.Create(new { name, clientRequestId });
+        var response = await SendAsync(jar, createRequest, csrfToken);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var view = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(name, view.GetProperty("name").GetString());
+    }
+
     // Every new Inventory must carry the reserved `each` Unit and its fixed aliases, created
     // atomically with the Inventory and its Owner Membership - verified directly against the
     // database, since no HTTP endpoint exposes Units in this ticket.
