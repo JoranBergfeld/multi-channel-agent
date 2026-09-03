@@ -69,6 +69,7 @@ app.MapSessionEndpoints();
 app.MapInventoryEndpoints();
 app.MapInventoryGovernanceEndpoints();
 app.MapInventoryRecoveryEndpoints();
+app.MapStockEndpoints();
 app.MapAuthEndpoints(challengeScheme);
 
 if (challengeScheme == ProviderSchemes.Test)
