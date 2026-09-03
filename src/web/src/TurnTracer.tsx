@@ -1,12 +1,47 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { getTurnOutcome, submitTurn, type TurnOutcomeView } from './turnsApi';
+import { getTurnOutcome, submitTurn, type StockRowView, type TurnOutcomeView } from './turnsApi';
 
 const POLL_INTERVAL_MS = 1500;
 
-/** Minimal tracer UI: submit a synthetic Turn and watch its recorded Outcome arrive. */
-function TurnTracer() {
-  const [conversationId] = useState(() => crypto.randomUUID());
-  const [contentText, setContentText] = useState('hello from the web client');
+function StockRows({ rows }: { rows: StockRowView[] }) {
+  return (
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Unit</th>
+          <th>Location</th>
+          <th>Quantity</th>
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map((row) => (
+          <tr key={row.id}>
+            <td>{row.name}</td>
+            <td>{row.unit}</td>
+            <td>{row.location ?? '—'}</td>
+            <td>{row.quantity}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+interface TurnTracerProps {
+  csrfToken: string;
+  /** Called once a terminal Outcome arrives, so the workspace can refetch its authoritative projection. */
+  onTerminalOutcome: () => void;
+}
+
+/**
+ * Submits a Turn to the application boundary and renders its recorded terminal Outcome, including
+ * the typed semantic List/Find payload when the Outcome carries one - the first real conversational
+ * Inventory read path (see issue #30). Participant/ChannelConversation identity is always derived
+ * server-side; this component never supplies either.
+ */
+function TurnTracer({ csrfToken, onTerminalOutcome }: TurnTracerProps) {
+  const [contentText, setContentText] = useState('list stock');
   const [submitting, setSubmitting] = useState(false);
   const [turnId, setTurnId] = useState<string | null>(null);
   const [outcome, setOutcome] = useState<TurnOutcomeView | null>(null);
@@ -30,13 +65,14 @@ function TurnTracer() {
         if (result) {
           setOutcome(result);
           stopPolling();
+          onTerminalOutcome();
         }
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err));
         stopPolling();
       }
     }, POLL_INTERVAL_MS);
-  }, [stopPolling]);
+  }, [stopPolling, onTerminalOutcome]);
 
   async function handleSubmit(event: React.FormEvent) {
     event.preventDefault();
@@ -45,11 +81,7 @@ function TurnTracer() {
     setOutcome(null);
 
     try {
-      const result = await submitTurn({
-        nativeMessageId: crypto.randomUUID(),
-        channelConversationId: conversationId,
-        contentText,
-      });
+      const result = await submitTurn({ nativeMessageId: crypto.randomUUID(), contentText }, csrfToken);
       setTurnId(result.turnId);
       pollOutcome(result.turnId);
     } catch (err) {
@@ -61,10 +93,9 @@ function TurnTracer() {
 
   return (
     <section>
-      <h2>Turn Tracer</h2>
+      <h2>Conversation</h2>
       <p>
-        Submits a normalized synthetic Turn to the application boundary and displays its recorded
-        terminal Outcome once processing completes.
+        Try <code>list stock</code>, <code>list stock including zero</code>, or <code>find &lt;name&gt;</code>.
       </p>
       <form onSubmit={handleSubmit}>
         <label htmlFor="contentText">Message</label>
@@ -75,7 +106,7 @@ function TurnTracer() {
           rows={3}
         />
         <button type="submit" disabled={submitting}>
-          {submitting ? 'Submitting…' : 'Submit Turn'}
+          {submitting ? 'Submitting…' : 'Send'}
         </button>
       </form>
 
@@ -99,7 +130,7 @@ function TurnTracer() {
 
       {outcome && (
         <section>
-          <h2>Outcome</h2>
+          <h2>Result</h2>
           <dl>
             <dt>Status</dt>
             <dd>{outcome.status}</dd>
@@ -108,6 +139,22 @@ function TurnTracer() {
             <dt>Summary</dt>
             <dd>{outcome.summary}</dd>
           </dl>
+
+          {outcome.payload?.kind === 'stock_list' && (
+            <>
+              <h3>Stock</h3>
+              <StockRows rows={outcome.payload.rows} />
+              {outcome.payload.hasMore && <p>More rows are available.</p>}
+            </>
+          )}
+
+          {outcome.payload?.kind === 'stock_find' && (
+            <>
+              <h3>Candidates</h3>
+              <StockRows rows={outcome.payload.candidates} />
+              {outcome.payload.hasMoreCandidates && <p>More than five candidates matched - narrow your request.</p>}
+            </>
+          )}
 
           {outcome.deliveries.length > 0 && (
             <>

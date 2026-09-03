@@ -8,6 +8,7 @@ import {
   type InventoryView,
 } from './sessionApi';
 import InventoryGovernance from './InventoryGovernance';
+import StockWorkspace from './StockWorkspace';
 import TurnTracer from './TurnTracer';
 
 type SessionState =
@@ -19,7 +20,8 @@ type SessionState =
 /**
  * Signed-in web entry point: resolves the authenticated session bootstrap, guides a Participant
  * with no Memberships through onboarding, and otherwise lets them explicitly create and select
- * among their authorized Inventories before reaching the (preserved) Turn tracer.
+ * among their authorized Inventories before reaching the conversational Turn tracer and the
+ * authoritative Stock workspace it refetches after every terminal read Outcome.
  */
 function App() {
   const [state, setState] = useState<SessionState>({ phase: 'loading' });
@@ -27,6 +29,7 @@ function App() {
   const [newInventoryName, setNewInventoryName] = useState('');
   const [creating, setCreating] = useState(false);
   const [selectingId, setSelectingId] = useState<string | null>(null);
+  const [stockRefetchToken, setStockRefetchToken] = useState(0);
 
   const loadSession = useCallback(async () => {
     try {
@@ -196,7 +199,12 @@ function App() {
         ) : null;
       })()}
 
-      <TurnTracer />
+      {bootstrap.activeInventoryId && (
+        <>
+          <TurnTracer csrfToken={session.csrfToken} onTerminalOutcome={() => setStockRefetchToken((token) => token + 1)} />
+          <StockWorkspace inventoryId={bootstrap.activeInventoryId} refetchToken={stockRefetchToken} />
+        </>
+      )}
     </main>
   );
 }
