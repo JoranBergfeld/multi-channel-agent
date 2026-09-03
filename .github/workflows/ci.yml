@@ -65,12 +65,18 @@ jobs:
       # A connection string is required at startup (see Program.cs) but is never connected to for
       # /health/live, which has no external dependencies - so a placeholder value is enough to prove
       # the built image actually starts and serves traffic, without needing a real SQL Server here.
+      # Authentication:Provider likewise fails startup fast if unconfigured (see AuthenticationSetup);
+      # placeholder Entra values are enough to satisfy that startup check without a real tenant.
       - name: Smoke test the container's liveness endpoint
         run: |
           set -e
           container_id=$(docker run -d \
             -p 8080:8080 \
             -e ConnectionStrings__MultiChannelAgent="Server=placeholder;Database=placeholder;TrustServerCertificate=True" \
+            -e Authentication__Provider="Entra" \
+            -e Authentication__Entra__TenantId="00000000-0000-0000-0000-000000000000" \
+            -e Authentication__Entra__ClientId="00000000-0000-0000-0000-000000000000" \
+            -e Authentication__Entra__ClientSecret="placeholder" \
             multi-channel-agent:ci)
           trap 'docker logs "$container_id" || true; docker rm -f "$container_id" >/dev/null 2>&1 || true' EXIT
 

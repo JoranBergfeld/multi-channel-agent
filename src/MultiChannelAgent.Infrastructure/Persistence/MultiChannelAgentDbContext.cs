@@ -18,6 +18,18 @@ public sealed class MultiChannelAgentDbContext(DbContextOptions<MultiChannelAgen
 
     public DbSet<LeaseEntity> Leases => Set<LeaseEntity>();
 
+    public DbSet<ParticipantEntity> Participants => Set<ParticipantEntity>();
+
+    public DbSet<InventoryEntity> Inventories => Set<InventoryEntity>();
+
+    public DbSet<MembershipEntity> Memberships => Set<MembershipEntity>();
+
+    public DbSet<UnitEntity> Units => Set<UnitEntity>();
+
+    public DbSet<UnitTermEntity> UnitTerms => Set<UnitTermEntity>();
+
+    public DbSet<ActiveInventorySelectionEntity> ActiveInventorySelections => Set<ActiveInventorySelectionEntity>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.ApplyConfigurationsFromAssembly(typeof(MultiChannelAgentDbContext).Assembly);
