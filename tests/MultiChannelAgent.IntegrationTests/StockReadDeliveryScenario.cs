@@ -44,7 +44,9 @@ internal static class StockReadDeliveryScenario
         // At-least-once redelivery of the same native message: same Turn, no reprocessing, and no
         // second response part.
         var duplicate = await participant.SubmitTurnAsync("native-read-1", "list stock");
-        Assert.Equal(HttpStatusCode.Accepted, duplicate.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, duplicate.StatusCode);
+        var duplicateBody = await duplicate.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(deliveryId, Assert.Single(duplicateBody.GetProperty("deliveries").EnumerateArray()).GetProperty("deliveryId").GetGuid());
         Assert.Equal(0, await ProcessPendingAsync(factory));
         Assert.Equal(1, await CountDeliveriesAsync(factory, turnId));
 

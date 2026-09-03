@@ -15,7 +15,7 @@ public sealed record DeliveryView(Guid DeliveryId, string Channel, string Status
 /// tracer shape.
 /// </summary>
 public sealed record TurnOutcomeView(
-    TurnId TurnId,
+    Guid TurnId,
     string Status,
     string Category,
     string Code,
@@ -49,7 +49,7 @@ public sealed class TurnOutcomeReader(IInboxStore inboxStore, IOutcomeStore outc
         var deliveries = await deliveryStore.FindByTurnIdAsync(turnId, cancellationToken);
 
         return new TurnOutcomeView(
-            turnId,
+            turnId.Value,
             outcome.Status.ToString().ToLowerInvariant(),
             outcome.Category.ToMachineText(),
             outcome.Code,

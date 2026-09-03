@@ -5,10 +5,20 @@ export interface SubmitTurnRequest {
   traceId?: string;
 }
 
-export interface SubmitTurnResponse {
+export interface SubmitTurnAcceptance {
   turnId: string;
   alreadyAccepted: boolean;
 }
+
+/**
+ * Submitting a Turn either acknowledges accepted work still being processed, or - when this exact
+ * native message was already submitted and answered - hands back that Turn's recorded terminal
+ * Outcome directly, so a resubmission after a reconnect never has to poll for a result the
+ * application already holds.
+ */
+export type SubmitTurnResult =
+  | { kind: 'accepted'; acceptance: SubmitTurnAcceptance }
+  | { kind: 'outcome'; outcome: TurnOutcomeView };
 
 export interface DeliveryView {
   deliveryId: string;
@@ -63,7 +73,7 @@ export interface TurnOutcomeView {
  * always derived server-side from the authenticated session and the web conversation cookie - the
  * request body never carries either, so a caller cannot claim someone else's identity.
  */
-export async function submitTurn(request: SubmitTurnRequest, csrfToken: string): Promise<SubmitTurnResponse> {
+export async function submitTurn(request: SubmitTurnRequest, csrfToken: string): Promise<SubmitTurnResult> {
   const response = await fetch('/api/turns', {
     method: 'POST',
     credentials: 'include',
@@ -78,7 +88,11 @@ export async function submitTurn(request: SubmitTurnRequest, csrfToken: string):
     throw new Error(`Submitting the Turn failed with status ${response.status}.`);
   }
 
-  return (await response.json()) as SubmitTurnResponse;
+  if (response.status === 200) {
+    return { kind: 'outcome', outcome: (await response.json()) as TurnOutcomeView };
+  }
+
+  return { kind: 'accepted', acceptance: (await response.json()) as SubmitTurnAcceptance };
 }
 
 /**

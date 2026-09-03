@@ -82,8 +82,18 @@ function TurnTracer({ csrfToken, onTerminalOutcome }: TurnTracerProps) {
 
     try {
       const result = await submitTurn({ nativeMessageId: crypto.randomUUID(), contentText }, csrfToken);
-      setTurnId(result.turnId);
-      pollOutcome(result.turnId);
+
+      if (result.kind === 'outcome') {
+        // This exact native message was already answered, so its recorded terminal Outcome came
+        // back with the submission itself - there is nothing left to wait for.
+        setTurnId(result.outcome.turnId);
+        setOutcome(result.outcome);
+        onTerminalOutcome();
+        return;
+      }
+
+      setTurnId(result.acceptance.turnId);
+      pollOutcome(result.acceptance.turnId);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {

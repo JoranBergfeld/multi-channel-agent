@@ -45,7 +45,7 @@ public class TurnOutcomeReaderTests
         var view = await reader.GetAsync(turnId, Owner, CancellationToken.None);
 
         Assert.NotNull(view);
-        Assert.Equal(turnId, view!.TurnId);
+        Assert.Equal(turnId.Value, view!.TurnId);
         Assert.Equal("completed", view.Status);
         Assert.Equal("completed", view.Category);
         Assert.Equal("echoed", view.Code);

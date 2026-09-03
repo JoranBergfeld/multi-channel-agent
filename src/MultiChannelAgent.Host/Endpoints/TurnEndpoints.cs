@@ -32,6 +32,7 @@ public static class TurnEndpoints
             HttpContext httpContext,
             ClaimsPrincipal user,
             TurnAcceptanceService acceptanceService,
+            TurnOutcomeReader outcomeReader,
             TimeProvider timeProvider,
             CancellationToken cancellationToken) =>
         {
@@ -48,6 +49,20 @@ public static class TurnEndpoints
                 new SubmitTurnRequest(request.NativeMessageId!, participantId, channelConversationId, request.ContentText!, request.Locale, request.TraceId),
                 timeProvider.GetUtcNow(),
                 cancellationToken);
+
+            if (result.WasAlreadyAccepted)
+            {
+                // At-least-once redelivery of a Turn that has already been answered: hand back the
+                // recorded terminal Outcome itself rather than an acknowledgement, so a redelivering
+                // adapter (or a reconnecting browser) never has to poll for a result the application
+                // already holds - and never triggers any reprocessing to obtain it. A duplicate of a
+                // Turn still being processed has no recorded result yet and stays an acknowledgement.
+                var recorded = await outcomeReader.GetAsync(result.TurnId, participantId, cancellationToken);
+                if (recorded is not null)
+                {
+                    return Results.Ok(recorded);
+                }
+            }
 
             return Results.Accepted(
                 $"/api/turns/{result.TurnId.Value}/outcome",
