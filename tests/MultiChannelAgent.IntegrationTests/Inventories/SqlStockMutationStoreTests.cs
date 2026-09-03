@@ -126,8 +126,42 @@ public sealed class SqlStockMutationStoreTests : IDisposable
         Assert.Single(reader.StockEntries.AsNoTracking().Where(e => e.NormalizedName == "steel bolts"));
     }
 
-    private StockMutationCommand CreateCommand(StockOperationId? operationId = null) => new()
+    // The window the concurrency stamp exists to close: two callers both read the same Quantity, both
+    // decide, and both try to save. Exactly one may win; the loser must change nothing.
+    [Fact]
+    public async Task Two_callers_that_both_read_the_same_Quantity_cannot_both_apply()
     {
+        var entryId = SeedStock("Steel Bolts", 10m);
+
+        using var firstContext = CreateContext();
+        using var secondContext = CreateContext();
+
+        // Both load the row (and so both hold the same concurrency stamp) before either saves.
+        _ = await firstContext.StockEntries.FirstAsync(e => e.Id == entryId);
+        _ = await secondContext.StockEntries.FirstAsync(e => e.Id == entryId);
+
+        var first = await new SqlStockMutationStore(firstContext).ApplyAsync(
+            UpdateCommand(entryId, expected: 10m, resulting: 15m), CancellationToken.None);
+
+        var second = await new SqlStockMutationStore(secondContext).ApplyAsync(
+            SecondUpdateCommand(entryId, expected: 10m, resulting: 12m), CancellationToken.None);
+
+        Assert.Equal(StockMutationStoreOutcome.Applied, first.Outcome);
+        Assert.Equal(StockMutationStoreOutcome.StateChanged, second.Outcome);
+
+        using var reader = CreateContext();
+        Assert.Equal(15m, reader.StockEntries.AsNoTracking().Single(e => e.Id == entryId).Quantity);
+        Assert.Single(reader.StockOperations.AsNoTracking());
+        Assert.Single(reader.InventoryAudits.AsNoTracking().Where(a => a.EventType == "StockAdded"));
+    }
+
+    private StockMutationCommand SecondUpdateCommand(Guid entryId, decimal expected, decimal resulting) =>
+        UpdateCommand(entryId, expected, resulting) with
+        {
+            OperationId = new StockOperationId(Guid.Parse("eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee")),
+        };
+
+    private StockMutationCommand CreateCommand(StockOperationId? operationId = null) => new()    {
         OperationId = operationId ?? new StockOperationId(Guid.Parse("cccccccc-cccc-cccc-cccc-cccccccccccc")),
         InventoryId = new InventoryId(_inventoryId),
         ActorId = _actorId,
