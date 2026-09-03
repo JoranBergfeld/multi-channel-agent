@@ -115,8 +115,9 @@ public sealed class TurnTracerScenarioTests : SqlIntegrationTestBase
         Assert.Equal(1, delivery.GetProperty("attempts").GetInt32());
 
         // At-least-once redelivery of the same native message must not duplicate acceptance or
-        // reprocess: the recorded Turn identity is returned instead, and its already-recorded terminal
-        // Outcome is what the caller reads back - never a fresh reprocessing.
+        // reprocess. Because this Turn has already been answered, the submission itself hands back
+        // its recorded terminal Outcome rather than an acknowledgement, so a redelivering adapter
+        // never has to poll for a result the application already holds.
         var duplicateResponse = await PostTurnAsync(client, jar, csrfToken, new
         {
             nativeMessageId = "native-tracer-1",
@@ -125,16 +126,31 @@ public sealed class TurnTracerScenarioTests : SqlIntegrationTestBase
             traceId = "trace-tracer-1",
         });
 
-        Assert.Equal(HttpStatusCode.Accepted, duplicateResponse.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, duplicateResponse.StatusCode);
         var duplicateBody = await duplicateResponse.Content.ReadFromJsonAsync<JsonElement>();
         Assert.Equal(turnId, duplicateBody.GetProperty("turnId").GetGuid());
-        Assert.True(duplicateBody.GetProperty("alreadyAccepted").GetBoolean());
+        Assert.Equal("completed", duplicateBody.GetProperty("status").GetString());
+        Assert.Equal("completed", duplicateBody.GetProperty("category").GetString());
+        Assert.Equal("echoed", duplicateBody.GetProperty("code").GetString());
+        Assert.Equal("Echoed: hello tracer", duplicateBody.GetProperty("summary").GetString());
 
-        var duplicateOutcomeResponse = await GetOutcomeAsync(client, jar, turnId);
-        var duplicateOutcome = await duplicateOutcomeResponse.Content.ReadFromJsonAsync<JsonElement>();
-        Assert.Equal("completed", duplicateOutcome.GetProperty("status").GetString());
-        var duplicateDelivery = Assert.Single(duplicateOutcome.GetProperty("deliveries").EnumerateArray());
+        // The very same recorded Delivery, already dispatched once - never a second one minted for
+        // the duplicate, and never re-sent.
+        var duplicateDelivery = Assert.Single(duplicateBody.GetProperty("deliveries").EnumerateArray());
+        Assert.Equal(delivery.GetProperty("deliveryId").GetGuid(), duplicateDelivery.GetProperty("deliveryId").GetGuid());
+        Assert.Equal("delivered", duplicateDelivery.GetProperty("status").GetString());
         Assert.Equal(1, duplicateDelivery.GetProperty("attempts").GetInt32());
+
+        // And nothing was left to reprocess or re-dispatch by the duplicate submission.
+        using (var scope = Factory!.Services.CreateScope())
+        {
+            Assert.Equal(
+                0,
+                await scope.ServiceProvider.GetRequiredService<TurnProcessingCoordinator>().ProcessPendingAsync(CancellationToken.None));
+            Assert.Equal(
+                0,
+                await scope.ServiceProvider.GetRequiredService<DeliveryDispatchCoordinator>().DispatchPendingAsync(CancellationToken.None));
+        }
     }
 
     // A Participant may only ever read their own Turn's recorded Outcome: reading a Turn belonging to
