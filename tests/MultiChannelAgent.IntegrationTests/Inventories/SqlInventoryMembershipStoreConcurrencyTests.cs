@@ -97,6 +97,54 @@ public sealed class SqlInventoryMembershipStoreConcurrencyTests : IDisposable
     }
 
     [Fact]
+    public async Task Two_concurrent_grants_for_the_same_new_target_report_one_insert_conflict()
+    {
+        var (inventoryId, ownerId, _) = await SeedInventoryWithOwnerAndEditorAsync();
+        var targetId = Guid.NewGuid();
+        var now = DateTimeOffset.UtcNow;
+
+        using (var seedDb = CreateContext())
+        {
+            seedDb.Participants.Add(new ParticipantEntity
+            {
+                Id = targetId,
+                DisplayName = "New Target",
+                CreatedAt = now,
+                UpdatedAt = now,
+            });
+            await seedDb.SaveChangesAsync(CancellationToken.None);
+        }
+
+        using var barrier = new Barrier(2);
+        using var dbA = CreateContext(new SynchronizeFirstReadInterceptor(barrier));
+        using var dbB = CreateContext(new SynchronizeFirstReadInterceptor(barrier));
+        var storeA = new SqlInventoryMembershipStore(dbA);
+        var storeB = new SqlInventoryMembershipStore(dbB);
+
+        var taskA = Task.Run(() => storeA.GrantOrChangeRoleAsync(
+            new InventoryId(inventoryId), new ParticipantId(ownerId), new ParticipantId(targetId),
+            "New Target", MembershipRole.Viewer, now, CancellationToken.None));
+        var taskB = Task.Run(() => storeB.GrantOrChangeRoleAsync(
+            new InventoryId(inventoryId), new ParticipantId(ownerId), new ParticipantId(targetId),
+            "New Target", MembershipRole.Editor, now, CancellationToken.None));
+
+        var results = await Task.WhenAll(taskA, taskB);
+
+        Assert.Single(results, result => result.Outcome == MembershipGrantOutcome.Granted);
+        Assert.Single(results, result => result.Outcome == MembershipGrantOutcome.ConcurrentModification);
+
+        using var verifyDb = CreateContext();
+        Assert.Single(await verifyDb.Memberships.AsNoTracking()
+            .Where(membership => membership.InventoryId == inventoryId && membership.ParticipantId == targetId)
+            .ToListAsync());
+        Assert.Single(await verifyDb.InventoryAudits.AsNoTracking()
+            .Where(audit => audit.InventoryId == inventoryId
+                && audit.SubjectParticipantId == targetId
+                && audit.EventType == AuditEventType.MembershipGranted.ToString())
+            .ToListAsync());
+    }
+
+    [Fact]
     public async Task Two_concurrent_removals_of_the_same_target_never_leak_a_concurrency_exception()
     {
         var (inventoryId, ownerId, targetId) = await SeedInventoryWithOwnerAndEditorAsync();

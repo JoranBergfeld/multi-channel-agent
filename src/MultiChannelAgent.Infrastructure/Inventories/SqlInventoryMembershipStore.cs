@@ -75,6 +75,19 @@ public sealed class SqlInventoryMembershipStore(MultiChannelAgentDbContext db) :
             db.ChangeTracker.Clear();
             return new MembershipGrantResult(MembershipGrantOutcome.ConcurrentModification);
         }
+        catch (DbUpdateException) when (existing is null)
+        {
+            // Two requests can both observe no Membership and race to insert the same composite key.
+            // Only classify the failure as a conflict when the competing Membership now exists;
+            // unrelated database failures, such as a missing Participant FK, still propagate.
+            if (await MembershipInsertConflictDetector.ExistsAfterFailedInsertAsync(
+                    db, inventoryId, targetParticipantId, cancellationToken))
+            {
+                return new MembershipGrantResult(MembershipGrantOutcome.ConcurrentModification);
+            }
+
+            throw;
+        }
 
         return new MembershipGrantResult(outcome);
     }

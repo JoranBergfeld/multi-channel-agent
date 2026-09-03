@@ -68,6 +68,19 @@ public sealed class SqlInventoryOwnershipStore(MultiChannelAgentDbContext db) : 
             db.ChangeTracker.Clear();
             return new TransferResult(TransferOutcome.ConcurrentModification);
         }
+        catch (DbUpdateException) when (targetRow is null)
+        {
+            // A grant, transfer, or recovery can concurrently create the target Membership after
+            // this request observed it missing. Confirm that exact row now exists before translating
+            // the insert failure; every unrelated database error still propagates.
+            if (await MembershipInsertConflictDetector.ExistsAfterFailedInsertAsync(
+                    db, inventoryId, targetParticipantId, cancellationToken))
+            {
+                return new TransferResult(TransferOutcome.ConcurrentModification);
+            }
+
+            throw;
+        }
 
         return new TransferResult(TransferOutcome.Transferred);
     }

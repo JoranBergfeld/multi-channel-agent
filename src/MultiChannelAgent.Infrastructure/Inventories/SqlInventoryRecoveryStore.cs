@@ -194,6 +194,19 @@ public sealed class SqlInventoryRecoveryStore(MultiChannelAgentDbContext db, ITe
             db.ChangeTracker.Clear();
             return new RecoveryResult(RecoveryOutcome.ConcurrentModification, null);
         }
+        catch (DbUpdateException) when (targetMembership is null)
+        {
+            // A concurrent grant, transfer, or recovery may create this target Membership after the
+            // read above. Translate only that exact insert race; participant, audit, and other
+            // database failures remain visible to the caller.
+            if (await MembershipInsertConflictDetector.ExistsAfterFailedInsertAsync(
+                    db, inventoryId, resolvedTarget.ParticipantId, cancellationToken))
+            {
+                return new RecoveryResult(RecoveryOutcome.ConcurrentModification, null);
+            }
+
+            throw;
+        }
 
         return new RecoveryResult(RecoveryOutcome.Recovered, resolvedTarget.DisplayName);
     }
