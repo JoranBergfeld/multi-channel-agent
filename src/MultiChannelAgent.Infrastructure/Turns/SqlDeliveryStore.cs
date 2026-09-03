@@ -53,10 +53,12 @@ public sealed class SqlDeliveryStore(MultiChannelAgentDbContext db) : IDeliveryS
         var matches = await db.Deliveries
             .AsNoTracking()
             .Where(e => e.TurnId == turnId.Value)
-            .OrderBy(e => e.CreatedAt)
             .ToListAsync(cancellationToken);
 
-        return matches.Select(ToDomain).ToList();
+        // One Turn's Deliveries are a handful of rows at most, so they are ordered here rather than
+        // in SQL: a DateTimeOffset is not orderable by every relational provider (SQLite rejects it
+        // outright), and this read must behave identically wherever it runs.
+        return matches.OrderBy(e => e.CreatedAt).ThenBy(e => e.DeliveryId).Select(ToDomain).ToList();
     }
 
     private static DeliveryEntityStatus ToEntityStatus(DeliveryStatus status) =>

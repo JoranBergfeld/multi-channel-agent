@@ -183,47 +183,16 @@ public sealed class StockConversationScenarioTests : SqlIntegrationTestBase
             duplicateOutcome.GetProperty("payload").GetProperty("rows").GetArrayLength());
     }
 
-    // Proves per-conversation FIFO end to end against real SQL Server: two Turns submitted in the
-    // same signed-in web conversation are both processed correctly in one claimed batch, in their
-    // submission order - complementing the Application-layer unit test that proves the stronger
-    // "an earlier Turn that fails to reach a terminal Outcome blocks its later same-conversation
-    // successor" invariant deterministically without needing a real fault to inject over HTTP.
+    // Proves per-conversation FIFO end to end against real SQL Server: a Turn that cannot reach a
+    // terminal Outcome leaves its own conversation's successor entirely unclaimed - never even
+    // planned - across repeated passes and lease acquisitions, while an unrelated conversation keeps
+    // completing; and once the fault clears the conversation resumes head-first, in order.
+    // PerConversationFifoSqliteTests proves the identical behavior Docker-free.
     [SkippableFact]
-    public async Task Two_turns_in_the_same_conversation_are_both_processed_in_their_submission_order()
+    public async Task A_stuck_turn_holds_only_its_own_conversation_and_the_conversation_resumes_in_order()
     {
         Skip.IfNot(DockerAvailable, "Docker is not available in this environment; skipping the SQL-backed per-conversation FIFO scenario.");
 
-        var client = CreateHttpsClient(Factory!);
-        var (jar, csrfToken) = await SignInAndBootstrapAsync(client, "FIFO Owner");
-        var inventoryId = await CreateAndSelectInventoryAsync(client, jar, csrfToken);
-        await SeedStockEntryAsync(inventoryId, "Bolts", 1m);
-
-        var firstSubmit = await SendAsync(
-            client, jar,
-            new HttpRequestMessage(HttpMethod.Post, "/api/turns") { Content = JsonContent.Create(new { nativeMessageId = "native-fifo-1", contentText = "list stock" }) },
-            csrfToken);
-        var firstTurnId = (await firstSubmit.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("turnId").GetGuid();
-
-        var secondSubmit = await SendAsync(
-            client, jar,
-            new HttpRequestMessage(HttpMethod.Post, "/api/turns") { Content = JsonContent.Create(new { nativeMessageId = "native-fifo-2", contentText = "find Bolts" }) },
-            csrfToken);
-        var secondTurnId = (await secondSubmit.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("turnId").GetGuid();
-
-        Assert.Equal(2, await ProcessPendingAsync(Factory!));
-
-        var firstOutcomeResponse = await SendAsync(client, jar, new HttpRequestMessage(HttpMethod.Get, $"/api/turns/{firstTurnId}/outcome"));
-        var secondOutcomeResponse = await SendAsync(client, jar, new HttpRequestMessage(HttpMethod.Get, $"/api/turns/{secondTurnId}/outcome"));
-        var firstOutcome = await firstOutcomeResponse.Content.ReadFromJsonAsync<JsonElement>();
-        var secondOutcome = await secondOutcomeResponse.Content.ReadFromJsonAsync<JsonElement>();
-
-        Assert.Equal("completed", firstOutcome.GetProperty("status").GetString());
-        Assert.Equal("completed", secondOutcome.GetProperty("status").GetString());
-
-        using var verifyScope = Factory!.Services.CreateScope();
-        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<MultiChannelAgentDbContext>();
-        var firstOutcomeRow = await verifyDb.Outcomes.AsNoTracking().SingleAsync(o => o.TurnId == firstTurnId);
-        var secondOutcomeRow = await verifyDb.Outcomes.AsNoTracking().SingleAsync(o => o.TurnId == secondTurnId);
-        Assert.True(firstOutcomeRow.CreatedAt <= secondOutcomeRow.CreatedAt);
+        await PerConversationFifoScenario.RunAsync(Factory!);
     }
 }
