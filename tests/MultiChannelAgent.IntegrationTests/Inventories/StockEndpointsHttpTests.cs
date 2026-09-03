@@ -83,17 +83,17 @@ public sealed class StockEndpointsHttpTests : IAsyncLifetime
         return Guid.Parse(body.GetProperty("id").GetString()!);
     }
 
-    private async Task SeedStockEntryAsync(Guid inventoryId, string name, decimal quantity)
+    private async Task SeedStockEntryAsync(Guid inventoryId, string name, decimal quantity, Guid? unitId = null)
     {
         using var scope = _factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<MultiChannelAgentDbContext>();
-        var unit = db.Units.Single(u => u.InventoryId == inventoryId);
+        var resolvedUnitId = unitId ?? db.Units.Single(u => u.InventoryId == inventoryId && u.IsReserved).Id;
 
         db.StockEntries.Add(new StockEntryEntity
         {
             Id = Guid.NewGuid(),
             InventoryId = inventoryId,
-            UnitId = unit.Id,
+            UnitId = resolvedUnitId,
             LocationId = null,
             Name = name,
             NormalizedName = name.ToLowerInvariant(),
@@ -101,6 +101,46 @@ public sealed class StockEndpointsHttpTests : IAsyncLifetime
             CreatedAt = DateTimeOffset.UtcNow,
         });
         await db.SaveChangesAsync();
+    }
+
+    /// <summary>Adds a second Inventory-owned Unit with its own canonical term, so a Unit filter has something to narrow between.</summary>
+    private async Task<Guid> SeedUnitAsync(Guid inventoryId, string canonicalName)
+    {
+        using var scope = _factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<MultiChannelAgentDbContext>();
+        var unitId = Guid.NewGuid();
+
+        db.Units.Add(new UnitEntity
+        {
+            Id = unitId,
+            InventoryId = inventoryId,
+            CanonicalName = canonicalName,
+            NormalizedCanonicalName = canonicalName.ToLowerInvariant(),
+            IsReserved = false,
+            CreatedAt = DateTimeOffset.UtcNow,
+        });
+        db.UnitTerms.Add(new UnitTermEntity
+        {
+            Id = Guid.NewGuid(),
+            InventoryId = inventoryId,
+            UnitId = unitId,
+            Term = canonicalName,
+            NormalizedTerm = canonicalName.ToLowerInvariant(),
+            IsCanonical = true,
+            CreatedAt = DateTimeOffset.UtcNow,
+        });
+        await db.SaveChangesAsync();
+
+        return unitId;
+    }
+
+    private static async Task<IReadOnlyDictionary<string, string[]>> ValidationErrorsAsync(HttpResponseMessage response)
+    {
+        var problem = await response.Content.ReadFromJsonAsync<JsonElement>();
+        return problem.GetProperty("errors").EnumerateObject()
+            .ToDictionary(
+                property => property.Name,
+                property => property.Value.EnumerateArray().Select(message => message.GetString()!).ToArray());
     }
 
     [Fact]
@@ -152,5 +192,141 @@ public sealed class StockEndpointsHttpTests : IAsyncLifetime
         var response = await _client.GetAsync($"/api/inventories/{Guid.NewGuid()}/stock");
 
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+    // The workspace projection is the same authorized read the conversation performs, so it must
+    // offer the same bounds: narrowing to an exact Unit is one of them, and a Unit is named the way
+    // its Inventory names it - canonical name or active alias, or its opaque identifier.
+    [Fact]
+    public async Task A_unit_query_parameter_narrows_to_that_exact_unit()
+    {
+        var (jar, csrfToken) = await SignInAndBootstrapAsync("Owner Person");
+        var inventoryId = await CreateInventoryAsync(jar, csrfToken, "Warehouse");
+        var boxUnitId = await SeedUnitAsync(inventoryId, "box");
+        await SeedStockEntryAsync(inventoryId, "Bolts", 5m);
+        await SeedStockEntryAsync(inventoryId, "Bolts", 7m, boxUnitId);
+
+        var byCanonicalName = await SendAsync(jar, new HttpRequestMessage(HttpMethod.Get, $"/api/inventories/{inventoryId}/stock?unit=box"));
+        var byOpaqueId = await SendAsync(jar, new HttpRequestMessage(HttpMethod.Get, $"/api/inventories/{inventoryId}/stock?unit={boxUnitId}"));
+        var byReservedAlias = await SendAsync(jar, new HttpRequestMessage(HttpMethod.Get, $"/api/inventories/{inventoryId}/stock?unit=pcs"));
+
+        Assert.Equal(HttpStatusCode.OK, byCanonicalName.StatusCode);
+        var named = await byCanonicalName.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("box", Assert.Single(named.GetProperty("rows").EnumerateArray()).GetProperty("unit").GetString());
+
+        var byId = await byOpaqueId.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("box", Assert.Single(byId.GetProperty("rows").EnumerateArray()).GetProperty("unit").GetString());
+
+        // `pcs` is a reserved alias of every Inventory's `each` Unit.
+        var byAlias = await byReservedAlias.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("each", Assert.Single(byAlias.GetProperty("rows").EnumerateArray()).GetProperty("unit").GetString());
+    }
+
+    // An unknown reference is never created implicitly and never silently ignored - which would
+    // answer a wider question than was asked - and the problem names the parameter at fault.
+    [Fact]
+    public async Task An_unknown_unit_is_reported_against_the_unit_parameter()
+    {
+        var (jar, csrfToken) = await SignInAndBootstrapAsync("Owner Person");
+        var inventoryId = await CreateInventoryAsync(jar, csrfToken, "Warehouse");
+        await SeedStockEntryAsync(inventoryId, "Bolts", 5m);
+
+        var response = await SendAsync(jar, new HttpRequestMessage(HttpMethod.Get, $"/api/inventories/{inventoryId}/stock?unit=crates"));
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Contains("unit", (await ValidationErrorsAsync(response)).Keys);
+    }
+
+    [Fact]
+    public async Task An_unknown_location_is_reported_against_the_location_parameter()
+    {
+        var (jar, csrfToken) = await SignInAndBootstrapAsync("Owner Person");
+        var inventoryId = await CreateInventoryAsync(jar, csrfToken, "Warehouse");
+        await SeedStockEntryAsync(inventoryId, "Bolts", 5m);
+
+        var response = await SendAsync(
+            jar, new HttpRequestMessage(HttpMethod.Get, $"/api/inventories/{inventoryId}/stock?locationId={Guid.NewGuid()}"));
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Contains("locationId", (await ValidationErrorsAsync(response)).Keys);
+    }
+
+    [Fact]
+    public async Task A_page_size_bounds_the_page_and_its_cursor_resumes_the_same_request()
+    {
+        var (jar, csrfToken) = await SignInAndBootstrapAsync("Owner Person");
+        var inventoryId = await CreateInventoryAsync(jar, csrfToken, "Warehouse");
+        await SeedStockEntryAsync(inventoryId, "Apple Bolts", 1m);
+        await SeedStockEntryAsync(inventoryId, "Copper Wire", 1m);
+
+        var firstPageResponse = await SendAsync(
+            jar, new HttpRequestMessage(HttpMethod.Get, $"/api/inventories/{inventoryId}/stock?pageSize=1"));
+        Assert.Equal(HttpStatusCode.OK, firstPageResponse.StatusCode);
+        var firstPage = await firstPageResponse.Content.ReadFromJsonAsync<JsonElement>();
+
+        Assert.Equal("Apple Bolts", Assert.Single(firstPage.GetProperty("rows").EnumerateArray()).GetProperty("name").GetString());
+        Assert.True(firstPage.GetProperty("hasMore").GetBoolean());
+        var cursor = firstPage.GetProperty("nextCursor").GetString()!;
+
+        var secondPageResponse = await SendAsync(
+            jar, new HttpRequestMessage(HttpMethod.Get, $"/api/inventories/{inventoryId}/stock?pageSize=1&cursor={Uri.EscapeDataString(cursor)}"));
+        var secondPage = await secondPageResponse.Content.ReadFromJsonAsync<JsonElement>();
+
+        Assert.Equal("Copper Wire", Assert.Single(secondPage.GetProperty("rows").EnumerateArray()).GetProperty("name").GetString());
+        Assert.False(secondPage.GetProperty("hasMore").GetBoolean());
+    }
+
+    // A cursor only ever continues the request that issued it, so reusing one under a different page
+    // size is refused rather than resuming a position that means something else.
+    [Fact]
+    public async Task A_cursor_reused_under_a_different_page_size_is_refused()
+    {
+        var (jar, csrfToken) = await SignInAndBootstrapAsync("Owner Person");
+        var inventoryId = await CreateInventoryAsync(jar, csrfToken, "Warehouse");
+        await SeedStockEntryAsync(inventoryId, "Apple Bolts", 1m);
+        await SeedStockEntryAsync(inventoryId, "Copper Wire", 1m);
+        await SeedStockEntryAsync(inventoryId, "Zebra Bolts", 1m);
+
+        var firstPage = await (await SendAsync(
+            jar, new HttpRequestMessage(HttpMethod.Get, $"/api/inventories/{inventoryId}/stock?pageSize=1")))
+            .Content.ReadFromJsonAsync<JsonElement>();
+        var cursor = firstPage.GetProperty("nextCursor").GetString()!;
+
+        var response = await SendAsync(
+            jar, new HttpRequestMessage(HttpMethod.Get, $"/api/inventories/{inventoryId}/stock?pageSize=2&cursor={Uri.EscapeDataString(cursor)}"));
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Contains("cursor", (await ValidationErrorsAsync(response)).Keys);
+    }
+
+    [Theory]
+    [InlineData("0")]
+    [InlineData("51")]
+    [InlineData("-1")]
+    [InlineData("not-a-number")]
+    public async Task A_page_size_outside_its_bounds_is_reported_against_the_page_size_parameter(string pageSize)
+    {
+        var (jar, csrfToken) = await SignInAndBootstrapAsync("Owner Person");
+        var inventoryId = await CreateInventoryAsync(jar, csrfToken, "Warehouse");
+        await SeedStockEntryAsync(inventoryId, "Bolts", 5m);
+
+        var response = await SendAsync(
+            jar, new HttpRequestMessage(HttpMethod.Get, $"/api/inventories/{inventoryId}/stock?pageSize={pageSize}"));
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Contains("pageSize", (await ValidationErrorsAsync(response)).Keys);
+    }
+
+    [Fact]
+    public async Task An_unlocated_query_parameter_returns_only_stock_kept_nowhere_in_particular()
+    {
+        var (jar, csrfToken) = await SignInAndBootstrapAsync("Owner Person");
+        var inventoryId = await CreateInventoryAsync(jar, csrfToken, "Warehouse");
+        await SeedStockEntryAsync(inventoryId, "Bolts", 5m);
+
+        var response = await SendAsync(jar, new HttpRequestMessage(HttpMethod.Get, $"/api/inventories/{inventoryId}/stock?unlocated=true"));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Null(Assert.Single(body.GetProperty("rows").EnumerateArray()).GetProperty("location").GetString());
     }
 }

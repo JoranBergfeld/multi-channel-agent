@@ -72,7 +72,11 @@ public sealed class ConversationalStockFilterTests : IAsyncLifetime
 
         Assert.Equal("completed", mismatched.GetProperty("status").GetString());
         Assert.Equal("invalid", mismatched.GetProperty("category").GetString());
-        Assert.Equal("invalid_query", mismatched.GetProperty("code").GetString());
+
+        // Which bound was violated, not merely that something was: the Participant is told the page
+        // marker belongs to a different request, which is the only thing they can act on.
+        Assert.Equal("invalid_cursor", mismatched.GetProperty("code").GetString());
+        Assert.Contains("different request", mismatched.GetProperty("summary").GetString());
     }
 
     [Fact]

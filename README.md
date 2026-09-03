@@ -175,6 +175,13 @@ Then:
 - `POST /api/inventories/{inventoryId}/select` — explicitly switch the Active Inventory for the
   current web conversation. `404` (never a distinct signal) when the Inventory does not exist or is
   not authorized for the caller; selecting never itself grants access.
+- `GET /api/inventories/{inventoryId}/stock` — the authoritative Stock projection the Inventory
+  workspace refetches. It is the same authorized read the conversational `list_stock` tool call
+  performs, with the same bounds: `includeZero`, `nameFilter`, `unit` (an opaque Unit id, exact
+  canonical name, or active alias), `locationId` (an opaque Location id or exact name), `unlocated`,
+  `pageSize` (1-50), and `cursor`. `404` (never a distinct signal) when the Inventory does not exist
+  or is not authorized; `400` naming the parameter at fault for an unknown Unit/Location, an
+  out-of-bounds page size, or a cursor issued for a differently shaped request.
 - `POST /api/turns` — submit a normalized `InboundTurn`:
   `{ "nativeMessageId": "...", "contentText": "...", "locale": "en-US", "traceId": "..." }`. Participant,
   ChannelConversation, channel, typed principal evidence, and channel capabilities all come from the

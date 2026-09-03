@@ -82,8 +82,8 @@ public sealed class StockToolDispatcher(StockListingService listingService, Stoc
             StockAccessOutcomeKind.ReferenceNotFound => Semantic(
                 OutcomeCategory.NotFound,
                 "reference_not_found",
-                "That Unit or Location does not exist in this Inventory."),
-            StockAccessOutcomeKind.Invalid => Semantic(OutcomeCategory.Invalid, "invalid_query", "That request could not be understood."),
+                UnresolvedReferenceSummary(result.UnresolvedReference)),
+            StockAccessOutcomeKind.Invalid => Semantic(OutcomeCategory.Invalid, result.Code, InvalidRequestSummary(result.Code)),
             _ => Semantic(OutcomeCategory.Forbidden, "forbidden", "That request could not be completed."),
         };
     }
@@ -128,11 +128,28 @@ public sealed class StockToolDispatcher(StockListingService listingService, Stoc
             StockFindResultKind.ReferenceNotFound => Semantic(
                 OutcomeCategory.NotFound,
                 "reference_not_found",
-                "That Unit or Location does not exist in this Inventory."),
+                UnresolvedReferenceSummary(result.UnresolvedReference)),
             StockFindResultKind.Invalid => Semantic(OutcomeCategory.Invalid, "invalid_reference", "That request could not be understood."),
             _ => Semantic(OutcomeCategory.Forbidden, "forbidden", "That request could not be completed."),
         };
     }
+
+    /// <summary>Names the reference that did not resolve, so the Participant can correct that one.</summary>
+    private static string UnresolvedReferenceSummary(StockReferenceKind? reference) => reference switch
+    {
+        StockReferenceKind.Unit => "That Unit does not exist in this Inventory.",
+        StockReferenceKind.Location => "That Location does not exist in this Inventory.",
+        _ => "That Unit or Location does not exist in this Inventory.",
+    };
+
+    /// <summary>Names the bound the request violated, rather than only that it was rejected.</summary>
+    private static string InvalidRequestSummary(string code) => code switch
+    {
+        "invalid_page_size" => $"Ask for between 1 and {Domain.Inventories.StockListQuery.MaxPageSize} Stock Entries at a time.",
+        "invalid_cursor" => "That page marker belongs to a different request; start the list again.",
+        "invalid_location_filter" => "Ask for a Location or for unlocated Stock, not both.",
+        _ => "That request could not be understood.",
+    };
 
     /// <summary>Reads an untrusted boolean flag; anything that is not an explicit "true" is simply absent.</summary>
     private static bool ParseFlag(IReadOnlyDictionary<string, string> untrustedArgs, string key) =>

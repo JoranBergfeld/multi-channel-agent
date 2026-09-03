@@ -20,12 +20,23 @@ public sealed record StockRowView(string Id, string Name, string Unit, string? L
 /// <summary>One authorized page of List results, plus the opaque cursor to resume from when <see cref="HasMore"/> is true.</summary>
 public sealed record StockListView(IReadOnlyList<StockRowView> Rows, string? NextCursor, bool HasMore);
 
+/// <summary>Which named reference of a Stock read could not be resolved, so a caller can say which one is at fault.</summary>
+public enum StockReferenceKind
+{
+    Unit,
+    Location,
+}
+
 /// <summary>
 /// The semantic result of a List request: never SQL details, versions, or diagnostics - only a
 /// typed <see cref="StockAccessOutcomeKind"/>, a machine <see cref="Code"/>, and (only when
 /// <see cref="StockAccessOutcomeKind.Completed"/>) the resulting page.
+/// <see cref="UnresolvedReference"/> is present exactly when
+/// <see cref="StockAccessOutcomeKind.ReferenceNotFound"/> is, so an answer can name the reference
+/// that did not resolve instead of leaving a caller to guess between them.
 /// </summary>
-public sealed record StockListResult(StockAccessOutcomeKind Kind, StockListView? View, string Code);
+public sealed record StockListResult(
+    StockAccessOutcomeKind Kind, StockListView? View, string Code, StockReferenceKind? UnresolvedReference = null);
 
 /// <summary>
 /// One List request's bounds, as named by the caller. <see cref="UnitReference"/> and
@@ -91,7 +102,7 @@ public sealed class StockListingService(
             unitId = await referenceStore.ResolveUnitAsync(inventoryId, request.UnitReference, cancellationToken);
             if (unitId is null)
             {
-                return new StockListResult(StockAccessOutcomeKind.ReferenceNotFound, null, "reference_not_found");
+                return new StockListResult(StockAccessOutcomeKind.ReferenceNotFound, null, "reference_not_found", StockReferenceKind.Unit);
             }
         }
 
@@ -101,7 +112,7 @@ public sealed class StockListingService(
             locationId = await referenceStore.ResolveLocationAsync(inventoryId, request.LocationReference, cancellationToken);
             if (locationId is null)
             {
-                return new StockListResult(StockAccessOutcomeKind.ReferenceNotFound, null, "reference_not_found");
+                return new StockListResult(StockAccessOutcomeKind.ReferenceNotFound, null, "reference_not_found", StockReferenceKind.Location);
             }
         }
 
@@ -118,9 +129,11 @@ public sealed class StockListingService(
                 request.PageSize,
                 request.Cursor);
         }
-        catch (ArgumentException)
+        catch (ArgumentException invalid)
         {
-            return new StockListResult(StockAccessOutcomeKind.Invalid, null, "invalid_query");
+            // Which bound was violated is exactly what a caller needs in order to correct the
+            // request, so it is reported rather than flattened into one opaque "invalid".
+            return new StockListResult(StockAccessOutcomeKind.Invalid, null, InvalidQueryCode(invalid.ParamName));
         }
 
         var page = await stockStore.ListPageAsync(query, cancellationToken);
@@ -136,6 +149,15 @@ public sealed class StockListingService(
             new StockListView(rows.Select(ToRowView).ToList(), nextCursor, hasMore),
             "completed");
     }
+
+    /// <summary>The machine code naming the bound a rejected request violated.</summary>
+    internal static string InvalidQueryCode(string? parameterName) => parameterName switch
+    {
+        "pageSize" => "invalid_page_size",
+        "cursor" => "invalid_cursor",
+        "unlocatedOnly" => "invalid_location_filter",
+        _ => "invalid_query",
+    };
 
     internal static StockRowView ToRowView(StockEntrySummary row) => new(
         row.Id.ToString(),

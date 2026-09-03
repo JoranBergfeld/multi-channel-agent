@@ -46,7 +46,8 @@ public sealed record StockFindView(
 /// <see cref="StockFindResultKind.Completed"/> or <see cref="StockFindResultKind.Ambiguous"/>) the
 /// resolved candidates.
 /// </summary>
-public sealed record StockFindResult(StockFindResultKind Kind, StockFindView? View, string Code);
+public sealed record StockFindResult(
+    StockFindResultKind Kind, StockFindView? View, string Code, StockReferenceKind? UnresolvedReference = null);
 
 /// <summary>
 /// One Find request's structured descriptor. <see cref="Reference"/> targets a Stock Entry either by
@@ -108,7 +109,7 @@ public sealed class StockFindingService(
             unitId = await referenceStore.ResolveUnitAsync(inventoryId, request.UnitReference, cancellationToken);
             if (unitId is null)
             {
-                return new StockFindResult(StockFindResultKind.ReferenceNotFound, null, "reference_not_found");
+                return new StockFindResult(StockFindResultKind.ReferenceNotFound, null, "reference_not_found", StockReferenceKind.Unit);
             }
         }
 
@@ -118,7 +119,7 @@ public sealed class StockFindingService(
             locationId = await referenceStore.ResolveLocationAsync(inventoryId, request.LocationReference, cancellationToken);
             if (locationId is null)
             {
-                return new StockFindResult(StockFindResultKind.ReferenceNotFound, null, "reference_not_found");
+                return new StockFindResult(StockFindResultKind.ReferenceNotFound, null, "reference_not_found", StockReferenceKind.Location);
             }
         }
 

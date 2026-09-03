@@ -267,5 +267,8 @@ public class StockToolDispatcherTests
 
         Assert.Equal(OutcomeCategory.NotFound, decision.Category);
         Assert.Equal("reference_not_found", decision.Code);
+
+        // Names the reference actually at fault, so the Participant corrects that one.
+        Assert.Equal("That Location does not exist in this Inventory.", decision.Summary);
     }
 }

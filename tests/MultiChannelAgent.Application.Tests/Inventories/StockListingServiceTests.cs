@@ -153,6 +153,7 @@ public class StockListingServiceTests
             Viewer, SomeInventory, Request(cursor: "not-a-valid-cursor!!!"), channelConversationId: null, Now, CancellationToken.None);
 
         Assert.Equal(StockAccessOutcomeKind.Invalid, result.Kind);
+        Assert.Equal("invalid_cursor", result.Code);
         Assert.Null(result.View);
     }
 
@@ -246,6 +247,9 @@ public class StockListingServiceTests
 
         Assert.Equal(StockAccessOutcomeKind.ReferenceNotFound, result.Kind);
         Assert.Equal("reference_not_found", result.Code);
+
+        // Which reference did not resolve, so a caller can name the one at fault rather than guess.
+        Assert.Equal(location is null ? StockReferenceKind.Unit : StockReferenceKind.Location, result.UnresolvedReference);
         Assert.Null(result.View);
     }
 
@@ -278,7 +282,9 @@ public class StockListingServiceTests
             Viewer, SomeInventory, Request(locationReference: "Shelf A", unlocatedOnly: true),
             channelConversationId: null, Now, CancellationToken.None);
 
+        // Which bound was violated is what a caller needs in order to correct the request.
         Assert.Equal(StockAccessOutcomeKind.Invalid, result.Kind);
+        Assert.Equal("invalid_location_filter", result.Code);
     }
 
     [Theory]
@@ -292,6 +298,7 @@ public class StockListingServiceTests
             Viewer, SomeInventory, Request(pageSize: pageSize), channelConversationId: null, Now, CancellationToken.None);
 
         Assert.Equal(StockAccessOutcomeKind.Invalid, result.Kind);
+        Assert.Equal("invalid_page_size", result.Code);
     }
 
     // A cursor answers "continue exactly this question": resuming it against a different question

@@ -271,6 +271,7 @@ public class StockFindingServiceTests
 
         Assert.Equal(StockFindResultKind.ReferenceNotFound, result.Kind);
         Assert.Equal("reference_not_found", result.Code);
+        Assert.Equal(StockReferenceKind.Location, result.UnresolvedReference);
     }
     [Theory]
     [InlineData(MembershipRole.Viewer)]
