@@ -1,3 +1,4 @@
+using MultiChannelAgent.Domain.Inventories;
 using MultiChannelAgent.Domain.Turns;
 
 namespace MultiChannelAgent.Application.Turns;
@@ -19,11 +20,20 @@ public sealed record TurnOutcomeView(
 /// <summary>
 /// Reads back the terminal Outcome and requested Deliveries recorded for a Turn. This is the
 /// application-boundary read side that channel adapters and the web client use to observe results.
+/// A caller may only read a Turn's own recorded result: <see cref="GetAsync"/> returns null - the same
+/// shape as "not found" - for a Turn that exists but belongs to a different Participant, so a caller
+/// can never learn that some other Participant's Turn exists.
 /// </summary>
-public sealed class TurnOutcomeReader(IOutcomeStore outcomeStore, IDeliveryStore deliveryStore)
+public sealed class TurnOutcomeReader(IInboxStore inboxStore, IOutcomeStore outcomeStore, IDeliveryStore deliveryStore)
 {
-    public async Task<TurnOutcomeView?> GetAsync(TurnId turnId, CancellationToken cancellationToken)
+    public async Task<TurnOutcomeView?> GetAsync(TurnId turnId, ParticipantId requestingParticipantId, CancellationToken cancellationToken)
     {
+        var turn = await inboxStore.FindByTurnIdAsync(turnId, cancellationToken);
+        if (turn is null || turn.ParticipantId != requestingParticipantId)
+        {
+            return null;
+        }
+
         var outcome = await outcomeStore.FindAsync(turnId, cancellationToken);
         if (outcome is null)
         {

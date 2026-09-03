@@ -23,6 +23,17 @@ public sealed class InMemoryInboxStore : IInboxStore
         return Task.FromResult(match);
     }
 
+    public Task<InboundTurn?> FindByTurnIdAsync(TurnId turnId, CancellationToken cancellationToken)
+    {
+        InboundTurn? match;
+        lock (_gate)
+        {
+            match = _turns.FirstOrDefault(t => t.TurnId == turnId);
+        }
+
+        return Task.FromResult(match);
+    }
+
     /// <summary>
     /// Mirrors the atomicity <see cref="IInboxStore.AcceptAsync"/> requires from a real store: a lock
     /// makes the "is one already accepted for this NativeMessageId" check and the insert a single

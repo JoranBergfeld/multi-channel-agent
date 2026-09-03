@@ -2,6 +2,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Time.Testing;
 using MultiChannelAgent.Application.Tests.TestDoubles;
 using MultiChannelAgent.Application.Turns;
+using MultiChannelAgent.Domain.Inventories;
 using MultiChannelAgent.Domain.Turns;
 
 namespace MultiChannelAgent.Application.Tests;
@@ -9,6 +10,7 @@ namespace MultiChannelAgent.Application.Tests;
 public class TurnProcessingCoordinatorTests
 {
     private static readonly DateTimeOffset Now = new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+    private static readonly ParticipantId SomeParticipant = new(Guid.Parse("11111111-1111-1111-1111-111111111111"));
 
     /// <summary>Counts invocations so tests can assert exactly when model planning does and does not rerun.</summary>
     private sealed class CountingModelBoundary(IModelBoundary inner) : IModelBoundary
@@ -46,7 +48,7 @@ public class TurnProcessingCoordinatorTests
     {
         var timeProvider = new FakeTimeProvider(Now);
         var (coordinator, inbox, outcomes, deliveries, _) = CreateCoordinator(timeProvider);
-        var turn = InboundTurn.Create("native-1", "conversation-1", "hello", null, Now, null);
+        var turn = InboundTurn.Create("native-1", SomeParticipant, "conversation-1", "hello", null, Now, null);
         await inbox.AcceptAsync(turn, CancellationToken.None);
 
         var processedCount = await coordinator.ProcessPendingAsync(CancellationToken.None);
@@ -66,7 +68,7 @@ public class TurnProcessingCoordinatorTests
     {
         var timeProvider = new FakeTimeProvider(Now);
         var (coordinator, inbox, _, _, _) = CreateCoordinator(timeProvider);
-        var turn = InboundTurn.Create("native-1", "conversation-1", "hello", null, Now, null);
+        var turn = InboundTurn.Create("native-1", SomeParticipant, "conversation-1", "hello", null, Now, null);
         await inbox.AcceptAsync(turn, CancellationToken.None);
 
         await coordinator.ProcessPendingAsync(CancellationToken.None);
@@ -91,7 +93,7 @@ public class TurnProcessingCoordinatorTests
     {
         var timeProvider = new FakeTimeProvider(Now);
         var (coordinator, inbox, outcomes, deliveries, _) = CreateCoordinator(timeProvider);
-        var turn = InboundTurn.Create("native-1", "conversation-1", ScriptedModelBoundary.FailureMarker, null, Now, null);
+        var turn = InboundTurn.Create("native-1", SomeParticipant, "conversation-1", ScriptedModelBoundary.FailureMarker, null, Now, null);
         await inbox.AcceptAsync(turn, CancellationToken.None);
 
         await coordinator.ProcessPendingAsync(CancellationToken.None);
@@ -106,8 +108,8 @@ public class TurnProcessingCoordinatorTests
     {
         var timeProvider = new FakeTimeProvider(Now);
         var (coordinator, inbox, outcomes, _, resultStore) = CreateCoordinator(timeProvider);
-        var failingTurn = InboundTurn.Create("native-fail", "conversation-1", "hello", null, Now, null);
-        var okTurn = InboundTurn.Create("native-ok", "conversation-2", "hello", null, Now, null);
+        var failingTurn = InboundTurn.Create("native-fail", SomeParticipant, "conversation-1", "hello", null, Now, null);
+        var okTurn = InboundTurn.Create("native-ok", SomeParticipant, "conversation-2", "hello", null, Now, null);
         await inbox.AcceptAsync(failingTurn, CancellationToken.None);
         await inbox.AcceptAsync(okTurn, CancellationToken.None);
         resultStore.FailForTurnIds.Add(failingTurn.TurnId.Value);
@@ -125,7 +127,7 @@ public class TurnProcessingCoordinatorTests
         var timeProvider = new FakeTimeProvider(Now);
         var modelBoundary = new CountingModelBoundary(new ScriptedModelBoundary());
         var (coordinator, inbox, outcomes, _, resultStore) = CreateCoordinator(timeProvider, modelBoundary);
-        var turn = InboundTurn.Create("native-1", "conversation-1", "hello", null, Now, null);
+        var turn = InboundTurn.Create("native-1", SomeParticipant, "conversation-1", "hello", null, Now, null);
         await inbox.AcceptAsync(turn, CancellationToken.None);
         resultStore.FailForTurnIds.Add(turn.TurnId.Value);
 

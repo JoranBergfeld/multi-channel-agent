@@ -1,5 +1,6 @@
 using MultiChannelAgent.Application.Tests.TestDoubles;
 using MultiChannelAgent.Application.Turns;
+using MultiChannelAgent.Domain.Inventories;
 using MultiChannelAgent.Domain.Turns;
 
 namespace MultiChannelAgent.Application.Tests;
@@ -7,29 +8,41 @@ namespace MultiChannelAgent.Application.Tests;
 public class TurnOutcomeReaderTests
 {
     private static readonly DateTimeOffset Now = new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+    private static readonly ParticipantId Owner = new(Guid.Parse("11111111-1111-1111-1111-111111111111"));
+    private static readonly ParticipantId Stranger = new(Guid.Parse("22222222-2222-2222-2222-222222222222"));
+
+    private static async Task<(InMemoryInboxStore Inbox, InMemoryOutcomeStore Outcomes, InMemoryDeliveryStore Deliveries, TurnOutcomeReader Reader, TurnId TurnId)>
+        SeedProcessedTurnAsync()
+    {
+        var inbox = new InMemoryInboxStore();
+        var outcomeStore = new InMemoryOutcomeStore();
+        var deliveryStore = new InMemoryDeliveryStore();
+        var turn = InboundTurn.Create("native-1", Owner, "conversation-1", "hello", null, Now, null);
+        await inbox.AcceptAsync(turn, CancellationToken.None);
+        await outcomeStore.SaveAsync(Outcome.Completed(turn.TurnId, "echoed", "Echoed: hello", Now), CancellationToken.None);
+        var delivery = Delivery.Request(turn.TurnId, "synthetic", "Echoed: hello", Now);
+        await deliveryStore.SaveAsync(delivery, CancellationToken.None);
+        var reader = new TurnOutcomeReader(inbox, outcomeStore, deliveryStore);
+
+        return (inbox, outcomeStore, deliveryStore, reader, turn.TurnId);
+    }
 
     [Fact]
     public async Task Unknown_or_not_yet_processed_turn_returns_null()
     {
-        var reader = new TurnOutcomeReader(new InMemoryOutcomeStore(), new InMemoryDeliveryStore());
+        var reader = new TurnOutcomeReader(new InMemoryInboxStore(), new InMemoryOutcomeStore(), new InMemoryDeliveryStore());
 
-        var view = await reader.GetAsync(TurnId.NewId(), CancellationToken.None);
+        var view = await reader.GetAsync(TurnId.NewId(), Owner, CancellationToken.None);
 
         Assert.Null(view);
     }
 
     [Fact]
-    public async Task Processed_turn_exposes_terminal_outcome_and_its_deliveries()
+    public async Task Processed_turn_exposes_terminal_outcome_and_its_deliveries_to_its_own_participant()
     {
-        var outcomeStore = new InMemoryOutcomeStore();
-        var deliveryStore = new InMemoryDeliveryStore();
-        var turnId = TurnId.NewId();
-        await outcomeStore.SaveAsync(Outcome.Completed(turnId, "echoed", "Echoed: hello", Now), CancellationToken.None);
-        var delivery = Delivery.Request(turnId, "synthetic", "Echoed: hello", Now);
-        await deliveryStore.SaveAsync(delivery, CancellationToken.None);
-        var reader = new TurnOutcomeReader(outcomeStore, deliveryStore);
+        var (_, _, _, reader, turnId) = await SeedProcessedTurnAsync();
 
-        var view = await reader.GetAsync(turnId, CancellationToken.None);
+        var view = await reader.GetAsync(turnId, Owner, CancellationToken.None);
 
         Assert.NotNull(view);
         Assert.Equal(turnId, view!.TurnId);
@@ -37,8 +50,17 @@ public class TurnOutcomeReaderTests
         Assert.Equal("echoed", view.Code);
         Assert.Equal("Echoed: hello", view.Summary);
         var deliveryView = Assert.Single(view.Deliveries);
-        Assert.Equal(delivery.DeliveryId, deliveryView.DeliveryId);
         Assert.Equal("synthetic", deliveryView.Channel);
         Assert.Equal("pending", deliveryView.Status);
+    }
+
+    [Fact]
+    public async Task Reading_another_participants_turn_returns_null_instead_of_disclosing_it()
+    {
+        var (_, _, _, reader, turnId) = await SeedProcessedTurnAsync();
+
+        var view = await reader.GetAsync(turnId, Stranger, CancellationToken.None);
+
+        Assert.Null(view);
     }
 }

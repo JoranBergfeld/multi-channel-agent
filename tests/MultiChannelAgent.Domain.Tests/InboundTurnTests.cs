@@ -1,9 +1,12 @@
+using MultiChannelAgent.Domain.Inventories;
 using MultiChannelAgent.Domain.Turns;
 
 namespace MultiChannelAgent.Domain.Tests;
 
 public class InboundTurnTests
 {
+    private static readonly ParticipantId SomeParticipant = new(Guid.Parse("11111111-1111-1111-1111-111111111111"));
+
     [Fact]
     public void Create_normalizes_whitespace_padded_fields()
     {
@@ -11,6 +14,7 @@ public class InboundTurnTests
 
         var turn = InboundTurn.Create(
             nativeMessageId: "  native-123  ",
+            participantId: SomeParticipant,
             channelConversationId: "  conversation-abc  ",
             contentText: "  hello world  ",
             locale: "  en-US  ",
@@ -18,7 +22,8 @@ public class InboundTurnTests
             traceId: "  trace-1  ");
 
         Assert.Equal("native-123", turn.NativeMessageId);
-        Assert.Equal("conversation-abc", turn.ChannelConversationId);
+        Assert.Equal(SomeParticipant, turn.ParticipantId);
+        Assert.Equal("conversation-abc", turn.ChannelConversationId.Value);
         Assert.Equal("hello world", turn.ContentText);
         Assert.Equal("en-US", turn.Locale);
         Assert.Equal("trace-1", turn.TraceId);
@@ -33,6 +38,7 @@ public class InboundTurnTests
     {
         Assert.Throws<ArgumentException>(() => InboundTurn.Create(
             nativeMessageId: blank,
+            participantId: SomeParticipant,
             channelConversationId: "conversation-abc",
             contentText: "hello",
             locale: null,
@@ -47,6 +53,7 @@ public class InboundTurnTests
     {
         Assert.Throws<ArgumentException>(() => InboundTurn.Create(
             nativeMessageId: "native-123",
+            participantId: SomeParticipant,
             channelConversationId: "conversation-abc",
             contentText: blank,
             locale: null,
@@ -62,6 +69,7 @@ public class InboundTurnTests
     {
         Assert.Throws<ArgumentException>(() => InboundTurn.Create(
             nativeMessageId: null!,
+            participantId: SomeParticipant,
             channelConversationId: "conversation-abc",
             contentText: "hello",
             locale: null,
@@ -74,6 +82,7 @@ public class InboundTurnTests
     {
         Assert.Throws<ArgumentException>(() => InboundTurn.Create(
             nativeMessageId: "native-123",
+            participantId: SomeParticipant,
             channelConversationId: null!,
             contentText: "hello",
             locale: null,
@@ -86,6 +95,7 @@ public class InboundTurnTests
     {
         Assert.Throws<ArgumentException>(() => InboundTurn.Create(
             nativeMessageId: "native-123",
+            participantId: SomeParticipant,
             channelConversationId: "conversation-abc",
             contentText: null!,
             locale: null,
@@ -96,8 +106,8 @@ public class InboundTurnTests
     [Fact]
     public void Two_turns_created_for_the_same_native_message_get_distinct_turn_ids()
     {
-        var first = InboundTurn.Create("native-123", "conversation-abc", "hello", null, DateTimeOffset.UtcNow, null);
-        var second = InboundTurn.Create("native-123", "conversation-abc", "hello", null, DateTimeOffset.UtcNow, null);
+        var first = InboundTurn.Create("native-123", SomeParticipant, "conversation-abc", "hello", null, DateTimeOffset.UtcNow, null);
+        var second = InboundTurn.Create("native-123", SomeParticipant, "conversation-abc", "hello", null, DateTimeOffset.UtcNow, null);
 
         Assert.NotEqual(first.TurnId, second.TurnId);
     }

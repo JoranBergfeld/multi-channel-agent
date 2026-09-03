@@ -25,6 +25,7 @@ public sealed class TurnAcceptanceService(IInboxStore inboxStore)
 
         var turn = InboundTurn.Create(
             request.NativeMessageId,
+            request.ParticipantId,
             request.ChannelConversationId,
             request.ContentText,
             request.Locale,

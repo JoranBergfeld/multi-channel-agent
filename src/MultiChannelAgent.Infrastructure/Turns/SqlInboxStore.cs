@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using MultiChannelAgent.Application.Turns;
+using MultiChannelAgent.Domain.Inventories;
 using MultiChannelAgent.Domain.Turns;
 using MultiChannelAgent.Infrastructure.Persistence;
 using MultiChannelAgent.Infrastructure.Persistence.Entities;
@@ -23,13 +24,23 @@ public sealed class SqlInboxStore(MultiChannelAgentDbContext db) : IInboxStore
         return entity is null ? null : ToDomain(entity);
     }
 
+    public async Task<InboundTurn?> FindByTurnIdAsync(TurnId turnId, CancellationToken cancellationToken)
+    {
+        var entity = await db.InboxEntries
+            .AsNoTracking()
+            .FirstOrDefaultAsync(e => e.TurnId == turnId.Value, cancellationToken);
+
+        return entity is null ? null : ToDomain(entity);
+    }
+
     public async Task<InboxAcceptResult> AcceptAsync(InboundTurn turn, CancellationToken cancellationToken)
     {
         db.InboxEntries.Add(new InboxEntryEntity
         {
             TurnId = turn.TurnId.Value,
             NativeMessageId = turn.NativeMessageId,
-            ChannelConversationId = turn.ChannelConversationId,
+            ParticipantId = turn.ParticipantId.Value,
+            ChannelConversationId = turn.ChannelConversationId.Value,
             ContentText = turn.ContentText,
             Locale = turn.Locale,
             TraceId = turn.TraceId,
@@ -84,7 +95,8 @@ public sealed class SqlInboxStore(MultiChannelAgentDbContext db) : IInboxStore
     {
         TurnId = new TurnId(entity.TurnId),
         NativeMessageId = entity.NativeMessageId,
-        ChannelConversationId = entity.ChannelConversationId,
+        ParticipantId = new ParticipantId(entity.ParticipantId),
+        ChannelConversationId = new ChannelConversationId(entity.ChannelConversationId),
         ContentText = entity.ContentText,
         Locale = entity.Locale,
         TraceId = entity.TraceId,

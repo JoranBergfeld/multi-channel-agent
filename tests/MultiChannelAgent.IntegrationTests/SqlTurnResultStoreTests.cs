@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using MultiChannelAgent.Application.Turns;
+using MultiChannelAgent.Domain.Inventories;
 using MultiChannelAgent.Domain.Turns;
 using MultiChannelAgent.Infrastructure.Persistence;
 using MultiChannelAgent.Infrastructure.Persistence.Entities;
@@ -26,12 +27,13 @@ namespace MultiChannelAgent.IntegrationTests;
 /// </summary>
 public sealed class SqlTurnResultStoreTests : SqlIntegrationTestBase
 {
+    private static readonly ParticipantId SomeParticipant = new(Guid.Parse("11111111-1111-1111-1111-111111111111"));
     [SkippableFact]
     public async Task A_failed_record_attempt_leaves_no_partial_state_so_the_turn_remains_safely_retryable()
     {
         Skip.IfNot(DockerAvailable, "Docker is not available in this environment; skipping the real SQL atomicity scenario.");
 
-        var turn = InboundTurn.Create("native-atomicity-1", "conversation-atomicity-1", "hello", null, DateTimeOffset.UtcNow, null);
+        var turn = InboundTurn.Create("native-atomicity-1", SomeParticipant, "conversation-atomicity-1", "hello", null, DateTimeOffset.UtcNow, null);
 
         using (var seedScope = Factory!.Services.CreateScope())
         {
@@ -40,7 +42,8 @@ public sealed class SqlTurnResultStoreTests : SqlIntegrationTestBase
             {
                 TurnId = turn.TurnId.Value,
                 NativeMessageId = turn.NativeMessageId,
-                ChannelConversationId = turn.ChannelConversationId,
+                ParticipantId = turn.ParticipantId.Value,
+                ChannelConversationId = turn.ChannelConversationId.Value,
                 ContentText = turn.ContentText,
                 ReceivedAt = turn.ReceivedAt,
                 CreatedAt = turn.ReceivedAt,
@@ -109,8 +112,8 @@ public sealed class SqlTurnResultStoreTests : SqlIntegrationTestBase
     {
         Skip.IfNot(DockerAvailable, "Docker is not available in this environment; skipping the real SQL cross-Turn contamination scenario.");
 
-        var turnA = InboundTurn.Create("native-contamination-a", "conversation-contamination-a", "hello a", null, DateTimeOffset.UtcNow, null);
-        var turnB = InboundTurn.Create("native-contamination-b", "conversation-contamination-b", "hello b", null, DateTimeOffset.UtcNow, null);
+        var turnA = InboundTurn.Create("native-contamination-a", SomeParticipant, "conversation-contamination-a", "hello a", null, DateTimeOffset.UtcNow, null);
+        var turnB = InboundTurn.Create("native-contamination-b", SomeParticipant, "conversation-contamination-b", "hello b", null, DateTimeOffset.UtcNow, null);
 
         using (var seedScope = Factory!.Services.CreateScope())
         {
@@ -121,7 +124,8 @@ public sealed class SqlTurnResultStoreTests : SqlIntegrationTestBase
                 {
                     TurnId = turn.TurnId.Value,
                     NativeMessageId = turn.NativeMessageId,
-                    ChannelConversationId = turn.ChannelConversationId,
+                    ParticipantId = turn.ParticipantId.Value,
+                    ChannelConversationId = turn.ChannelConversationId.Value,
                     ContentText = turn.ContentText,
                     ReceivedAt = turn.ReceivedAt,
                     CreatedAt = turn.ReceivedAt,

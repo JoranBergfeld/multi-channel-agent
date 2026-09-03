@@ -17,6 +17,9 @@ public sealed class TwoPartyGatedInboxStore(IInboxStore inner, TaskCompletionSou
     public Task<InboundTurn?> FindByNativeMessageIdAsync(string nativeMessageId, CancellationToken cancellationToken) =>
         inner.FindByNativeMessageIdAsync(nativeMessageId, cancellationToken);
 
+    public Task<InboundTurn?> FindByTurnIdAsync(TurnId turnId, CancellationToken cancellationToken) =>
+        inner.FindByTurnIdAsync(turnId, cancellationToken);
+
     public async Task<InboxAcceptResult> AcceptAsync(InboundTurn turn, CancellationToken cancellationToken)
     {
         ownReady.TrySetResult();

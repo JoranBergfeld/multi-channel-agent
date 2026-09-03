@@ -1,10 +1,13 @@
 using MultiChannelAgent.Application.Tests.TestDoubles;
 using MultiChannelAgent.Application.Turns;
+using MultiChannelAgent.Domain.Inventories;
 
 namespace MultiChannelAgent.Application.Tests;
 
 public class TurnAcceptanceServiceTests
 {
+    private static readonly ParticipantId SomeParticipant = new(Guid.Parse("11111111-1111-1111-1111-111111111111"));
+
     private static readonly DateTimeOffset ReceivedAt = new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
 
     [Fact]
@@ -14,7 +17,7 @@ public class TurnAcceptanceServiceTests
         var service = new TurnAcceptanceService(store);
 
         var result = await service.AcceptAsync(
-            new SubmitTurnRequest("native-1", "conversation-1", "hello", "en-US", "trace-1"),
+            new SubmitTurnRequest("native-1", SomeParticipant, "conversation-1", "hello", "en-US", "trace-1"),
             ReceivedAt,
             CancellationToken.None);
 
@@ -29,7 +32,7 @@ public class TurnAcceptanceServiceTests
     {
         var store = new InMemoryInboxStore();
         var service = new TurnAcceptanceService(store);
-        var request = new SubmitTurnRequest("native-1", "conversation-1", "hello", "en-US", "trace-1");
+        var request = new SubmitTurnRequest("native-1", SomeParticipant, "conversation-1", "hello", "en-US", "trace-1");
 
         var first = await service.AcceptAsync(request, ReceivedAt, CancellationToken.None);
         var second = await service.AcceptAsync(request, ReceivedAt.AddMinutes(1), CancellationToken.None);
@@ -43,7 +46,7 @@ public class TurnAcceptanceServiceTests
     public async Task Two_concurrent_deliveries_of_the_same_native_message_id_both_observing_absence_converge_on_one_turn()
     {
         var store = new InMemoryInboxStore();
-        var request = new SubmitTurnRequest("native-race-1", "conversation-race-1", "hello", "en-US", "trace-1");
+        var request = new SubmitTurnRequest("native-race-1", SomeParticipant, "conversation-race-1", "hello", "en-US", "trace-1");
 
         // Both parties are gated so that each only proceeds into AcceptAsync once BOTH have already
         // called FindByNativeMessageIdAsync and observed nothing - the exact "two simultaneous

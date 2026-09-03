@@ -1,5 +1,6 @@
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using MultiChannelAgent.Domain.Inventories;
 using MultiChannelAgent.Domain.Turns;
 using MultiChannelAgent.Infrastructure.Persistence;
 using MultiChannelAgent.Infrastructure.Turns;
@@ -21,6 +22,7 @@ namespace MultiChannelAgent.IntegrationTests;
 /// </summary>
 public sealed class SqlInboxStoreConcurrencyTests : IDisposable
 {
+    private static readonly ParticipantId SomeParticipant = new(Guid.Parse("11111111-1111-1111-1111-111111111111"));
     private readonly SqliteConnection _keepAliveConnection;
     private readonly string _connectionString;
 
@@ -45,8 +47,8 @@ public sealed class SqlInboxStoreConcurrencyTests : IDisposable
     {
         const string nativeMessageId = "native-race-1";
         var now = DateTimeOffset.UtcNow;
-        var turnA = InboundTurn.Create(nativeMessageId, "conversation-race-1", "hello a", null, now, null);
-        var turnB = InboundTurn.Create(nativeMessageId, "conversation-race-1", "hello b", null, now, null);
+        var turnA = InboundTurn.Create(nativeMessageId, SomeParticipant, "conversation-race-1", "hello a", null, now, null);
+        var turnB = InboundTurn.Create(nativeMessageId, SomeParticipant, "conversation-race-1", "hello b", null, now, null);
 
         using var dbA = CreateContext();
         using var dbB = CreateContext();
@@ -74,7 +76,7 @@ public sealed class SqlInboxStoreConcurrencyTests : IDisposable
     public async Task A_conflict_that_is_not_a_duplicate_native_message_id_still_propagates()
     {
         var now = DateTimeOffset.UtcNow;
-        var seededTurn = InboundTurn.Create("native-unrelated-a", "conversation-unrelated-a", "hello a", null, now, null);
+        var seededTurn = InboundTurn.Create("native-unrelated-a", SomeParticipant, "conversation-unrelated-a", "hello a", null, now, null);
 
         using (var seedDb = CreateContext())
         {
@@ -88,7 +90,8 @@ public sealed class SqlInboxStoreConcurrencyTests : IDisposable
         {
             TurnId = seededTurn.TurnId,
             NativeMessageId = "native-unrelated-b",
-            ChannelConversationId = "conversation-unrelated-b",
+            ParticipantId = SomeParticipant,
+            ChannelConversationId = new ChannelConversationId("conversation-unrelated-b"),
             ContentText = "hello b",
             ReceivedAt = now,
         };

@@ -24,5 +24,9 @@ public sealed class InboxEntryEntityConfiguration : IEntityTypeConfiguration<Inb
 
         // Supports claiming pending work in FIFO (received) order.
         builder.HasIndex(e => new { e.Status, e.ReceivedAt });
+
+        // Supports resolving, for a given ChannelConversation, whether an earlier Turn is still
+        // pending - the check that enforces per-conversation FIFO processing order.
+        builder.HasIndex(e => new { e.ChannelConversationId, e.Status, e.ReceivedAt });
     }
 }

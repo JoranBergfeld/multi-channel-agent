@@ -1,9 +1,14 @@
+using MultiChannelAgent.Domain.Inventories;
+
 namespace MultiChannelAgent.Domain.Turns;
 
 /// <summary>
 /// A normalized, channel-neutral inbound Turn. Every adapter translates validated native input into
-/// this shape before it is durably accepted. The <see cref="TurnId"/> is generated once at acceptance;
-/// the <see cref="NativeMessageId"/> is the stable native identity used to detect duplicate delivery.
+/// this shape before it is durably accepted. The <see cref="TurnId"/> is generated once at
+/// acceptance; the <see cref="NativeMessageId"/> is the stable native identity used to detect
+/// duplicate delivery. <see cref="ParticipantId"/> and <see cref="ChannelConversationId"/> are the
+/// application-owned identities the adapter resolved from trusted context (authenticated claims and
+/// the channel's own conversation identifier) - never accepted as untrusted caller input.
 /// </summary>
 public sealed record InboundTurn
 {
@@ -11,7 +16,9 @@ public sealed record InboundTurn
 
     public required string NativeMessageId { get; init; }
 
-    public required string ChannelConversationId { get; init; }
+    public required ParticipantId ParticipantId { get; init; }
+
+    public required ChannelConversationId ChannelConversationId { get; init; }
 
     public required string ContentText { get; init; }
 
@@ -23,6 +30,7 @@ public sealed record InboundTurn
 
     public static InboundTurn Create(
         string? nativeMessageId,
+        ParticipantId participantId,
         string? channelConversationId,
         string? contentText,
         string? locale,
@@ -37,7 +45,8 @@ public sealed record InboundTurn
         {
             TurnId = TurnId.NewId(),
             NativeMessageId = normalizedNativeMessageId,
-            ChannelConversationId = normalizedChannelConversationId,
+            ParticipantId = participantId,
+            ChannelConversationId = new ChannelConversationId(normalizedChannelConversationId),
             ContentText = normalizedContentText,
             Locale = NormalizeOptional(locale),
             TraceId = NormalizeOptional(traceId),

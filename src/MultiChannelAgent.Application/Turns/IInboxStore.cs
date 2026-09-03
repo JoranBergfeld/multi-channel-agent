@@ -23,6 +23,13 @@ public interface IInboxStore
     Task<InboundTurn?> FindByNativeMessageIdAsync(string nativeMessageId, CancellationToken cancellationToken);
 
     /// <summary>
+    /// Looks up the durably accepted Turn by its application-generated <see cref="TurnId"/> - used to
+    /// authorize a read of its Outcome against the Turn's own <see cref="InboundTurn.ParticipantId"/>,
+    /// never to bypass acceptance.
+    /// </summary>
+    Task<InboundTurn?> FindByTurnIdAsync(TurnId turnId, CancellationToken cancellationToken);
+
+    /// <summary>
     /// Atomically accepts <paramref name="turn"/> unless a Turn for the same
     /// <see cref="InboundTurn.NativeMessageId"/> is already durably accepted - including one accepted
     /// by a concurrent caller racing this same call - in which case that existing Turn is returned

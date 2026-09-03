@@ -1,12 +1,19 @@
+using System.Security.Claims;
 using MultiChannelAgent.Application.Turns;
 using MultiChannelAgent.Domain.Turns;
+using MultiChannelAgent.Host.Authentication;
+using MultiChannelAgent.Host.Authorization;
+using MultiChannelAgent.Host.Security;
 
 namespace MultiChannelAgent.Host.Endpoints;
 
-/// <summary>The wire shape accepted at the synthetic Turn submission endpoint.</summary>
+/// <summary>
+/// The wire shape accepted at the synthetic Turn submission endpoint. Deliberately carries no
+/// Participant or conversation identity: those are always trusted application context derived from
+/// the authenticated principal and the web conversation cookie, never accepted from the client body.
+/// </summary>
 public sealed record SubmitTurnHttpRequest(
     string? NativeMessageId,
-    string? ChannelConversationId,
     string? ContentText,
     string? Locale,
     string? TraceId);
@@ -16,8 +23,14 @@ public static class TurnEndpoints
 {
     public static IEndpointRouteBuilder MapTurnEndpoints(this IEndpointRouteBuilder endpoints)
     {
-        endpoints.MapPost("/api/turns", async (
+        var group = endpoints
+            .MapGroup("/api/turns")
+            .RequireAuthorization(AuthorizationPolicies.ActiveTenantMember);
+
+        group.MapPost("/", async (
             SubmitTurnHttpRequest request,
+            HttpContext httpContext,
+            ClaimsPrincipal user,
             TurnAcceptanceService acceptanceService,
             TimeProvider timeProvider,
             CancellationToken cancellationToken) =>
@@ -28,22 +41,29 @@ public static class TurnEndpoints
                 return Results.ValidationProblem(validationErrors);
             }
 
+            var participantId = user.GetParticipantId();
+            var channelConversationId = WebConversationCookie.EnsureId(httpContext);
+
             var result = await acceptanceService.AcceptAsync(
-                new SubmitTurnRequest(request.NativeMessageId!, request.ChannelConversationId!, request.ContentText!, request.Locale, request.TraceId),
+                new SubmitTurnRequest(request.NativeMessageId!, participantId, channelConversationId, request.ContentText!, request.Locale, request.TraceId),
                 timeProvider.GetUtcNow(),
                 cancellationToken);
 
             return Results.Accepted(
                 $"/api/turns/{result.TurnId.Value}/outcome",
                 new { turnId = result.TurnId.Value, alreadyAccepted = result.WasAlreadyAccepted });
-        });
+        }).AddEndpointFilter<AntiforgeryEndpointFilter>();
 
-        endpoints.MapGet("/api/turns/{turnId:guid}/outcome", async (
+        group.MapGet("/{turnId:guid}/outcome", async (
             Guid turnId,
+            ClaimsPrincipal user,
             TurnOutcomeReader outcomeReader,
             CancellationToken cancellationToken) =>
         {
-            var view = await outcomeReader.GetAsync(new TurnId(turnId), cancellationToken);
+            // Whether the Turn does not exist or simply belongs to a different Participant, the
+            // response must be identical: a plain 404, never a distinct signal that would let a
+            // caller infer another Participant's Turn exists.
+            var view = await outcomeReader.GetAsync(new TurnId(turnId), user.GetParticipantId(), cancellationToken);
             return view is null ? Results.NotFound() : Results.Ok(view);
         });
 
@@ -60,11 +80,6 @@ public static class TurnEndpoints
         if (string.IsNullOrWhiteSpace(request.NativeMessageId))
         {
             errors["nativeMessageId"] = ["nativeMessageId is required and must not be blank."];
-        }
-
-        if (string.IsNullOrWhiteSpace(request.ChannelConversationId))
-        {
-            errors["channelConversationId"] = ["channelConversationId is required and must not be blank."];
         }
 
         if (string.IsNullOrWhiteSpace(request.ContentText))

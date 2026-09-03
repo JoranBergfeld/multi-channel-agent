@@ -11,6 +11,8 @@ public sealed class InboxEntryEntity
 
     public required string NativeMessageId { get; set; }
 
+    public Guid ParticipantId { get; set; }
+
     public required string ChannelConversationId { get; set; }
 
     public required string ContentText { get; set; }
