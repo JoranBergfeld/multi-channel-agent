@@ -1,5 +1,8 @@
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
+using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
+using MultiChannelAgent.Host.Authentication;
+using MultiChannelAgent.Host.Authorization;
 using MultiChannelAgent.Host.Endpoints;
 using MultiChannelAgent.Host.HealthChecks;
 using MultiChannelAgent.Host.Workers;
@@ -12,6 +15,22 @@ var connectionString = builder.Configuration.GetConnectionString("MultiChannelAg
     ?? throw new InvalidOperationException("Missing required 'ConnectionStrings:MultiChannelAgent' configuration value.");
 
 builder.Services.AddMultiChannelAgentInfrastructure(connectionString);
+
+var authenticationProvider = builder.Configuration["Authentication:Provider"] ?? "Entra";
+var challengeScheme = string.Equals(authenticationProvider, "Test", StringComparison.OrdinalIgnoreCase)
+    ? ProviderSchemes.Test
+    : ProviderSchemes.Entra;
+
+builder.Services.AddMultiChannelAgentAuthentication(builder.Configuration, builder.Environment);
+builder.Services.AddMultiChannelAgentAuthorization();
+builder.Services.AddAntiforgery(options =>
+{
+    options.HeaderName = "X-CSRF-TOKEN";
+    options.Cookie.Name = "mca_csrf";
+    options.Cookie.HttpOnly = true;
+    options.Cookie.SecurePolicy = CookieSecurePolicy.Always;
+    options.Cookie.SameSite = SameSiteMode.Strict;
+});
 
 builder.Services.AddHostedService<TurnProcessingWorker>();
 builder.Services.AddHostedService<DeliveryDispatchWorker>();
@@ -33,7 +52,18 @@ app.MapHealthChecks("/health/ready", new HealthCheckOptions
     Predicate = check => check.Tags.Contains("ready"),
 });
 
+app.UseAuthentication();
+app.UseAuthorization();
+
 app.MapTurnEndpoints();
+app.MapSessionEndpoints();
+app.MapInventoryEndpoints();
+app.MapAuthEndpoints(challengeScheme);
+
+if (challengeScheme == ProviderSchemes.Test)
+{
+    app.MapTestAuthEndpoints();
+}
 
 app.UseDefaultFiles();
 app.UseStaticFiles();

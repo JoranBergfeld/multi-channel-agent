@@ -1,128 +1,189 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { getTurnOutcome, submitTurn, type TurnOutcomeView } from './turnsApi';
+import { useCallback, useEffect, useState } from 'react';
+import {
+  createInventory,
+  fetchBootstrap,
+  selectInventory,
+  MAX_INVENTORY_NAME_LENGTH,
+  type BootstrapResponse,
+  type InventoryView,
+} from './sessionApi';
+import TurnTracer from './TurnTracer';
 
-const POLL_INTERVAL_MS = 1500;
+type SessionState =
+  | { phase: 'loading' }
+  | { phase: 'unauthenticated' }
+  | { phase: 'forbidden' }
+  | { phase: 'ready'; session: BootstrapResponse };
 
-/** Minimal tracer UI: submit a synthetic Turn and watch its recorded Outcome arrive. */
+/**
+ * Signed-in web entry point: resolves the authenticated session bootstrap, guides a Participant
+ * with no Memberships through onboarding, and otherwise lets them explicitly create and select
+ * among their authorized Inventories before reaching the (preserved) Turn tracer.
+ */
 function App() {
-  const [conversationId] = useState(() => crypto.randomUUID());
-  const [contentText, setContentText] = useState('hello from the web client');
-  const [submitting, setSubmitting] = useState(false);
-  const [turnId, setTurnId] = useState<string | null>(null);
-  const [outcome, setOutcome] = useState<TurnOutcomeView | null>(null);
+  const [state, setState] = useState<SessionState>({ phase: 'loading' });
   const [error, setError] = useState<string | null>(null);
-  const pollHandle = useRef<number | undefined>(undefined);
+  const [newInventoryName, setNewInventoryName] = useState('');
+  const [creating, setCreating] = useState(false);
+  const [selectingId, setSelectingId] = useState<string | null>(null);
 
-  const stopPolling = useCallback(() => {
-    if (pollHandle.current !== undefined) {
-      window.clearInterval(pollHandle.current);
-      pollHandle.current = undefined;
+  const loadSession = useCallback(async () => {
+    try {
+      const result = await fetchBootstrap();
+      if (result.status === 'ok') {
+        setState({ phase: 'ready', session: result.data });
+      } else {
+        setState({ phase: result.status });
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
     }
   }, []);
 
-  useEffect(() => stopPolling, [stopPolling]);
+  useEffect(() => {
+    // oxlint(react/set-state-in-effect) only recognizes an inline async IIFE's await boundary, not
+    // one behind a named function reference - even though every setState call inside loadSession
+    // already happens after its own internal await, never synchronously during this effect. Wrapping
+    // the call this way keeps loadSession reusable (retries, and the post-create/post-select
+    // refreshes below) while making that already-true post-await ordering visible to the linter too.
+    void (async () => {
+      await loadSession();
+    })();
+  }, [loadSession]);
 
-  const pollOutcome = useCallback((id: string) => {
-    stopPolling();
-    pollHandle.current = window.setInterval(async () => {
-      try {
-        const result = await getTurnOutcome(id);
-        if (result) {
-          setOutcome(result);
-          stopPolling();
-        }
-      } catch (err) {
-        setError(err instanceof Error ? err.message : String(err));
-        stopPolling();
-      }
-    }, POLL_INTERVAL_MS);
-  }, [stopPolling]);
-
-  async function handleSubmit(event: React.FormEvent) {
+  async function handleCreateInventory(event: React.FormEvent) {
     event.preventDefault();
-    setSubmitting(true);
+    if (state.phase !== 'ready') {
+      return;
+    }
+
+    setCreating(true);
     setError(null);
-    setOutcome(null);
 
     try {
-      const result = await submitTurn({
-        nativeMessageId: crypto.randomUUID(),
-        channelConversationId: conversationId,
-        contentText,
-      });
-      setTurnId(result.turnId);
-      pollOutcome(result.turnId);
+      await createInventory(newInventoryName, crypto.randomUUID(), state.session.csrfToken);
+      setNewInventoryName('');
+      await loadSession();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setSubmitting(false);
+      setCreating(false);
     }
   }
 
+  async function handleSelectInventory(inventory: InventoryView) {
+    if (state.phase !== 'ready') {
+      return;
+    }
+
+    setSelectingId(inventory.id);
+    setError(null);
+
+    try {
+      const authorized = await selectInventory(inventory.id, state.session.csrfToken);
+      if (!authorized) {
+        setError('That Inventory is not available.');
+        return;
+      }
+
+      await loadSession();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSelectingId(null);
+    }
+  }
+
+  if (state.phase === 'loading') {
+    return (
+      <main>
+        <h1>Multi-Channel Agent</h1>
+        <p>Loading your session…</p>
+      </main>
+    );
+  }
+
+  if (state.phase === 'unauthenticated') {
+    return (
+      <main>
+        <h1>Multi-Channel Agent</h1>
+        <p>Sign in with your organization account to continue.</p>
+        <a href="/auth/sign-in">Sign in</a>
+      </main>
+    );
+  }
+
+  if (state.phase === 'forbidden') {
+    return (
+      <main>
+        <h1>Multi-Channel Agent</h1>
+        <p role="alert">Your account cannot use this application right now.</p>
+      </main>
+    );
+  }
+
+  const { session } = state;
+  const { bootstrap } = session;
+
   return (
     <main>
-      <h1>Multi-Channel Agent — Turn Tracer</h1>
+      <h1>Multi-Channel Agent</h1>
       <p>
-        Submits a normalized synthetic Turn to the application boundary and displays its recorded
-        terminal Outcome once processing completes.
+        Signed in as <strong>{bootstrap.displayName}</strong>
       </p>
-      <form onSubmit={handleSubmit}>
-        <label htmlFor="contentText">Message</label>
-        <textarea
-          id="contentText"
-          value={contentText}
-          onChange={(event) => setContentText(event.target.value)}
-          rows={3}
-        />
-        <button type="submit" disabled={submitting}>
-          {submitting ? 'Submitting…' : 'Submit Turn'}
-        </button>
-      </form>
 
-      {turnId && (
+      {error && <p role="alert">{error}</p>}
+
+      {bootstrap.needsOnboarding && (
         <section>
-          <h2>Turn</h2>
-          <p>
-            <code>{turnId}</code>
-          </p>
+          <h2>Get started</h2>
+          <p>You don&apos;t belong to any Inventory yet. Create one to get started.</p>
         </section>
       )}
 
-      {error && (
-        <section role="alert">
-          <h2>Error</h2>
-          <p>{error}</p>
-        </section>
-      )}
+      <section>
+        <h2>Your Inventories</h2>
+        {bootstrap.inventories.length === 0 && !bootstrap.needsOnboarding && <p>No Inventories yet.</p>}
+        {bootstrap.inventories.length > 0 && (
+          <ul>
+            {bootstrap.inventories.map((inventory) => {
+              const isActive = inventory.id === bootstrap.activeInventoryId;
+              return (
+                <li key={inventory.id}>
+                  {inventory.name} — Owner: {inventory.ownerDisplayName} (#{inventory.shortId}) — {inventory.role}
+                  {isActive ? (
+                    <strong> (active)</strong>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => void handleSelectInventory(inventory)}
+                      disabled={selectingId === inventory.id}
+                    >
+                      {selectingId === inventory.id ? 'Selecting…' : 'Use in this conversation'}
+                    </button>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        )}
 
-      {turnId && !outcome && !error && <p>Waiting for the terminal Outcome…</p>}
+        <form onSubmit={handleCreateInventory}>
+          <label htmlFor="newInventoryName">New Inventory name</label>
+          <input
+            id="newInventoryName"
+            value={newInventoryName}
+            onChange={(event) => setNewInventoryName(event.target.value)}
+            maxLength={MAX_INVENTORY_NAME_LENGTH}
+            required
+          />
+          <button type="submit" disabled={creating || newInventoryName.trim().length === 0}>
+            {creating ? 'Creating…' : 'Create Inventory'}
+          </button>
+        </form>
+      </section>
 
-      {outcome && (
-        <section>
-          <h2>Outcome</h2>
-          <dl>
-            <dt>Status</dt>
-            <dd>{outcome.status}</dd>
-            <dt>Code</dt>
-            <dd>{outcome.code}</dd>
-            <dt>Summary</dt>
-            <dd>{outcome.summary}</dd>
-          </dl>
-
-          {outcome.deliveries.length > 0 && (
-            <>
-              <h3>Deliveries</h3>
-              <ul>
-                {outcome.deliveries.map((delivery) => (
-                  <li key={delivery.deliveryId}>
-                    {delivery.channel}: {delivery.status} ({delivery.attempts} attempt(s))
-                  </li>
-                ))}
-              </ul>
-            </>
-          )}
-        </section>
-      )}
+      <TurnTracer />
     </main>
   );
 }

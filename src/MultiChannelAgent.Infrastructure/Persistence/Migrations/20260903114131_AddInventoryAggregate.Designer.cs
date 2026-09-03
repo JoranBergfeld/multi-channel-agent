@@ -3,6 +3,7 @@ using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using MultiChannelAgent.Infrastructure.Persistence;
 
@@ -11,9 +12,11 @@ using MultiChannelAgent.Infrastructure.Persistence;
 namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
 {
     [DbContext(typeof(MultiChannelAgentDbContext))]
-    partial class MultiChannelAgentDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260903114131_AddInventoryAggregate")]
+    partial class AddInventoryAggregate
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -42,32 +45,6 @@ namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
                     b.HasIndex("InventoryId");
 
                     b.ToTable("ActiveInventorySelections", (string)null);
-                });
-
-            modelBuilder.Entity("MultiChannelAgent.Infrastructure.Persistence.Entities.AuthTicketEntity", b =>
-                {
-                    b.Property<string>("Key")
-                        .HasMaxLength(64)
-                        .HasColumnType("nvarchar(64)");
-
-                    b.Property<DateTimeOffset>("CreatedAtUtc")
-                        .HasColumnType("datetimeoffset");
-
-                    b.Property<DateTimeOffset?>("ExpiresAtUtc")
-                        .HasColumnType("datetimeoffset");
-
-                    b.Property<byte[]>("ProtectedTicket")
-                        .IsRequired()
-                        .HasColumnType("varbinary(max)");
-
-                    b.Property<DateTimeOffset>("UpdatedAtUtc")
-                        .HasColumnType("datetimeoffset");
-
-                    b.HasKey("Key");
-
-                    b.HasIndex("ExpiresAtUtc");
-
-                    b.ToTable("AuthTickets", (string)null);
                 });
 
             modelBuilder.Entity("MultiChannelAgent.Infrastructure.Persistence.Entities.DeliveryEntity", b =>
