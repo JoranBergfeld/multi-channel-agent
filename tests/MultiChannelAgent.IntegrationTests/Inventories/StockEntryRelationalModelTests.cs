@@ -248,4 +248,49 @@ public sealed class StockEntryRelationalModelTests : IDisposable
         using var db = CreateContext();
         Assert.Equal(3, db.StockEntries.Count(e => e.InventoryId == inventoryId));
     }
+
+    [Fact]
+    public void A_Stock_Entry_carries_a_concurrency_stamp_that_a_writer_must_agree_with()
+    {
+        using var db = CreateContext();
+        var entityType = db.Model.FindEntityType(typeof(StockEntryEntity))!;
+        var stamp = entityType.FindProperty(nameof(StockEntryEntity.ConcurrencyStamp))!;
+
+        Assert.True(stamp.IsConcurrencyToken);
+    }
+
+    [Fact]
+    public void One_operation_identity_can_only_ever_be_recorded_once()
+    {
+        var (inventoryId, _) = SeedInventoryAndUnit();
+        var operationId = Guid.Parse("cccccccc-cccc-cccc-cccc-cccccccccccc");
+
+        using (var db = CreateContext())
+        {
+            db.StockOperations.Add(NewOperation(operationId, inventoryId));
+            db.SaveChanges();
+        }
+
+        using var second = CreateContext();
+        second.StockOperations.Add(NewOperation(operationId, inventoryId));
+
+        Assert.ThrowsAny<DbUpdateException>(() => second.SaveChanges());
+    }
+
+    private static StockOperationEntity NewOperation(Guid operationId, Guid inventoryId) => new()
+    {
+        OperationId = operationId,
+        InventoryId = inventoryId,
+        Kind = "Add",
+        StockEntryId = Guid.NewGuid(),
+        Name = "Steel Bolts",
+        UnitCanonicalName = "each",
+        LocationName = null,
+        Note = null,
+        PreviousQuantity = 0m,
+        ResultingQuantity = 12.5m,
+        CreatedEntry = true,
+        NotePreserved = false,
+        AppliedAt = DateTimeOffset.UtcNow,
+    };
 }

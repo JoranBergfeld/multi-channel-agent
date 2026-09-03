@@ -25,4 +25,15 @@ public sealed class StockEntryEntity
     public decimal Quantity { get; set; }
 
     public DateTimeOffset CreatedAt { get; set; }
+
+    /// <summary>
+    /// Optimistic concurrency guard, regenerated on every Quantity change: a plain compared column -
+    /// not a provider-specific rowversion type - so the same concurrency behavior holds both against
+    /// SQLite (fast tests) and SQL Server (production). A mutation reads this row, decides,
+    /// then writes conditioned on the value it read; a concurrent writer changes it first, so the
+    /// loser's save fails with
+    /// <see cref="Microsoft.EntityFrameworkCore.DbUpdateConcurrencyException"/> instead of both
+    /// silently succeeding and one amount being lost.
+    /// </summary>
+    public Guid ConcurrencyStamp { get; set; } = Guid.NewGuid();
 }
