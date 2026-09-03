@@ -12,6 +12,7 @@ public sealed class UnitEntityConfiguration : IEntityTypeConfiguration<UnitEntit
         builder.HasKey(e => e.Id);
 
         builder.Property(e => e.CanonicalName).HasMaxLength(100).IsRequired();
+        builder.Property(e => e.NormalizedCanonicalName).HasMaxLength(100).IsRequired();
 
         builder.HasOne<InventoryEntity>()
             .WithMany()

@@ -14,8 +14,11 @@ namespace MultiChannelAgent.Application.Tests.TestDoubles;
 /// </summary>
 public sealed class TwoPartyGatedInboxStore(IInboxStore inner, TaskCompletionSource ownReady, Task otherReady) : IInboxStore
 {
-    public Task<InboundTurn?> FindByNativeMessageIdAsync(string nativeMessageId, CancellationToken cancellationToken) =>
-        inner.FindByNativeMessageIdAsync(nativeMessageId, cancellationToken);
+    public Task<InboundTurn?> FindByNativeMessageIdAsync(NativeMessageKey key, CancellationToken cancellationToken) =>
+        inner.FindByNativeMessageIdAsync(key, cancellationToken);
+
+    public Task<InboundTurn?> FindByTurnIdAsync(TurnId turnId, CancellationToken cancellationToken) =>
+        inner.FindByTurnIdAsync(turnId, cancellationToken);
 
     public async Task<InboxAcceptResult> AcceptAsync(InboundTurn turn, CancellationToken cancellationToken)
     {

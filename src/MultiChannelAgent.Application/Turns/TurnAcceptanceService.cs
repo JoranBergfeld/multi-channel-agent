@@ -7,8 +7,10 @@ public sealed record TurnAcceptanceResult(TurnId TurnId, bool WasAlreadyAccepted
 
 /// <summary>
 /// Durably accepts normalized synthetic Turns. Ingress is at-least-once: submitting the same
-/// <see cref="SubmitTurnRequest.NativeMessageId"/> again returns the originally recorded Turn identity
-/// instead of creating a duplicate, so retries never rerun processing once accepted.
+/// <see cref="SubmitTurnRequest.NativeMessageId"/> again, within the same Participant and
+/// ChannelConversation scope, returns the originally recorded Turn identity instead of creating a
+/// duplicate, so retries never rerun processing once accepted. The same native id issued in a
+/// different scope is a different message and is accepted on its own.
 /// </summary>
 public sealed class TurnAcceptanceService(IInboxStore inboxStore)
 {
@@ -17,19 +19,28 @@ public sealed class TurnAcceptanceService(IInboxStore inboxStore)
         DateTimeOffset receivedAt,
         CancellationToken cancellationToken)
     {
-        var existing = await inboxStore.FindByNativeMessageIdAsync(request.NativeMessageId, cancellationToken);
+        var key = new NativeMessageKey(
+            request.ParticipantId, new ChannelConversationId(request.ChannelConversationId), request.NativeMessageId);
+
+        var existing = await inboxStore.FindByNativeMessageIdAsync(key, cancellationToken);
         if (existing is not null)
         {
             return new TurnAcceptanceResult(existing.TurnId, WasAlreadyAccepted: true);
         }
 
-        var turn = InboundTurn.Create(
+        // Every channel's text-only submission is the same shape: one content part, authored directly
+        // by the authenticated Participant in this Turn.
+        var turn = InboundTurn.Create(InboundTurnDraft.DirectText(
             request.NativeMessageId,
+            request.ParticipantId,
             request.ChannelConversationId,
+            request.Channel,
+            request.Principal,
+            request.Capabilities,
             request.ContentText,
             request.Locale,
             receivedAt,
-            request.TraceId);
+            request.TraceId));
 
         var accepted = await inboxStore.AcceptAsync(turn, cancellationToken);
 

@@ -51,6 +51,7 @@ public sealed class SqlInventoryStore(MultiChannelAgentDbContext db) : IInventor
             Id = reservedEachUnit.Id.Value,
             InventoryId = reservedEachUnit.InventoryId.Value,
             CanonicalName = reservedEachUnit.CanonicalName,
+            NormalizedCanonicalName = NameNormalization.Normalize(reservedEachUnit.CanonicalName),
             IsReserved = reservedEachUnit.IsReserved,
             CreatedAt = reservedEachUnit.CreatedAt,
         });

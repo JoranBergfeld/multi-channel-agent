@@ -1,5 +1,6 @@
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using MultiChannelAgent.Domain.Inventories;
 using MultiChannelAgent.Domain.Turns;
 using MultiChannelAgent.Infrastructure.Persistence;
 using MultiChannelAgent.Infrastructure.Turns;
@@ -21,6 +22,7 @@ namespace MultiChannelAgent.IntegrationTests;
 /// </summary>
 public sealed class SqlInboxStoreConcurrencyTests : IDisposable
 {
+    private static readonly ParticipantId SomeParticipant = new(Guid.Parse("11111111-1111-1111-1111-111111111111"));
     private readonly SqliteConnection _keepAliveConnection;
     private readonly string _connectionString;
 
@@ -45,8 +47,8 @@ public sealed class SqlInboxStoreConcurrencyTests : IDisposable
     {
         const string nativeMessageId = "native-race-1";
         var now = DateTimeOffset.UtcNow;
-        var turnA = InboundTurn.Create(nativeMessageId, "conversation-race-1", "hello a", null, now, null);
-        var turnB = InboundTurn.Create(nativeMessageId, "conversation-race-1", "hello b", null, now, null);
+        var turnA = TestTurns.Text(nativeMessageId, SomeParticipant, "conversation-race-1", "hello a", null, now, null);
+        var turnB = TestTurns.Text(nativeMessageId, SomeParticipant, "conversation-race-1", "hello b", null, now, null);
 
         using var dbA = CreateContext();
         using var dbB = CreateContext();
@@ -74,7 +76,7 @@ public sealed class SqlInboxStoreConcurrencyTests : IDisposable
     public async Task A_conflict_that_is_not_a_duplicate_native_message_id_still_propagates()
     {
         var now = DateTimeOffset.UtcNow;
-        var seededTurn = InboundTurn.Create("native-unrelated-a", "conversation-unrelated-a", "hello a", null, now, null);
+        var seededTurn = TestTurns.Text("native-unrelated-a", SomeParticipant, "conversation-unrelated-a", "hello a", null, now, null);
 
         using (var seedDb = CreateContext())
         {
@@ -84,19 +86,68 @@ public sealed class SqlInboxStoreConcurrencyTests : IDisposable
         // Collides on the PRIMARY KEY (TurnId) but has a completely different NativeMessageId: a
         // genuine, unrelated database failure - not the duplicate-delivery race AcceptAsync is
         // designed to absorb - so it must propagate untouched rather than be reported as a duplicate.
-        var conflictingTurn = new InboundTurn
-        {
-            TurnId = seededTurn.TurnId,
-            NativeMessageId = "native-unrelated-b",
-            ChannelConversationId = "conversation-unrelated-b",
-            ContentText = "hello b",
-            ReceivedAt = now,
-        };
+        var conflictingTurn = TestTurns.Text("native-unrelated-b", SomeParticipant, "conversation-unrelated-b", "hello b", null, now, null)
+            with { TurnId = seededTurn.TurnId };
 
         using var db = CreateContext();
         var store = new SqlInboxStore(db);
 
         await Assert.ThrowsAsync<DbUpdateException>(() => store.AcceptAsync(conflictingTurn, CancellationToken.None));
+    }
+
+    // Deduplication is scoped to (Participant, ChannelConversation, native message id): the database
+    // constraint itself must permit the same opaque native id in a different scope, because a native
+    // id is only ever unique within the channel scope that issued it.
+    [Fact]
+    public async Task The_same_native_message_id_in_a_different_scope_is_accepted_as_its_own_row()
+    {
+        const string nativeMessageId = "native-shared-1";
+        var otherParticipant = new ParticipantId(Guid.Parse("22222222-2222-2222-2222-222222222222"));
+        var now = DateTimeOffset.UtcNow;
+
+        using var db = CreateContext();
+        var store = new SqlInboxStore(db);
+
+        var mine = await store.AcceptAsync(
+            TestTurns.Text(nativeMessageId, SomeParticipant, "conversation-scope-a", "hello", null, now, null), CancellationToken.None);
+        var otherConversation = await store.AcceptAsync(
+            TestTurns.Text(nativeMessageId, SomeParticipant, "conversation-scope-b", "hello", null, now, null), CancellationToken.None);
+        var otherParticipantTurn = await store.AcceptAsync(
+            TestTurns.Text(nativeMessageId, otherParticipant, "conversation-scope-a", "hello", null, now, null), CancellationToken.None);
+
+        Assert.False(otherConversation.WasAlreadyAccepted);
+        Assert.False(otherParticipantTurn.WasAlreadyAccepted);
+        Assert.Equal(3, new HashSet<TurnId> { mine.Turn.TurnId, otherConversation.Turn.TurnId, otherParticipantTurn.Turn.TurnId }.Count);
+
+        using var verifyDb = CreateContext();
+        Assert.Equal(3, await verifyDb.InboxEntries.AsNoTracking().CountAsync(e => e.NativeMessageId == nativeMessageId));
+    }
+
+    // Looking a duplicate up must use the whole scope too: a lookup keyed on the bare native id
+    // would hand one Participant another Participant's Turn identity (and so their Outcome).
+    [Fact]
+    public async Task Finding_by_native_message_key_never_returns_another_scopes_turn()
+    {
+        const string nativeMessageId = "native-shared-2";
+        var otherParticipant = new ParticipantId(Guid.Parse("22222222-2222-2222-2222-222222222222"));
+        var now = DateTimeOffset.UtcNow;
+
+        using var db = CreateContext();
+        var store = new SqlInboxStore(db);
+
+        var mine = await store.AcceptAsync(
+            TestTurns.Text(nativeMessageId, SomeParticipant, "conversation-scope-a", "hello", null, now, null), CancellationToken.None);
+
+        var mineAgain = await store.FindByNativeMessageIdAsync(
+            new NativeMessageKey(SomeParticipant, new ChannelConversationId("conversation-scope-a"), nativeMessageId), CancellationToken.None);
+        var strangersLookup = await store.FindByNativeMessageIdAsync(
+            new NativeMessageKey(otherParticipant, new ChannelConversationId("conversation-scope-a"), nativeMessageId), CancellationToken.None);
+        var otherConversationLookup = await store.FindByNativeMessageIdAsync(
+            new NativeMessageKey(SomeParticipant, new ChannelConversationId("conversation-scope-b"), nativeMessageId), CancellationToken.None);
+
+        Assert.Equal(mine.Turn.TurnId, mineAgain!.TurnId);
+        Assert.Null(strangersLookup);
+        Assert.Null(otherConversationLookup);
     }
 
     private MultiChannelAgentDbContext CreateContext()

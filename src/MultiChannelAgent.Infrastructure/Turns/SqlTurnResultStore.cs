@@ -25,14 +25,7 @@ public sealed class SqlTurnResultStore(MultiChannelAgentDbContext db) : ITurnRes
         var inboxEntry = await db.InboxEntries.FirstAsync(e => e.TurnId == outcome.TurnId.Value, cancellationToken);
         inboxEntry.Status = InboxEntryStatus.Completed;
 
-        db.Outcomes.Add(new OutcomeEntity
-        {
-            TurnId = outcome.TurnId.Value,
-            Status = outcome.Status == OutcomeStatus.Completed ? OutcomeEntityStatus.Completed : OutcomeEntityStatus.Failed,
-            Code = outcome.Code,
-            Summary = outcome.Summary,
-            CreatedAt = outcome.CreatedAt,
-        });
+        db.Outcomes.Add(OutcomeEntityMapping.ToEntity(outcome));
 
         foreach (var delivery in deliveries)
         {

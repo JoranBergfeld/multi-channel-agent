@@ -19,4 +19,20 @@ public sealed class InMemoryOutcomeStore : IOutcomeStore
         _outcomes[outcome.TurnId.Value] = outcome;
         return Task.CompletedTask;
     }
+
+    public Task<int> DiscardExpiredPayloadsAsync(DateTimeOffset now, int maxCount, CancellationToken cancellationToken)
+    {
+        var expired = _outcomes.Values
+            .Where(outcome => outcome.PayloadExpiresAt is { } expiresAt && expiresAt < now)
+            .OrderBy(outcome => outcome.PayloadExpiresAt)
+            .Take(maxCount)
+            .ToList();
+
+        foreach (var outcome in expired)
+        {
+            _outcomes[outcome.TurnId.Value] = outcome.WithoutRetainedPayload();
+        }
+
+        return Task.FromResult(expired.Count);
+    }
 }

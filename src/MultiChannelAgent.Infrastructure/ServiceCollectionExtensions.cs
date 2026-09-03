@@ -32,10 +32,14 @@ public static class ServiceCollectionExtensions
         services.AddScoped<IDeliverySender, LoggingDeliverySender>();
         services.AddSingleton(TimeProvider.System);
         services.AddScoped<IModelBoundary, ScriptedModelBoundary>();
+        services.AddScoped<IToolDispatcher, StockToolDispatcher>();
         services.AddScoped<TurnAcceptanceService>();
         services.AddScoped<TurnProcessingCoordinator>();
         services.AddScoped<DeliveryDispatchCoordinator>();
+        services.AddScoped<OutcomePayloadCleanupCoordinator>();
         services.AddScoped<TurnOutcomeReader>();
+        services.AddScoped<IFoundryConversationBindingStore, SqlFoundryConversationBindingStore>();
+        services.AddScoped<TurnExecutionContextFactory>();
 
         services.AddScoped<IParticipantStore, SqlParticipantStore>();
         services.AddScoped<IInventoryStore, SqlInventoryStore>();
@@ -44,6 +48,8 @@ public static class ServiceCollectionExtensions
         services.AddScoped<IInventoryMembershipStore, SqlInventoryMembershipStore>();
         services.AddScoped<IInventoryOwnershipStore, SqlInventoryOwnershipStore>();
         services.AddScoped<IInventoryRecoveryStore, SqlInventoryRecoveryStore>();
+        services.AddScoped<IStockStore, SqlStockStore>();
+        services.AddScoped<IInventoryReferenceStore, SqlInventoryReferenceStore>();
 
         // Only ever constructed (and its TokenCredential only ever built/validated) the first time
         // something actually resolves ITenantMemberDirectory - which never happens for
@@ -66,6 +72,8 @@ public static class ServiceCollectionExtensions
         services.AddScoped<InventoryMembershipService>();
         services.AddScoped<InventoryOwnershipTransferService>();
         services.AddScoped<InventoryRecoveryService>();
+        services.AddScoped<StockListingService>();
+        services.AddScoped<StockFindingService>();
 
         return services;
     }

@@ -1,9 +1,10 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
 using MultiChannelAgent.Application.Turns;
-using Xunit;
+using MultiChannelAgent.IntegrationTests.Inventories;
 
 namespace MultiChannelAgent.IntegrationTests;
 
@@ -11,21 +12,72 @@ namespace MultiChannelAgent.IntegrationTests;
 /// The highest-value correctness seam for this ticket: submit a normalized synthetic InboundTurn to
 /// the real HTTP application boundary, backed by an ephemeral SQL Server container with production
 /// EF Core migrations applied, and assert the durable, terminal, externally observable effects
-/// (Outcome + Delivery) - with no sleeps, driving processing deterministically instead.
+/// (Outcome + Delivery) - with no sleeps, driving processing deterministically instead. Turn
+/// submission requires the same signed-in, CSRF-protected shape as every other mutating request:
+/// Participant and ChannelConversation are always derived from trusted context, never client input.
 /// </summary>
 public sealed class TurnTracerScenarioTests : SqlIntegrationTestBase
 {
+    private static HttpClient CreateHttpsClient(CustomWebApplicationFactory factory) =>
+        factory.CreateClient(new WebApplicationFactoryClientOptions
+        {
+            BaseAddress = new Uri("https://localhost"),
+            HandleCookies = false,
+        });
+
+    private static async Task<(CookieJar Jar, string CsrfToken)> SignInAndBootstrapAsync(HttpClient client)
+    {
+        var jar = new CookieJar();
+
+        var signInRequest = new HttpRequestMessage(HttpMethod.Post, "/api/test/sign-in")
+        {
+            Content = JsonContent.Create(new { participantId = Guid.NewGuid().ToString(), displayName = "Turn Sender", activeTenantMember = true }),
+        };
+        jar.Apply(signInRequest);
+        var signInResponse = await client.SendAsync(signInRequest);
+        jar.Capture(signInResponse);
+        Assert.Equal(HttpStatusCode.OK, signInResponse.StatusCode);
+
+        var bootstrapRequest = new HttpRequestMessage(HttpMethod.Get, "/api/session/bootstrap");
+        jar.Apply(bootstrapRequest);
+        var bootstrapResponse = await client.SendAsync(bootstrapRequest);
+        jar.Capture(bootstrapResponse);
+        Assert.Equal(HttpStatusCode.OK, bootstrapResponse.StatusCode);
+
+        var body = await bootstrapResponse.Content.ReadFromJsonAsync<JsonElement>();
+        return (jar, body.GetProperty("csrfToken").GetString()!);
+    }
+
+    private static async Task<HttpResponseMessage> PostTurnAsync(HttpClient client, CookieJar jar, string csrfToken, object payload)
+    {
+        var request = new HttpRequestMessage(HttpMethod.Post, "/api/turns") { Content = JsonContent.Create(payload) };
+        jar.Apply(request);
+        request.Headers.Add("X-CSRF-TOKEN", csrfToken);
+        var response = await client.SendAsync(request);
+        jar.Capture(response);
+        return response;
+    }
+
+    private static async Task<HttpResponseMessage> GetOutcomeAsync(HttpClient client, CookieJar jar, Guid turnId)
+    {
+        var request = new HttpRequestMessage(HttpMethod.Get, $"/api/turns/{turnId}/outcome");
+        jar.Apply(request);
+        var response = await client.SendAsync(request);
+        jar.Capture(response);
+        return response;
+    }
+
     [SkippableFact]
     public async Task Submitting_a_synthetic_turn_is_durably_accepted_processed_and_produces_a_terminal_outcome_with_delivery()
     {
         Skip.IfNot(DockerAvailable, "Docker is not available in this environment; skipping the SQL-backed application-boundary scenario.");
 
-        var client = Factory!.CreateClient();
+        var client = CreateHttpsClient(Factory!);
+        var (jar, csrfToken) = await SignInAndBootstrapAsync(client);
 
-        var submitResponse = await client.PostAsJsonAsync("/api/turns", new
+        var submitResponse = await PostTurnAsync(client, jar, csrfToken, new
         {
             nativeMessageId = "native-tracer-1",
-            channelConversationId = "conversation-tracer-1",
             contentText = "hello tracer",
             locale = "en-US",
             traceId = "trace-tracer-1",
@@ -49,7 +101,7 @@ public sealed class TurnTracerScenarioTests : SqlIntegrationTestBase
             Assert.Equal(1, dispatchedCount);
         }
 
-        var outcomeResponse = await client.GetAsync($"/api/turns/{turnId}/outcome");
+        var outcomeResponse = await GetOutcomeAsync(client, jar, turnId);
         Assert.Equal(HttpStatusCode.OK, outcomeResponse.StatusCode);
         var outcome = await outcomeResponse.Content.ReadFromJsonAsync<JsonElement>();
         Assert.Equal("completed", outcome.GetProperty("status").GetString());
@@ -63,20 +115,66 @@ public sealed class TurnTracerScenarioTests : SqlIntegrationTestBase
         Assert.Equal(1, delivery.GetProperty("attempts").GetInt32());
 
         // At-least-once redelivery of the same native message must not duplicate acceptance or
-        // reprocess: the recorded Turn identity is returned instead.
-        var duplicateResponse = await client.PostAsJsonAsync("/api/turns", new
+        // reprocess. Because this Turn has already been answered, the submission itself hands back
+        // its recorded terminal Outcome rather than an acknowledgement, so a redelivering adapter
+        // never has to poll for a result the application already holds.
+        var duplicateResponse = await PostTurnAsync(client, jar, csrfToken, new
         {
             nativeMessageId = "native-tracer-1",
-            channelConversationId = "conversation-tracer-1",
             contentText = "hello tracer",
             locale = "en-US",
             traceId = "trace-tracer-1",
         });
 
-        Assert.Equal(HttpStatusCode.Accepted, duplicateResponse.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, duplicateResponse.StatusCode);
         var duplicateBody = await duplicateResponse.Content.ReadFromJsonAsync<JsonElement>();
         Assert.Equal(turnId, duplicateBody.GetProperty("turnId").GetGuid());
-        Assert.True(duplicateBody.GetProperty("alreadyAccepted").GetBoolean());
+        Assert.Equal("completed", duplicateBody.GetProperty("status").GetString());
+        Assert.Equal("completed", duplicateBody.GetProperty("category").GetString());
+        Assert.Equal("echoed", duplicateBody.GetProperty("code").GetString());
+        Assert.Equal("Echoed: hello tracer", duplicateBody.GetProperty("summary").GetString());
+
+        // The very same recorded Delivery, already dispatched once - never a second one minted for
+        // the duplicate, and never re-sent.
+        var duplicateDelivery = Assert.Single(duplicateBody.GetProperty("deliveries").EnumerateArray());
+        Assert.Equal(delivery.GetProperty("deliveryId").GetGuid(), duplicateDelivery.GetProperty("deliveryId").GetGuid());
+        Assert.Equal("delivered", duplicateDelivery.GetProperty("status").GetString());
+        Assert.Equal(1, duplicateDelivery.GetProperty("attempts").GetInt32());
+
+        // And nothing was left to reprocess or re-dispatch by the duplicate submission.
+        using (var scope = Factory!.Services.CreateScope())
+        {
+            Assert.Equal(
+                0,
+                await scope.ServiceProvider.GetRequiredService<TurnProcessingCoordinator>().ProcessPendingAsync(CancellationToken.None));
+            Assert.Equal(
+                0,
+                await scope.ServiceProvider.GetRequiredService<DeliveryDispatchCoordinator>().DispatchPendingAsync(CancellationToken.None));
+        }
+    }
+
+    // A Participant may only ever read their own Turn's recorded Outcome: reading a Turn belonging to
+    // a different Participant must be a plain 404, identical to an unknown Turn id, never a distinct
+    // signal that would let a caller infer another Participant's Turn exists.
+    [SkippableFact]
+    public async Task Reading_another_participants_turn_outcome_is_a_plain_404()
+    {
+        Skip.IfNot(DockerAvailable, "Docker is not available in this environment; skipping the SQL-backed application-boundary scenario.");
+
+        var client = CreateHttpsClient(Factory!);
+        var (ownerJar, ownerCsrf) = await SignInAndBootstrapAsync(client);
+
+        var submitResponse = await PostTurnAsync(client, ownerJar, ownerCsrf, new
+        {
+            nativeMessageId = "native-ownership-1",
+            contentText = "hello ownership",
+        });
+        var turnId = (await submitResponse.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("turnId").GetGuid();
+
+        var (strangerJar, _) = await SignInAndBootstrapAsync(client);
+        var strangerResponse = await GetOutcomeAsync(client, strangerJar, turnId);
+
+        Assert.Equal(HttpStatusCode.NotFound, strangerResponse.StatusCode);
     }
 
     [SkippableFact]

@@ -112,21 +112,73 @@ namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
                     b.ToTable("Deliveries", (string)null);
                 });
 
+            modelBuilder.Entity("MultiChannelAgent.Infrastructure.Persistence.Entities.FoundryConversationBindingEntity", b =>
+                {
+                    b.Property<Guid>("ParticipantId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("ChannelConversationId")
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<Guid>("FoundryConversationId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<int>("Generation")
+                        .HasColumnType("int");
+
+                    b.HasKey("ParticipantId", "ChannelConversationId");
+
+                    b.ToTable("FoundryConversationBindings", (string)null);
+                });
+
+            modelBuilder.Entity("MultiChannelAgent.Infrastructure.Persistence.Entities.InboxContentPartEntity", b =>
+                {
+                    b.Property<Guid>("TurnId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<int>("Order")
+                        .HasColumnType("int");
+
+                    b.Property<string>("Provenance")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("nvarchar(32)");
+
+                    b.Property<string>("Text")
+                        .IsRequired()
+                        .HasMaxLength(32768)
+                        .HasColumnType("nvarchar(max)");
+
+                    b.HasKey("TurnId", "Order");
+
+                    b.ToTable("InboxContentParts", (string)null);
+                });
+
             modelBuilder.Entity("MultiChannelAgent.Infrastructure.Persistence.Entities.InboxEntryEntity", b =>
                 {
                     b.Property<Guid>("TurnId")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uniqueidentifier");
 
+                    b.Property<int>("Capabilities")
+                        .HasColumnType("int");
+
+                    b.Property<string>("Channel")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("nvarchar(32)");
+
                     b.Property<string>("ChannelConversationId")
                         .IsRequired()
                         .HasMaxLength(256)
                         .HasColumnType("nvarchar(256)");
 
-                    b.Property<string>("ContentText")
-                        .IsRequired()
-                        .HasMaxLength(32768)
-                        .HasColumnType("nvarchar(max)");
+                    b.Property<long>("ConversationSequence")
+                        .HasColumnType("bigint");
 
                     b.Property<DateTimeOffset>("CreatedAt")
                         .HasColumnType("datetimeoffset");
@@ -140,8 +192,28 @@ namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
                         .HasMaxLength(256)
                         .HasColumnType("nvarchar(256)");
 
+                    b.Property<Guid>("ParticipantId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("PrincipalKind")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("nvarchar(32)");
+
+                    b.Property<string>("PrincipalSubject")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)");
+
+                    b.Property<string>("PrincipalTenantId")
+                        .HasMaxLength(128)
+                        .HasColumnType("nvarchar(128)");
+
                     b.Property<DateTimeOffset>("ReceivedAt")
                         .HasColumnType("datetimeoffset");
+
+                    b.Property<long>("ReceivedAtTicks")
+                        .HasColumnType("bigint");
 
                     b.Property<string>("Status")
                         .IsRequired()
@@ -154,10 +226,15 @@ namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
 
                     b.HasKey("TurnId");
 
-                    b.HasIndex("NativeMessageId")
+                    b.HasIndex("ChannelConversationId", "ConversationSequence")
                         .IsUnique();
 
-                    b.HasIndex("Status", "ReceivedAt");
+                    b.HasIndex("Status", "ReceivedAtTicks");
+
+                    b.HasIndex("ChannelConversationId", "Status", "ConversationSequence");
+
+                    b.HasIndex("ParticipantId", "ChannelConversationId", "NativeMessageId")
+                        .IsUnique();
 
                     b.ToTable("InboxEntries", (string)null);
                 });
@@ -268,6 +345,37 @@ namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
                     b.ToTable("Leases", (string)null);
                 });
 
+            modelBuilder.Entity("MultiChannelAgent.Infrastructure.Persistence.Entities.LocationEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<Guid>("InventoryId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.Property<string>("NormalizedName")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)")
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("InventoryId", "NormalizedName")
+                        .IsUnique();
+
+                    b.ToTable("Locations", (string)null);
+                });
+
             modelBuilder.Entity("MultiChannelAgent.Infrastructure.Persistence.Entities.MembershipEntity", b =>
                 {
                     b.Property<Guid>("InventoryId")
@@ -305,6 +413,11 @@ namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
                     b.Property<Guid>("TurnId")
                         .HasColumnType("uniqueidentifier");
 
+                    b.Property<string>("Category")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("nvarchar(32)");
+
                     b.Property<string>("Code")
                         .IsRequired()
                         .HasMaxLength(128)
@@ -312,6 +425,13 @@ namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
 
                     b.Property<DateTimeOffset>("CreatedAt")
                         .HasColumnType("datetimeoffset");
+
+                    b.Property<string>("Payload")
+                        .HasMaxLength(32768)
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<long?>("PayloadExpiresAtTicks")
+                        .HasColumnType("bigint");
 
                     b.Property<string>("Status")
                         .IsRequired()
@@ -324,6 +444,9 @@ namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
                         .HasColumnType("nvarchar(max)");
 
                     b.HasKey("TurnId");
+
+                    b.HasIndex("PayloadExpiresAtTicks")
+                        .HasFilter("PayloadExpiresAtTicks IS NOT NULL");
 
                     b.ToTable("Outcomes", (string)null);
                 });
@@ -357,6 +480,64 @@ namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
                     b.ToTable("Participants", (string)null);
                 });
 
+            modelBuilder.Entity("MultiChannelAgent.Infrastructure.Persistence.Entities.StockEntryEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<Guid>("InventoryId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid?>("LocationId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.Property<string>("NormalizedName")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)")
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<string>("Note")
+                        .HasMaxLength(500)
+                        .HasColumnType("nvarchar(500)");
+
+                    b.Property<decimal>("Quantity")
+                        .HasPrecision(28, 10)
+                        .HasColumnType("decimal(28,10)");
+
+                    b.Property<Guid>("UnitId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("LocationId");
+
+                    b.HasIndex("UnitId");
+
+                    b.HasIndex("InventoryId", "LocationId");
+
+                    b.HasIndex("InventoryId", "NormalizedName");
+
+                    b.HasIndex("InventoryId", "NormalizedName", "UnitId")
+                        .IsUnique()
+                        .HasFilter("LocationId IS NULL");
+
+                    b.HasIndex("InventoryId", "NormalizedName", "UnitId", "LocationId")
+                        .IsUnique()
+                        .HasFilter("LocationId IS NOT NULL");
+
+                    b.ToTable("StockEntries", (string)null);
+                });
+
             modelBuilder.Entity("MultiChannelAgent.Infrastructure.Persistence.Entities.UnitEntity", b =>
                 {
                     b.Property<Guid>("Id")
@@ -376,6 +557,12 @@ namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
 
                     b.Property<bool>("IsReserved")
                         .HasColumnType("bit");
+
+                    b.Property<string>("NormalizedCanonicalName")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("nvarchar(100)")
+                        .UseCollation("Latin1_General_100_BIN2");
 
                     b.HasKey("Id");
 
@@ -440,12 +627,39 @@ namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
                         .IsRequired();
                 });
 
+            modelBuilder.Entity("MultiChannelAgent.Infrastructure.Persistence.Entities.FoundryConversationBindingEntity", b =>
+                {
+                    b.HasOne("MultiChannelAgent.Infrastructure.Persistence.Entities.ParticipantEntity", null)
+                        .WithMany()
+                        .HasForeignKey("ParticipantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("MultiChannelAgent.Infrastructure.Persistence.Entities.InboxContentPartEntity", b =>
+                {
+                    b.HasOne("MultiChannelAgent.Infrastructure.Persistence.Entities.InboxEntryEntity", null)
+                        .WithMany()
+                        .HasForeignKey("TurnId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
             modelBuilder.Entity("MultiChannelAgent.Infrastructure.Persistence.Entities.InventoryEntity", b =>
                 {
                     b.HasOne("MultiChannelAgent.Infrastructure.Persistence.Entities.ParticipantEntity", null)
                         .WithMany()
                         .HasForeignKey("CreatedByParticipantId")
                         .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("MultiChannelAgent.Infrastructure.Persistence.Entities.LocationEntity", b =>
+                {
+                    b.HasOne("MultiChannelAgent.Infrastructure.Persistence.Entities.InventoryEntity", null)
+                        .WithMany()
+                        .HasForeignKey("InventoryId")
+                        .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
                 });
 
@@ -470,6 +684,26 @@ namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
                         .WithOne()
                         .HasForeignKey("MultiChannelAgent.Infrastructure.Persistence.Entities.OutcomeEntity", "TurnId")
                         .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("MultiChannelAgent.Infrastructure.Persistence.Entities.StockEntryEntity", b =>
+                {
+                    b.HasOne("MultiChannelAgent.Infrastructure.Persistence.Entities.InventoryEntity", null)
+                        .WithMany()
+                        .HasForeignKey("InventoryId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("MultiChannelAgent.Infrastructure.Persistence.Entities.LocationEntity", null)
+                        .WithMany()
+                        .HasForeignKey("LocationId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("MultiChannelAgent.Infrastructure.Persistence.Entities.UnitEntity", null)
+                        .WithMany()
+                        .HasForeignKey("UnitId")
+                        .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
                 });
 

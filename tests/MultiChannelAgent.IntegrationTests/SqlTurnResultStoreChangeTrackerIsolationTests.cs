@@ -1,5 +1,6 @@
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using MultiChannelAgent.Domain.Inventories;
 using MultiChannelAgent.Domain.Turns;
 using MultiChannelAgent.Infrastructure.Persistence;
 using MultiChannelAgent.Infrastructure.Persistence.Entities;
@@ -23,6 +24,7 @@ namespace MultiChannelAgent.IntegrationTests;
 /// </summary>
 public sealed class SqlTurnResultStoreChangeTrackerIsolationTests : IDisposable
 {
+    private static readonly ParticipantId SomeParticipant = new(Guid.Parse("11111111-1111-1111-1111-111111111111"));
     private readonly SqliteConnection _connection;
     private readonly MultiChannelAgentDbContext _db;
 
@@ -98,14 +100,18 @@ public sealed class SqlTurnResultStoreChangeTrackerIsolationTests : IDisposable
 
     private TurnId SeedPendingInboxEntry(string nativeMessageId)
     {
-        var turn = InboundTurn.Create(nativeMessageId, $"conversation-{nativeMessageId}", "hello", null, DateTimeOffset.UtcNow, null);
+        var turn = TestTurns.Text(nativeMessageId, SomeParticipant, $"conversation-{nativeMessageId}", "hello", null, DateTimeOffset.UtcNow, null);
 
         _db.InboxEntries.Add(new InboxEntryEntity
         {
             TurnId = turn.TurnId.Value,
             NativeMessageId = turn.NativeMessageId,
-            ChannelConversationId = turn.ChannelConversationId,
-            ContentText = turn.ContentText,
+            ParticipantId = turn.ParticipantId.Value,
+            ChannelConversationId = turn.ChannelConversationId.Value,
+            Channel = turn.Channel,
+            PrincipalKind = turn.Principal.Kind,
+            PrincipalSubject = turn.Principal.Subject,
+            Capabilities = turn.Capabilities,
             ReceivedAt = turn.ReceivedAt,
             CreatedAt = turn.ReceivedAt,
             Status = InboxEntryStatus.Pending,

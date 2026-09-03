@@ -43,6 +43,7 @@ builder.Services.AddAntiforgery(options =>
 
 builder.Services.AddHostedService<TurnProcessingWorker>();
 builder.Services.AddHostedService<DeliveryDispatchWorker>();
+builder.Services.AddHostedService<OutcomePayloadCleanupWorker>();
 
 builder.Services
     .AddHealthChecks()
@@ -69,6 +70,7 @@ app.MapSessionEndpoints();
 app.MapInventoryEndpoints();
 app.MapInventoryGovernanceEndpoints();
 app.MapInventoryRecoveryEndpoints();
+app.MapStockEndpoints();
 app.MapAuthEndpoints(challengeScheme);
 
 if (challengeScheme == ProviderSchemes.Test)
