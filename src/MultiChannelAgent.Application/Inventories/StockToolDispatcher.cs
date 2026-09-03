@@ -235,8 +235,12 @@ public sealed class StockToolDispatcher(StockListingService listingService, Stoc
         Deliveries = [new RequestedDelivery(ResponseChannel, summary)],
     };
 
-    // A failure has produced no answer yet, and the Turn stays retryable, so it deliberately leaves
-    // no response part: sending one would tell the Participant something a later retry contradicts.
+    // A failure produced no answer, so there is nothing to deliver and no response part is requested.
+    // The Turn is still finished: this decision is recorded as its terminal transient_failure Outcome
+    // and its inbox entry is completed in the same atomic write, so nothing reprocesses it - the
+    // recorded Outcome is what a caller reads, and asking again is a new Turn. (A Turn only stays
+    // pending for a later pass when recording the result itself fails, which is a different case
+    // entirely: nothing durable was written at all.)
     private static ModelDecision SystemFailure(string code, string summary) => new()
     {
         Category = OutcomeCategory.TransientFailure,
