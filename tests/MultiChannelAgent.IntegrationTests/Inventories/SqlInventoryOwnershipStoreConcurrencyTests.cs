@@ -97,6 +97,46 @@ public sealed class SqlInventoryOwnershipStoreConcurrencyTests : IDisposable
         Assert.Contains(owners.Single().ParticipantId, new[] { targetAId, targetBId });
     }
 
+    [Fact]
+    public async Task Transfer_racing_a_grant_for_the_same_new_target_reports_one_insert_conflict()
+    {
+        var (inventoryId, ownerId, targetId, _) = await SeedInventoryWithOwnerAndTwoTargetsAsync();
+        var now = DateTimeOffset.UtcNow;
+
+        using var barrier = new Barrier(2);
+        using var grantDb = CreateContext(new SynchronizeMembershipReadInterceptor(barrier, readNumber: 1));
+        using var transferDb = CreateContext(new SynchronizeMembershipReadInterceptor(barrier, readNumber: 2));
+        var membershipStore = new SqlInventoryMembershipStore(grantDb);
+        var ownershipStore = new SqlInventoryOwnershipStore(transferDb);
+
+        var grantTask = Task.Run(() => membershipStore.GrantOrChangeRoleAsync(
+            new InventoryId(inventoryId), new ParticipantId(ownerId), new ParticipantId(targetId),
+            "Target A", MembershipRole.Viewer, now, CancellationToken.None));
+        var transferTask = Task.Run(() => ownershipStore.TransferAsync(
+            new InventoryId(inventoryId), new ParticipantId(ownerId), new ParticipantId(targetId),
+            "Target A", now, CancellationToken.None));
+
+        var grant = await grantTask;
+        var transfer = await transferTask;
+
+        Assert.True(
+            grant.Outcome == MembershipGrantOutcome.Granted
+                && transfer.Outcome == TransferOutcome.ConcurrentModification
+            || grant.Outcome == MembershipGrantOutcome.ConcurrentModification
+                && transfer.Outcome == TransferOutcome.Transferred);
+
+        using var verifyDb = CreateContext();
+        Assert.Single(await verifyDb.Memberships.AsNoTracking()
+            .Where(membership => membership.InventoryId == inventoryId && membership.ParticipantId == targetId)
+            .ToListAsync());
+        Assert.Single(await verifyDb.Memberships.AsNoTracking()
+            .Where(membership => membership.InventoryId == inventoryId && membership.Role == MembershipRole.Owner)
+            .ToListAsync());
+        Assert.Single(await verifyDb.InventoryAudits.AsNoTracking()
+            .Where(audit => audit.InventoryId == inventoryId)
+            .ToListAsync());
+    }
+
     /// <summary>
     /// Pauses the very first read against <c>Memberships</c> issued through this interceptor's
     /// <see cref="MultiChannelAgentDbContext"/> until a second participant (the other concurrent
@@ -117,6 +157,26 @@ public sealed class SqlInventoryOwnershipStoreConcurrencyTests : IDisposable
             if (!_synchronized && command.CommandText.Contains("Memberships", StringComparison.Ordinal))
             {
                 _synchronized = true;
+                await Task.Run(() => checkArrivalBarrier.SignalAndWait(cancellationToken), cancellationToken);
+            }
+
+            return await base.ReaderExecutingAsync(command, eventData, result, cancellationToken);
+        }
+    }
+
+    private sealed class SynchronizeMembershipReadInterceptor(Barrier checkArrivalBarrier, int readNumber) : DbCommandInterceptor
+    {
+        private int _membershipReadCount;
+
+        public override async ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(
+            DbCommand command,
+            CommandEventData eventData,
+            InterceptionResult<DbDataReader> result,
+            CancellationToken cancellationToken = default)
+        {
+            if (command.CommandText.Contains("Memberships", StringComparison.Ordinal)
+                && Interlocked.Increment(ref _membershipReadCount) == readNumber)
+            {
                 await Task.Run(() => checkArrivalBarrier.SignalAndWait(cancellationToken), cancellationToken);
             }
 

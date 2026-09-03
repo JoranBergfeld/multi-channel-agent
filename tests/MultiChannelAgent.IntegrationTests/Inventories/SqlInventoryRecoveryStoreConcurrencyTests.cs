@@ -113,6 +113,50 @@ public sealed class SqlInventoryRecoveryStoreConcurrencyTests : IDisposable
         Assert.Contains(owners.Single().ParticipantId, new[] { targetAId, targetBId });
     }
 
+    [Fact]
+    public async Task Recovery_racing_a_grant_for_the_same_new_target_reports_one_insert_conflict()
+    {
+        var (inventoryId, orphanedOwnerId, targetId, _) = await SeedOrphanedInventoryAsync();
+        var now = DateTimeOffset.UtcNow;
+        var directory = new FixedTenantMemberDirectory(new Dictionary<Guid, ResolvedTenantMember>
+        {
+            [targetId] = new(new ParticipantId(targetId), "Target A"),
+        });
+
+        using var barrier = new Barrier(2);
+        using var grantDb = CreateContext(new SynchronizeMembershipReadInterceptor(barrier, readNumber: 1));
+        using var recoveryDb = CreateContext(new SynchronizeMembershipReadInterceptor(barrier, readNumber: 2));
+        var membershipStore = new SqlInventoryMembershipStore(grantDb);
+        var recoveryStore = new SqlInventoryRecoveryStore(recoveryDb, directory);
+
+        var grantTask = Task.Run(() => membershipStore.GrantOrChangeRoleAsync(
+            new InventoryId(inventoryId), new ParticipantId(orphanedOwnerId), new ParticipantId(targetId),
+            "Target A", MembershipRole.Viewer, now, CancellationToken.None));
+        var recoveryTask = Task.Run(() => recoveryStore.RecoverAsync(
+            new InventoryId(inventoryId), TenantMemberIdentifier.Parse(targetId.ToString())!,
+            "recovery-admin", now, CancellationToken.None));
+
+        var grant = await grantTask;
+        var recovery = await recoveryTask;
+
+        Assert.True(
+            grant.Outcome == MembershipGrantOutcome.Granted
+                && recovery.Outcome == RecoveryOutcome.ConcurrentModification
+            || grant.Outcome == MembershipGrantOutcome.ConcurrentModification
+                && recovery.Outcome == RecoveryOutcome.Recovered);
+
+        using var verifyDb = CreateContext();
+        Assert.Single(await verifyDb.Memberships.AsNoTracking()
+            .Where(membership => membership.InventoryId == inventoryId && membership.ParticipantId == targetId)
+            .ToListAsync());
+        Assert.Single(await verifyDb.Memberships.AsNoTracking()
+            .Where(membership => membership.InventoryId == inventoryId && membership.Role == MembershipRole.Owner)
+            .ToListAsync());
+        Assert.Single(await verifyDb.InventoryAudits.AsNoTracking()
+            .Where(audit => audit.InventoryId == inventoryId)
+            .ToListAsync());
+    }
+
     /// <summary>Pauses the first read against <c>Memberships</c> so both recovery attempts read the current Owner row's ConcurrencyStamp before either commits.</summary>
     private sealed class SynchronizeFirstReadInterceptor(Barrier checkArrivalBarrier) : DbCommandInterceptor
     {
@@ -127,6 +171,26 @@ public sealed class SqlInventoryRecoveryStoreConcurrencyTests : IDisposable
             if (!_synchronized && command.CommandText.Contains("Memberships", StringComparison.Ordinal))
             {
                 _synchronized = true;
+                await Task.Run(() => checkArrivalBarrier.SignalAndWait(cancellationToken), cancellationToken);
+            }
+
+            return await base.ReaderExecutingAsync(command, eventData, result, cancellationToken);
+        }
+    }
+
+    private sealed class SynchronizeMembershipReadInterceptor(Barrier checkArrivalBarrier, int readNumber) : DbCommandInterceptor
+    {
+        private int _membershipReadCount;
+
+        public override async ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(
+            DbCommand command,
+            CommandEventData eventData,
+            InterceptionResult<DbDataReader> result,
+            CancellationToken cancellationToken = default)
+        {
+            if (command.CommandText.Contains("Memberships", StringComparison.Ordinal)
+                && Interlocked.Increment(ref _membershipReadCount) == readNumber)
+            {
                 await Task.Run(() => checkArrivalBarrier.SignalAndWait(cancellationToken), cancellationToken);
             }
 
