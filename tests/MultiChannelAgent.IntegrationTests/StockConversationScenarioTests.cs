@@ -160,26 +160,46 @@ public sealed class StockConversationScenarioTests : SqlIntegrationTestBase
         Assert.Equal("Steel Bolts", candidate.GetProperty("name").GetString());
 
         // Native-message idempotency + duplicate Outcome recovery: resubmitting the same
-        // nativeMessageId returns the SAME Turn identity, is never reprocessed, and reading its
-        // Outcome back yields the exact same recorded terminal result.
+        // nativeMessageId is never reprocessed, and because that Turn has already been answered the
+        // submission itself hands back its recorded terminal Outcome rather than an acknowledgement,
+        // so a redelivering adapter never has to poll for a result the application already holds.
+        var deliveriesBeforeDuplicate = await CountDeliveriesAsync(listTurnId);
         var duplicateSubmit = await SendAsync(
             client, jar,
             new HttpRequestMessage(HttpMethod.Post, "/api/turns") { Content = JsonContent.Create(new { nativeMessageId = "native-list-1", contentText = "list stock" }) },
             csrfToken);
-        Assert.Equal(HttpStatusCode.Accepted, duplicateSubmit.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, duplicateSubmit.StatusCode);
+
         var duplicateBody = await duplicateSubmit.Content.ReadFromJsonAsync<JsonElement>();
         Assert.Equal(listTurnId, duplicateBody.GetProperty("turnId").GetGuid());
-        Assert.True(duplicateBody.GetProperty("alreadyAccepted").GetBoolean());
+        Assert.Equal(listOutcome.GetProperty("status").GetString(), duplicateBody.GetProperty("status").GetString());
+        Assert.Equal(listOutcome.GetProperty("category").GetString(), duplicateBody.GetProperty("category").GetString());
+        Assert.Equal(listOutcome.GetProperty("code").GetString(), duplicateBody.GetProperty("code").GetString());
+        Assert.Equal(listOutcome.GetProperty("summary").GetString(), duplicateBody.GetProperty("summary").GetString());
 
-        // No pending work was created by the duplicate submission - it was never reprocessed.
-        Assert.Equal(0, await ProcessPendingAsync(Factory!));
-
-        var duplicateOutcomeResponse = await SendAsync(client, jar, new HttpRequestMessage(HttpMethod.Get, $"/api/turns/{listTurnId}/outcome"));
-        var duplicateOutcome = await duplicateOutcomeResponse.Content.ReadFromJsonAsync<JsonElement>();
-        Assert.Equal(listOutcome.GetProperty("summary").GetString(), duplicateOutcome.GetProperty("summary").GetString());
+        var duplicatePayload = duplicateBody.GetProperty("payload");
+        Assert.Equal("stock_list", duplicatePayload.GetProperty("kind").GetString());
         Assert.Equal(
-            listOutcome.GetProperty("payload").GetProperty("rows").GetArrayLength(),
-            duplicateOutcome.GetProperty("payload").GetProperty("rows").GetArrayLength());
+            listedRow.GetProperty("id").GetString(),
+            Assert.Single(duplicatePayload.GetProperty("rows").EnumerateArray()).GetProperty("id").GetString());
+
+        // The very same recorded response part, not a second one minted for the duplicate.
+        Assert.Equal(
+            listOutcome.GetProperty("deliveries")[0].GetProperty("deliveryId").GetGuid(),
+            duplicateBody.GetProperty("deliveries")[0].GetProperty("deliveryId").GetGuid());
+
+        // No pending work was created by the duplicate submission - it was never reprocessed, and no
+        // further Delivery was recorded for it.
+        Assert.Equal(0, await ProcessPendingAsync(Factory!));
+        Assert.Equal(deliveriesBeforeDuplicate, await CountDeliveriesAsync(listTurnId));
+        Assert.Equal(1, deliveriesBeforeDuplicate);
+    }
+
+    private async Task<int> CountDeliveriesAsync(Guid turnId)
+    {
+        using var scope = Factory!.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<MultiChannelAgentDbContext>();
+        return await db.Deliveries.AsNoTracking().CountAsync(d => d.TurnId == turnId);
     }
 
     // Proves per-conversation FIFO end to end against real SQL Server: a Turn that cannot reach a
