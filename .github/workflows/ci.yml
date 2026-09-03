@@ -1,0 +1,112 @@
+name: CI
+
+on:
+  push:
+    branches: [prototype/inventory-conversation]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend build, tests, architecture checks, migrations, SQL-backed scenario
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Build (Release, warnings as errors)
+        run: dotnet build --no-restore --configuration Release
+
+      - name: Validate EF Core migrations generate a consistent SQL script
+        run: |
+          dotnet tool install --global dotnet-ef --version 10.0.11
+          export PATH="$PATH:$HOME/.dotnet/tools"
+          dotnet ef migrations script \
+            --project src/MultiChannelAgent.Infrastructure \
+            --startup-project src/MultiChannelAgent.Infrastructure \
+            --idempotent \
+            --output "$RUNNER_TEMP/migrations.sql"
+
+      # Docker is preinstalled and running on GitHub-hosted ubuntu runners, so the Testcontainers
+      # SQL Server integration test (the SQL-backed application-boundary scenario) runs for real
+      # here, alongside the pure unit/application tests and the architecture tests, in one pass.
+      # REQUIRE_DOCKER_TESTS=true removes this job's ability to silently skip that scenario: a
+      # broken Docker/container startup here fails the build instead of passing as a clean skip.
+      - name: Test (unit, application, architecture, SQL-backed application-boundary scenario)
+        env:
+          REQUIRE_DOCKER_TESTS: "true"
+        run: dotnet test --no-build --configuration Release --logger "console;verbosity=normal"
+
+  container:
+    name: Container image build and liveness smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Gates the ticket's "one runnable containerized application" acceptance criterion for real:
+      # the multi-stage Dockerfile must actually build the web client, restore/publish the backend,
+      # and assemble the runtime image, on the same Docker engine GitHub-hosted ubuntu runners
+      # preinstall and run for the Testcontainers-backed tests in the backend job above.
+      - name: Build container image
+        run: docker build --tag multi-channel-agent:ci .
+
+      # A connection string is required at startup (see Program.cs) but is never connected to for
+      # /health/live, which has no external dependencies - so a placeholder value is enough to prove
+      # the built image actually starts and serves traffic, without needing a real SQL Server here.
+      - name: Smoke test the container's liveness endpoint
+        run: |
+          set -e
+          container_id=$(docker run -d \
+            -p 8080:8080 \
+            -e ConnectionStrings__MultiChannelAgent="Server=placeholder;Database=placeholder;TrustServerCertificate=True" \
+            multi-channel-agent:ci)
+          trap 'docker logs "$container_id" || true; docker rm -f "$container_id" >/dev/null 2>&1 || true' EXIT
+
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent --output /dev/null http://localhost:8080/health/live; then
+              echo "Container is live."
+              exit 0
+            fi
+            sleep 1
+          done
+
+          echo "Container did not become live in time." >&2
+          exit 1
+
+  frontend:
+    name: Web client build and lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: src/web/package-lock.json
+
+      - name: Install dependencies
+        working-directory: src/web
+        run: npm ci
+
+      - name: Lint
+        working-directory: src/web
+        run: npm run lint
+
+      - name: Build
+        working-directory: src/web
+        run: npm run build

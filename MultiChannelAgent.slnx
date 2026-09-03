@@ -1,0 +1,14 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/MultiChannelAgent.Application/MultiChannelAgent.Application.csproj" />
+    <Project Path="src/MultiChannelAgent.Domain/MultiChannelAgent.Domain.csproj" />
+    <Project Path="src/MultiChannelAgent.Host/MultiChannelAgent.Host.csproj" />
+    <Project Path="src/MultiChannelAgent.Infrastructure/MultiChannelAgent.Infrastructure.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/MultiChannelAgent.Application.Tests/MultiChannelAgent.Application.Tests.csproj" />
+    <Project Path="tests/MultiChannelAgent.ArchitectureTests/MultiChannelAgent.ArchitectureTests.csproj" />
+    <Project Path="tests/MultiChannelAgent.Domain.Tests/MultiChannelAgent.Domain.Tests.csproj" />
+    <Project Path="tests/MultiChannelAgent.IntegrationTests/MultiChannelAgent.IntegrationTests.csproj" />
+  </Folder>
+</Solution>
