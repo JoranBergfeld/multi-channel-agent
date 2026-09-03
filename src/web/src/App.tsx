@@ -199,11 +199,15 @@ function App() {
         ) : null;
       })()}
 
+      {/*
+        The conversation is always available, including before an Inventory has been selected: that is
+        exactly when a Participant needs the agent to tell them to select one, and hiding the
+        conversation would make that guidance unreachable.
+      */}
+      <TurnTracer csrfToken={session.csrfToken} onTerminalOutcome={() => setStockRefetchToken((token) => token + 1)} />
+
       {bootstrap.activeInventoryId && (
-        <>
-          <TurnTracer csrfToken={session.csrfToken} onTerminalOutcome={() => setStockRefetchToken((token) => token + 1)} />
-          <StockWorkspace inventoryId={bootstrap.activeInventoryId} refetchToken={stockRefetchToken} />
-        </>
+        <StockWorkspace inventoryId={bootstrap.activeInventoryId} refetchToken={stockRefetchToken} />
       )}
     </main>
   );

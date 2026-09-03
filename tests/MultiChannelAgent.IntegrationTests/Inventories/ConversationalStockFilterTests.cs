@@ -177,4 +177,67 @@ public sealed class ConversationalStockFilterTests : IAsyncLifetime
         });
         db.SaveChanges();
     }
+    // A Participant with no Inventory selected for this conversation must be able to converse at all -
+    // that is precisely when the agent has to tell them to select one. The guidance is a completed
+    // answer carrying an actionable code, not a failure.
+    [Fact]
+    public async Task Reading_stock_with_no_active_inventory_answers_with_reachable_guidance()
+    {
+        var participant = await ConversationTestClient.SignInAsync(
+            ConversationTestClient.CreateHttpsClient(_factory), "Unselected Participant");
+
+        var answer = await AnswerAsync(participant, "no-inventory-1", "list stock");
+
+        Assert.Equal("completed", answer.GetProperty("status").GetString());
+        Assert.Equal("invalid", answer.GetProperty("category").GetString());
+        Assert.Equal("no_active_inventory", answer.GetProperty("code").GetString());
+        Assert.Contains("Select an Inventory", answer.GetProperty("summary").GetString());
+
+        // And it is delivered, so the Participant actually sees it.
+        Assert.Single(answer.GetProperty("deliveries").EnumerateArray());
+    }
+    // Reading is a Viewer capability, and Editor and Owner both include it. Proving it end to end for
+    // an Editor - a distinct signed-in Participant, granted only Editor on someone else's Inventory -
+    // keeps a stricter-than-intended authorization check from silently locking Editors out of reads.
+    [Fact]
+    public async Task An_editor_of_another_participants_inventory_can_read_stock_conversationally()
+    {
+        var httpClient = ConversationTestClient.CreateHttpsClient(_factory);
+        var owner = await ConversationTestClient.SignInAsync(httpClient, "Owning Participant");
+        var inventoryId = await owner.CreateAndSelectInventoryAsync("Shared Warehouse");
+        SeedStock(inventoryId, "Shared Bolts", 4m);
+
+        var editor = await ConversationTestClient.SignInAsync(httpClient, "Editing Participant");
+        GrantEditorMembership(inventoryId, await ParticipantIdOfAsync(editor));
+        await editor.SelectInventoryAsync(inventoryId);
+
+        var listed = await AnswerAsync(editor, "editor-1", "list stock");
+        var found = await AnswerAsync(editor, "editor-2", "find Shared Bolts");
+
+        Assert.Equal("completed", listed.GetProperty("status").GetString());
+        Assert.Equal(
+            "Shared Bolts",
+            Assert.Single(listed.GetProperty("payload").GetProperty("rows").EnumerateArray()).GetProperty("name").GetString());
+        Assert.Equal("completed", found.GetProperty("category").GetString());
+    }
+
+    private static async Task<Guid> ParticipantIdOfAsync(ConversationTestClient participant)
+    {
+        var bootstrap = await participant.GetBootstrapAsync();
+        return Guid.Parse(bootstrap.GetProperty("bootstrap").GetProperty("participantId").GetString()!);
+    }
+
+    private void GrantEditorMembership(Guid inventoryId, Guid participantId)
+    {
+        using var scope = _factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<MultiChannelAgentDbContext>();
+        db.Memberships.Add(new MembershipEntity
+        {
+            InventoryId = inventoryId,
+            ParticipantId = participantId,
+            Role = MembershipRole.Editor,
+            CreatedAt = DateTimeOffset.UtcNow,
+        });
+        db.SaveChanges();
+    }
 }

@@ -272,4 +272,24 @@ public class StockFindingServiceTests
         Assert.Equal(StockFindResultKind.ReferenceNotFound, result.Kind);
         Assert.Equal("reference_not_found", result.Code);
     }
+    [Theory]
+    [InlineData(MembershipRole.Viewer)]
+    [InlineData(MembershipRole.Editor)]
+    [InlineData(MembershipRole.Owner)]
+    public async Task Viewer_editor_and_owner_can_all_find_stock(MembershipRole role)
+    {
+        var reader = new ParticipantId(Guid.Parse("55555555-5555-5555-5555-555555555555"));
+        var inventoryStore = new InMemoryInventoryStore(_ => "Owner Name");
+        inventoryStore.GrantMembership(SomeInventory, reader, role, Now);
+        var auditStore = new InMemoryInventoryAuthorizationAuditStore(new InMemoryActiveInventorySelectionStore());
+        var authorizationService = new InventoryAuthorizationService(inventoryStore, auditStore);
+        var stockStore = new InMemoryStockStore();
+        stockStore.Add(SomeInventory, Row("Bolts", "10000000"));
+        var service = new StockFindingService(stockStore, new InMemoryInventoryReferenceStore(), authorizationService);
+
+        var result = await service.FindAsync(reader, SomeInventory, Request("Bolts"), null, Now, CancellationToken.None);
+
+        Assert.Equal(StockFindResultKind.Completed, result.Kind);
+        Assert.Equal("Bolts", Assert.Single(result.View!.Candidates).Name);
+    }
 }

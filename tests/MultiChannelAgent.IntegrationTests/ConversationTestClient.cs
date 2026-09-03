@@ -78,6 +78,21 @@ public sealed class ConversationTestClient
         return inventoryId;
     }
 
+    /// <summary>Re-reads the session bootstrap, for example to learn this client's own Participant identity.</summary>
+    public async Task<JsonElement> GetBootstrapAsync()
+    {
+        var response = await SendAsync(new HttpRequestMessage(HttpMethod.Get, "/api/session/bootstrap"));
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        return await response.Content.ReadFromJsonAsync<JsonElement>();
+    }
+
+    /// <summary>Selects an already-authorized Inventory as this conversation's Active Inventory.</summary>
+    public async Task SelectInventoryAsync(Guid inventoryId)
+    {
+        var response = await SendAsync(new HttpRequestMessage(HttpMethod.Post, $"/api/inventories/{inventoryId}/select"), withCsrf: true);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
     public async Task<HttpResponseMessage> SubmitTurnAsync(string nativeMessageId, string contentText) =>
         await SendAsync(
             new HttpRequestMessage(HttpMethod.Post, "/api/turns") { Content = JsonContent.Create(new { nativeMessageId, contentText }) },

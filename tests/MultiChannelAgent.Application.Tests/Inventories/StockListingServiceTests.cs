@@ -345,4 +345,27 @@ public class StockListingServiceTests
         // cursor check is proven for an authorized Inventory by the shape test above.
         Assert.Equal(StockAccessOutcomeKind.NotFound, result.Kind);
     }
+    // Every role that may read must actually be able to: an Editor and an Owner have all of a
+    // Viewer's read access, and proving it for the Viewer alone would let a stricter-than-intended
+    // check slip through for the other two.
+    [Theory]
+    [InlineData(MembershipRole.Viewer)]
+    [InlineData(MembershipRole.Editor)]
+    [InlineData(MembershipRole.Owner)]
+    public async Task Viewer_editor_and_owner_can_all_list_stock(MembershipRole role)
+    {
+        var reader = new ParticipantId(Guid.Parse("55555555-5555-5555-5555-555555555555"));
+        var inventoryStore = new InMemoryInventoryStore(_ => "Owner Name");
+        inventoryStore.GrantMembership(SomeInventory, reader, role, Now);
+        var auditStore = new InMemoryInventoryAuthorizationAuditStore(new InMemoryActiveInventorySelectionStore());
+        var authorizationService = new InventoryAuthorizationService(inventoryStore, auditStore);
+        var stockStore = new InMemoryStockStore();
+        stockStore.Add(SomeInventory, Row("Bolts", 5m, "10000000"));
+        var service = new StockListingService(stockStore, new InMemoryInventoryReferenceStore(), authorizationService);
+
+        var result = await service.ListAsync(reader, SomeInventory, Request(), channelConversationId: null, Now, CancellationToken.None);
+
+        Assert.Equal(StockAccessOutcomeKind.Completed, result.Kind);
+        Assert.Equal("Bolts", Assert.Single(result.View!.Rows).Name);
+    }
 }
