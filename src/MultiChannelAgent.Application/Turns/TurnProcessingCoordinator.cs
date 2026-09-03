@@ -8,7 +8,10 @@ namespace MultiChannelAgent.Application.Turns;
 /// scripted model boundary, atomically recording the Outcome, any requested Deliveries, and inbox
 /// completion via <see cref="ITurnResultStore"/>. Runs under an exclusive lease so multiple hosted
 /// replicas never process the same Turn twice, and exposes a deterministic one-shot operation so
-/// tests can drive processing without timing a background loop.
+/// tests can drive processing without timing a background loop. Enforces per-ChannelConversation
+/// FIFO: a Turn that fails to reach a terminal Outcome this pass blocks every later Turn in its same
+/// ChannelConversation for the remainder of this pass, while unrelated ChannelConversations proceed
+/// independently.
 /// </summary>
 public sealed class TurnProcessingCoordinator(
     IInboxStore inboxStore,
@@ -37,8 +40,22 @@ public sealed class TurnProcessingCoordinator(
         var pendingTurns = await inboxStore.ClaimPendingAsync(MaxBatchSize, cancellationToken);
         var processedCount = 0;
 
+        // Per-conversation FIFO: pendingTurns is ordered FIFO (received order) globally, so within
+        // any one ChannelConversation its Turns already appear in that same order here. Once a Turn
+        // fails to reach a terminal Outcome this pass, every later Turn in that SAME
+        // ChannelConversation must be left untouched (not even attempted) rather than let it complete
+        // ahead of its still-pending predecessor - a later pass, once the predecessor is resolved,
+        // safely retries the whole conversation from where it left off. Turns in a different
+        // ChannelConversation are never blocked by this.
+        var blockedConversations = new HashSet<ChannelConversationId>();
+
         foreach (var turn in pendingTurns)
         {
+            if (blockedConversations.Contains(turn.ChannelConversationId))
+            {
+                continue;
+            }
+
             try
             {
                 await ProcessOneAsync(turn, cancellationToken);
@@ -47,11 +64,12 @@ public sealed class TurnProcessingCoordinator(
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 // Per-item isolation: one Turn failing to record its result (e.g. a transient SQL
-                // fault) must not prevent later pending Turns in this batch from being processed.
-                // ITurnResultStore.RecordAsync is atomic, so no partial Outcome/Delivery/inbox state
-                // was written for this Turn - it remains Pending and a later pass safely retries it
-                // from scratch.
+                // fault) must not prevent later pending Turns in OTHER ChannelConversations from being
+                // processed. ITurnResultStore.RecordAsync is atomic, so no partial Outcome/Delivery/
+                // inbox state was written for this Turn - it remains Pending and a later pass safely
+                // retries it from scratch.
                 logger.LogError(ex, "Failed to process Turn {TurnId}; it remains pending for retry.", turn.TurnId);
+                blockedConversations.Add(turn.ChannelConversationId);
             }
         }
 

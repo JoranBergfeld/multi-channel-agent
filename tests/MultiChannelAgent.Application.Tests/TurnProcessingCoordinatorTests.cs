@@ -121,6 +121,44 @@ public class TurnProcessingCoordinatorTests
         Assert.NotNull(await outcomes.FindAsync(okTurn.TurnId, CancellationToken.None));
     }
 
+    // Per-conversation FIFO: an earlier Turn in a ChannelConversation that does not reach a terminal
+    // Outcome this pass must never let a later Turn in that SAME ChannelConversation be processed
+    // ahead of it in the same batch - that would let the later Turn's Outcome/Delivery land before
+    // the earlier one's, violating the ordering guarantee a Participant's conversation depends on.
+    [Fact]
+    public async Task A_failing_turn_blocks_only_later_turns_in_its_own_channel_conversation_this_pass()
+    {
+        var timeProvider = new FakeTimeProvider(Now);
+        var (coordinator, inbox, outcomes, _, resultStore) = CreateCoordinator(timeProvider);
+        var firstInConversation = InboundTurn.Create("native-first", SomeParticipant, "conversation-1", "hello", null, Now, null);
+        var secondInSameConversation = InboundTurn.Create(
+            "native-second", SomeParticipant, "conversation-1", "hello", null, Now.AddSeconds(1), null);
+        var turnInOtherConversation = InboundTurn.Create(
+            "native-other", SomeParticipant, "conversation-2", "hello", null, Now.AddSeconds(2), null);
+        await inbox.AcceptAsync(firstInConversation, CancellationToken.None);
+        await inbox.AcceptAsync(secondInSameConversation, CancellationToken.None);
+        await inbox.AcceptAsync(turnInOtherConversation, CancellationToken.None);
+        resultStore.FailForTurnIds.Add(firstInConversation.TurnId.Value);
+
+        var processedCount = await coordinator.ProcessPendingAsync(CancellationToken.None);
+
+        // Only the unrelated conversation's Turn is processed this pass; the same-conversation
+        // successor is left pending rather than skipping ahead of its still-pending predecessor.
+        Assert.Equal(1, processedCount);
+        Assert.Null(await outcomes.FindAsync(firstInConversation.TurnId, CancellationToken.None));
+        Assert.Null(await outcomes.FindAsync(secondInSameConversation.TurnId, CancellationToken.None));
+        Assert.NotNull(await outcomes.FindAsync(turnInOtherConversation.TurnId, CancellationToken.None));
+
+        // Once the predecessor is resolved (here: the fault stops repeating), a later pass processes
+        // the successor - the block is per-pass, not a permanent poison of the conversation.
+        resultStore.FailForTurnIds.Remove(firstInConversation.TurnId.Value);
+        var secondPassCount = await coordinator.ProcessPendingAsync(CancellationToken.None);
+
+        Assert.Equal(2, secondPassCount);
+        Assert.NotNull(await outcomes.FindAsync(firstInConversation.TurnId, CancellationToken.None));
+        Assert.NotNull(await outcomes.FindAsync(secondInSameConversation.TurnId, CancellationToken.None));
+    }
+
     [Fact]
     public async Task Retrying_after_a_failed_result_write_reruns_model_planning_but_never_reruns_it_once_the_turn_has_completed()
     {
