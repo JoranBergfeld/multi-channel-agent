@@ -20,6 +20,11 @@ function StockWorkspace({ inventoryId, refetchToken }: StockWorkspaceProps) {
   const load = useCallback(async () => {
     try {
       setView(await fetchStock(inventoryId));
+
+      // A refetch that succeeded is the authoritative view, so an earlier failure must stop being
+      // shown: leaving it would keep the workspace stuck on a stale error message for the rest of
+      // the session, hiding the very Stock it just loaded.
+      setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
