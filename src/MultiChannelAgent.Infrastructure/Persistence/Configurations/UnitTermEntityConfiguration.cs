@@ -14,14 +14,14 @@ public sealed class UnitTermEntityConfiguration : IEntityTypeConfiguration<UnitT
         builder.Property(e => e.Term).HasMaxLength(100).IsRequired();
         builder.Property(e => e.NormalizedTerm).HasMaxLength(100).IsRequired();
 
-        builder.HasOne<InventoryEntity>()
-            .WithMany()
-            .HasForeignKey(e => e.InventoryId)
-            .OnDelete(DeleteBehavior.Cascade);
-
+        // Composite FK to Unit's (InventoryId, Id) alternate key rather than separate Inventory and
+        // Unit FKs: this is the only cascade path into UnitTerms (Inventory -> Units -> UnitTerms),
+        // avoiding the multiple-cascade-paths error a redundant direct Inventory FK would cause, and
+        // it enforces that a UnitTerm's InventoryId always agrees with its Unit's InventoryId.
         builder.HasOne<UnitEntity>()
             .WithMany()
-            .HasForeignKey(e => e.UnitId)
+            .HasForeignKey(e => new { e.InventoryId, e.UnitId })
+            .HasPrincipalKey(e => new { e.InventoryId, e.Id })
             .OnDelete(DeleteBehavior.Cascade);
 
         // Unit canonical names and aliases share one collision-free namespace within an Inventory:

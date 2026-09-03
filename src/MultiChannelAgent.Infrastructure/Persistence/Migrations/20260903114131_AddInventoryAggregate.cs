@@ -106,6 +106,7 @@ namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
                 constraints: table =>
                 {
                     table.PrimaryKey("PK_Units", x => x.Id);
+                    table.UniqueConstraint("AK_Units_InventoryId_Id", x => new { x.InventoryId, x.Id });
                     table.ForeignKey(
                         name: "FK_Units_Inventories_InventoryId",
                         column: x => x.InventoryId,
@@ -130,16 +131,10 @@ namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
                 {
                     table.PrimaryKey("PK_UnitTerms", x => x.Id);
                     table.ForeignKey(
-                        name: "FK_UnitTerms_Inventories_InventoryId",
-                        column: x => x.InventoryId,
-                        principalTable: "Inventories",
-                        principalColumn: "Id",
-                        onDelete: ReferentialAction.Cascade);
-                    table.ForeignKey(
-                        name: "FK_UnitTerms_Units_UnitId",
-                        column: x => x.UnitId,
+                        name: "FK_UnitTerms_Units_InventoryId_UnitId",
+                        columns: x => new { x.InventoryId, x.UnitId },
                         principalTable: "Units",
-                        principalColumn: "Id",
+                        principalColumns: new[] { "InventoryId", "Id" },
                         onDelete: ReferentialAction.Cascade);
                 });
 
@@ -183,9 +178,9 @@ namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
                 unique: true);
 
             migrationBuilder.CreateIndex(
-                name: "IX_UnitTerms_UnitId",
+                name: "IX_UnitTerms_InventoryId_UnitId",
                 table: "UnitTerms",
-                column: "UnitId");
+                columns: new[] { "InventoryId", "UnitId" });
         }
 
         /// <inheritdoc />

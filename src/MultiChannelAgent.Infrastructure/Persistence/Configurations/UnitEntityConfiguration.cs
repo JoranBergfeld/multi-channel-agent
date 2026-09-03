@@ -19,5 +19,10 @@ public sealed class UnitEntityConfiguration : IEntityTypeConfiguration<UnitEntit
             .OnDelete(DeleteBehavior.Cascade);
 
         builder.HasIndex(e => e.InventoryId);
+
+        // Backs UnitTerm's composite (InventoryId, UnitId) FK below: a Unit can only be referenced by
+        // a UnitTerm that agrees with it on InventoryId, so the term namespace can never point across
+        // Inventory boundaries.
+        builder.HasAlternateKey(e => new { e.InventoryId, e.Id });
     }
 }

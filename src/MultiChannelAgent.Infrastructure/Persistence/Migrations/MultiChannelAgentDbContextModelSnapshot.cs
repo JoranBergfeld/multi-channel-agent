@@ -356,10 +356,10 @@ namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
 
                     b.HasKey("Id");
 
-                    b.HasIndex("UnitId");
-
                     b.HasIndex("InventoryId", "NormalizedTerm")
                         .IsUnique();
+
+                    b.HasIndex("InventoryId", "UnitId");
 
                     b.ToTable("UnitTerms", (string)null);
                 });
@@ -426,15 +426,10 @@ namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
 
             modelBuilder.Entity("MultiChannelAgent.Infrastructure.Persistence.Entities.UnitTermEntity", b =>
                 {
-                    b.HasOne("MultiChannelAgent.Infrastructure.Persistence.Entities.InventoryEntity", null)
-                        .WithMany()
-                        .HasForeignKey("InventoryId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
                     b.HasOne("MultiChannelAgent.Infrastructure.Persistence.Entities.UnitEntity", null)
                         .WithMany()
-                        .HasForeignKey("UnitId")
+                        .HasForeignKey("InventoryId", "UnitId")
+                        .HasPrincipalKey("InventoryId", "Id")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
                 });

@@ -12,8 +12,8 @@ using MultiChannelAgent.Infrastructure.Persistence;
 namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
 {
     [DbContext(typeof(MultiChannelAgentDbContext))]
-    [Migration("20260903105315_AddAuthTickets")]
-    partial class AddAuthTickets
+    [Migration("20260903114131_AddInventoryAggregate")]
+    partial class AddInventoryAggregate
     {
         /// <inheritdoc />
         protected override void BuildTargetModel(ModelBuilder modelBuilder)
@@ -45,32 +45,6 @@ namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
                     b.HasIndex("InventoryId");
 
                     b.ToTable("ActiveInventorySelections", (string)null);
-                });
-
-            modelBuilder.Entity("MultiChannelAgent.Infrastructure.Persistence.Entities.AuthTicketEntity", b =>
-                {
-                    b.Property<string>("Key")
-                        .HasMaxLength(64)
-                        .HasColumnType("nvarchar(64)");
-
-                    b.Property<DateTimeOffset>("CreatedAtUtc")
-                        .HasColumnType("datetimeoffset");
-
-                    b.Property<DateTimeOffset?>("ExpiresAtUtc")
-                        .HasColumnType("datetimeoffset");
-
-                    b.Property<byte[]>("ProtectedTicket")
-                        .IsRequired()
-                        .HasColumnType("varbinary(max)");
-
-                    b.Property<DateTimeOffset>("UpdatedAtUtc")
-                        .HasColumnType("datetimeoffset");
-
-                    b.HasKey("Key");
-
-                    b.HasIndex("ExpiresAtUtc");
-
-                    b.ToTable("AuthTickets", (string)null);
                 });
 
             modelBuilder.Entity("MultiChannelAgent.Infrastructure.Persistence.Entities.DeliveryEntity", b =>
@@ -359,10 +333,10 @@ namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
 
                     b.HasKey("Id");
 
-                    b.HasIndex("UnitId");
-
                     b.HasIndex("InventoryId", "NormalizedTerm")
                         .IsUnique();
+
+                    b.HasIndex("InventoryId", "UnitId");
 
                     b.ToTable("UnitTerms", (string)null);
                 });
@@ -429,15 +403,10 @@ namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
 
             modelBuilder.Entity("MultiChannelAgent.Infrastructure.Persistence.Entities.UnitTermEntity", b =>
                 {
-                    b.HasOne("MultiChannelAgent.Infrastructure.Persistence.Entities.InventoryEntity", null)
-                        .WithMany()
-                        .HasForeignKey("InventoryId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
                     b.HasOne("MultiChannelAgent.Infrastructure.Persistence.Entities.UnitEntity", null)
                         .WithMany()
-                        .HasForeignKey("UnitId")
+                        .HasForeignKey("InventoryId", "UnitId")
+                        .HasPrincipalKey("InventoryId", "Id")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
                 });
