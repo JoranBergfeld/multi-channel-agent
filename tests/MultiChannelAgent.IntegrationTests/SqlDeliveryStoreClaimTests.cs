@@ -10,8 +10,10 @@ namespace MultiChannelAgent.IntegrationTests;
 /// <summary>
 /// Fast, Docker-free coverage (a real relational engine, not mocks) of which pending response parts
 /// <see cref="SqlDeliveryStore"/> offers for dispatch. Two properties have to hold at once, and a
-/// naive ordering satisfies only one of them: one conversation's response parts must never be sent
-/// out of order, and no conversation may be starved of dispatch by busier or newer ones.
+/// naive ordering satisfies only one of them: within a conversation, one Turn's answer must never be
+/// sent before an earlier Turn's, and no conversation may be starved of dispatch by busier or newer
+/// ones. Ordering is between Turns only - every producer records exactly one response part per
+/// answered Turn, so there is no within-Turn order to guarantee.
 /// </summary>
 public sealed class SqlDeliveryStoreClaimTests : IDisposable
 {
@@ -68,9 +70,9 @@ public sealed class SqlDeliveryStoreClaimTests : IDisposable
         Assert.Equal(newerWaiting[0], claimed[1].DeliveryId);
     }
 
-    // Ordering within a conversation cannot rest on wall-clock time: an adapter supplies the instant
-    // its channel received a message, so a later Turn can carry an earlier one (a delayed delivery, a
-    // replica whose clock lags). Its response part must still never be dispatched ahead of the
+    // Ordering between a conversation's Turns cannot rest on wall-clock time: an adapter supplies the
+    // instant its channel received a message, so a later Turn can carry an earlier one (a delayed
+    // delivery, a replica whose clock lags). Its answer must still never be dispatched ahead of the
     // earlier Turn's, which is only guaranteed by not offering it at all while that one is pending.
     [Fact]
     public async Task A_later_response_part_is_never_offered_while_an_earlier_one_in_its_conversation_waits()
