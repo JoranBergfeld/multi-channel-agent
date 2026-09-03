@@ -99,4 +99,39 @@ public class OutcomeTests
         var values = Enum.GetValues<OutcomeStatus>();
         Assert.Equal(new[] { OutcomeStatus.Completed, OutcomeStatus.Failed }, values);
     }
+    // A retained payload is an ephemeral projection, not part of the permanent answer, so it carries
+    // an explicit expiry from the moment it is recorded rather than accumulating forever.
+    [Fact]
+    public void A_recorded_payload_carries_an_explicit_expiry()
+    {
+        var createdAt = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+
+        var outcome = Outcome.Completed(TurnId.NewId(), "completed", "1 Stock Entry found.", createdAt, """{"kind":"stock_list"}""");
+
+        Assert.Equal(createdAt + Outcome.PayloadRetention, outcome.PayloadExpiresAt);
+    }
+
+    [Fact]
+    public void An_outcome_with_no_payload_has_nothing_to_expire()
+    {
+        var outcome = Outcome.Completed(TurnId.NewId(), "echoed", "Echoed: hello", DateTimeOffset.UtcNow);
+
+        Assert.Null(outcome.PayloadExpiresAt);
+    }
+
+    // Cleanup drops only the projection; the semantic answer itself is permanent.
+    [Fact]
+    public void Discarding_an_expired_payload_keeps_the_semantic_answer()
+    {
+        var outcome = Outcome.Record(
+            TurnId.NewId(), OutcomeCategory.Ambiguous, "ambiguous", "2 Stock Entries match.", DateTimeOffset.UtcNow, """{"kind":"stock_find"}""");
+
+        var cleaned = outcome.WithoutRetainedPayload();
+
+        Assert.Null(cleaned.Payload);
+        Assert.Null(cleaned.PayloadExpiresAt);
+        Assert.Equal(OutcomeCategory.Ambiguous, cleaned.Category);
+        Assert.Equal("ambiguous", cleaned.Code);
+        Assert.Equal("2 Stock Entries match.", cleaned.Summary);
+    }
 }

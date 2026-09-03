@@ -18,6 +18,7 @@ internal static class OutcomeEntityMapping
         Code = outcome.Code,
         Summary = outcome.Summary,
         Payload = outcome.Payload,
+        PayloadExpiresAtTicks = outcome.PayloadExpiresAt?.UtcTicks,
         CreatedAt = outcome.CreatedAt,
     };
 
@@ -28,7 +29,12 @@ internal static class OutcomeEntityMapping
             entity.Code,
             entity.Summary,
             entity.CreatedAt,
-            entity.Payload);
+            entity.Payload) with
+        {
+            // Read back rather than recomputed: a payload discarded by cleanup must stay discarded,
+            // and one recorded under an earlier retention window keeps the expiry it was given.
+            PayloadExpiresAt = entity.PayloadExpiresAtTicks is { } ticks ? new DateTimeOffset(ticks, TimeSpan.Zero) : null,
+        };
 
     private static OutcomeEntityCategory ToEntityCategory(OutcomeCategory category) => category switch
     {

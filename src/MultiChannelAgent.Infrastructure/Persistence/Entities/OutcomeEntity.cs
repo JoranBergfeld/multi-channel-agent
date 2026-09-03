@@ -20,6 +20,13 @@ public sealed class OutcomeEntity
 
     public string? Payload { get; set; }
 
+    /// <summary>
+    /// When <see cref="Payload"/> stops being retained; null when there is no payload (or once
+    /// cleanup has discarded one). Stored as UTC ticks rather than a timestamp type so the scheduled
+    /// cleanup's comparison translates on every relational provider this model runs on.
+    /// </summary>
+    public long? PayloadExpiresAtTicks { get; set; }
+
     public DateTimeOffset CreatedAt { get; set; }
 }
 
