@@ -1,3 +1,4 @@
+using System.Text.Json;
 using MultiChannelAgent.Domain.Inventories;
 using MultiChannelAgent.Domain.Turns;
 
@@ -8,13 +9,17 @@ public sealed record DeliveryView(Guid DeliveryId, string Channel, string Status
 
 /// <summary>
 /// The recorded Outcome of a Turn, plus its requested Deliveries, as exposed at the application
-/// boundary. Never present until processing has produced a terminal Outcome.
+/// boundary. Never present until processing has produced a terminal Outcome. <see cref="Payload"/> is
+/// the parsed form of <see cref="Domain.Turns.Outcome.Payload"/> (a typed semantic result such as a
+/// Stock List page or Find candidates) when the Outcome carries one, null for the pre-existing echo
+/// tracer shape.
 /// </summary>
 public sealed record TurnOutcomeView(
     TurnId TurnId,
     string Status,
     string Code,
     string Summary,
+    JsonElement? Payload,
     IReadOnlyList<DeliveryView> Deliveries);
 
 /// <summary>
@@ -47,6 +52,7 @@ public sealed class TurnOutcomeReader(IInboxStore inboxStore, IOutcomeStore outc
             outcome.Status.ToString().ToLowerInvariant(),
             outcome.Code,
             outcome.Summary,
+            outcome.Payload is null ? null : JsonSerializer.Deserialize<JsonElement>(outcome.Payload),
             deliveries
                 .Select(d => new DeliveryView(d.DeliveryId, d.Channel, d.Status.ToString().ToLowerInvariant(), d.Attempts))
                 .ToList());

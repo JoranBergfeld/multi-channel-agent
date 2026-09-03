@@ -11,6 +11,8 @@ public sealed class OutcomeEntity
 
     public required string Summary { get; set; }
 
+    public string? Payload { get; set; }
+
     public DateTimeOffset CreatedAt { get; set; }
 }
 

@@ -22,6 +22,7 @@ public sealed class SqlOutcomeStore(MultiChannelAgentDbContext db) : IOutcomeSto
             Status = outcome.Status == OutcomeStatus.Completed ? OutcomeEntityStatus.Completed : OutcomeEntityStatus.Failed,
             Code = outcome.Code,
             Summary = outcome.Summary,
+            Payload = outcome.Payload,
             CreatedAt = outcome.CreatedAt,
         });
 
@@ -34,6 +35,7 @@ public sealed class SqlOutcomeStore(MultiChannelAgentDbContext db) : IOutcomeSto
         Status = entity.Status == OutcomeEntityStatus.Completed ? OutcomeStatus.Completed : OutcomeStatus.Failed,
         Code = entity.Code,
         Summary = entity.Summary,
+        Payload = entity.Payload,
         CreatedAt = entity.CreatedAt,
     };
 }

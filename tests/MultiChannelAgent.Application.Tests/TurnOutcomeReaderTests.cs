@@ -63,4 +63,34 @@ public class TurnOutcomeReaderTests
 
         Assert.Null(view);
     }
+
+    [Fact]
+    public async Task An_outcome_with_no_payload_exposes_a_null_payload()
+    {
+        var (_, _, _, reader, turnId) = await SeedProcessedTurnAsync();
+
+        var view = await reader.GetAsync(turnId, Owner, CancellationToken.None);
+
+        Assert.Null(view!.Payload);
+    }
+
+    [Fact]
+    public async Task An_outcome_carrying_a_json_payload_exposes_it_as_parsed_json()
+    {
+        var inbox = new InMemoryInboxStore();
+        var outcomeStore = new InMemoryOutcomeStore();
+        var deliveryStore = new InMemoryDeliveryStore();
+        var turn = InboundTurn.Create("native-2", Owner, "conversation-1", "list stock", null, Now, null);
+        await inbox.AcceptAsync(turn, CancellationToken.None);
+        await outcomeStore.SaveAsync(
+            Outcome.Completed(turn.TurnId, "completed", "1 Stock Entry found.", Now, """{"version":1,"kind":"stock_list"}"""),
+            CancellationToken.None);
+        var reader = new TurnOutcomeReader(inbox, outcomeStore, deliveryStore);
+
+        var view = await reader.GetAsync(turn.TurnId, Owner, CancellationToken.None);
+
+        Assert.NotNull(view!.Payload);
+        Assert.Equal(1, view.Payload!.Value.GetProperty("version").GetInt32());
+        Assert.Equal("stock_list", view.Payload.Value.GetProperty("kind").GetString());
+    }
 }

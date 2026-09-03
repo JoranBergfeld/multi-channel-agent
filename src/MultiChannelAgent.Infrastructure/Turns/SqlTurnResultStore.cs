@@ -31,6 +31,7 @@ public sealed class SqlTurnResultStore(MultiChannelAgentDbContext db) : ITurnRes
             Status = outcome.Status == OutcomeStatus.Completed ? OutcomeEntityStatus.Completed : OutcomeEntityStatus.Failed,
             Code = outcome.Code,
             Summary = outcome.Summary,
+            Payload = outcome.Payload,
             CreatedAt = outcome.CreatedAt,
         });
 

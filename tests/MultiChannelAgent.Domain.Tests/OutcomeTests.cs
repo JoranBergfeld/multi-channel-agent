@@ -32,6 +32,24 @@ public class OutcomeTests
     }
 
     [Fact]
+    public void Completed_outcome_defaults_to_no_payload()
+    {
+        var outcome = Outcome.Completed(TurnId.NewId(), "echoed", "Echoed: hello", DateTimeOffset.UtcNow);
+
+        Assert.Null(outcome.Payload);
+    }
+
+    [Fact]
+    public void Completed_outcome_may_carry_a_versioned_typed_payload()
+    {
+        const string payload = """{"version":1,"kind":"stock_list","rows":[]}""";
+
+        var outcome = Outcome.Completed(TurnId.NewId(), "completed", "1 Stock Entry found.", DateTimeOffset.UtcNow, payload);
+
+        Assert.Equal(payload, outcome.Payload);
+    }
+
+    [Fact]
     public void Outcome_is_not_terminal_state_holder_for_pending_processing()
     {
         // Only Completed/Failed statuses are constructible via the public factories; there is no

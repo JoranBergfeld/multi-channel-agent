@@ -3,6 +3,7 @@ using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using MultiChannelAgent.Infrastructure.Persistence;
 
@@ -11,9 +12,11 @@ using MultiChannelAgent.Infrastructure.Persistence;
 namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
 {
     [DbContext(typeof(MultiChannelAgentDbContext))]
-    partial class MultiChannelAgentDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260903144407_AddOutcomePayload")]
+    partial class AddOutcomePayload
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -110,29 +113,6 @@ namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
                     b.HasIndex("Status", "CreatedAt");
 
                     b.ToTable("Deliveries", (string)null);
-                });
-
-            modelBuilder.Entity("MultiChannelAgent.Infrastructure.Persistence.Entities.FoundryConversationBindingEntity", b =>
-                {
-                    b.Property<Guid>("ParticipantId")
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<string>("ChannelConversationId")
-                        .HasMaxLength(256)
-                        .HasColumnType("nvarchar(256)");
-
-                    b.Property<DateTimeOffset>("CreatedAt")
-                        .HasColumnType("datetimeoffset");
-
-                    b.Property<Guid>("FoundryConversationId")
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<int>("Generation")
-                        .HasColumnType("int");
-
-                    b.HasKey("ParticipantId", "ChannelConversationId");
-
-                    b.ToTable("FoundryConversationBindings", (string)null);
                 });
 
             modelBuilder.Entity("MultiChannelAgent.Infrastructure.Persistence.Entities.InboxEntryEntity", b =>
@@ -553,15 +533,6 @@ namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
                     b.HasOne("MultiChannelAgent.Infrastructure.Persistence.Entities.InboxEntryEntity", null)
                         .WithMany()
                         .HasForeignKey("TurnId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-                });
-
-            modelBuilder.Entity("MultiChannelAgent.Infrastructure.Persistence.Entities.FoundryConversationBindingEntity", b =>
-                {
-                    b.HasOne("MultiChannelAgent.Infrastructure.Persistence.Entities.ParticipantEntity", null)
-                        .WithMany()
-                        .HasForeignKey("ParticipantId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
                 });

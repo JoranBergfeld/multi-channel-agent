@@ -14,6 +14,7 @@ public sealed class OutcomeEntityConfiguration : IEntityTypeConfiguration<Outcom
         builder.Property(e => e.Status).HasConversion<string>().HasMaxLength(32);
         builder.Property(e => e.Code).HasMaxLength(128).IsRequired();
         builder.Property(e => e.Summary).HasMaxLength(4 * 1024).IsRequired();
+        builder.Property(e => e.Payload).HasMaxLength(32 * 1024);
 
         // One Outcome per Turn: the foreign key also enforces that an Outcome can only be recorded
         // for a Turn that was durably accepted.
