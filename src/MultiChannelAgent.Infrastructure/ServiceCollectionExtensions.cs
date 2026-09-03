@@ -44,6 +44,7 @@ public static class ServiceCollectionExtensions
         services.AddScoped<IInventoryMembershipStore, SqlInventoryMembershipStore>();
         services.AddScoped<IInventoryOwnershipStore, SqlInventoryOwnershipStore>();
         services.AddScoped<IInventoryRecoveryStore, SqlInventoryRecoveryStore>();
+        services.AddScoped<IStockStore, SqlStockStore>();
 
         // Only ever constructed (and its TokenCredential only ever built/validated) the first time
         // something actually resolves ITenantMemberDirectory - which never happens for
@@ -66,6 +67,8 @@ public static class ServiceCollectionExtensions
         services.AddScoped<InventoryMembershipService>();
         services.AddScoped<InventoryOwnershipTransferService>();
         services.AddScoped<InventoryRecoveryService>();
+        services.AddScoped<StockListingService>();
+        services.AddScoped<StockFindingService>();
 
         return services;
     }
