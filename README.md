@@ -122,6 +122,27 @@ missing or misconfigured - there is no silent fallback:
 Every authenticated session is Secure, HttpOnly, SameSite=Lax. Every mutating endpoint additionally
 requires the `X-CSRF-TOKEN` header set to the `csrfToken` returned by `GET /api/session/bootstrap`.
 
+#### Tenant member directory (Microsoft Graph)
+
+Membership grants, ownership transfer, and orphan recovery all resolve their target through a single
+`ITenantMemberDirectory` seam. In `Entra` mode this is `GraphTenantMemberDirectory`, a thin adapter
+over Microsoft Graph v1.0 (`GET /users/{id}` and a `$filter`-based address lookup) authenticated with
+an app-only `https://graph.microsoft.com/.default` token:
+
+- By default it reuses `Authentication:Entra:TenantId`/`ClientId`/`ClientSecret` (already required
+  above) to build a `ClientSecretCredential`. Grant the app registration the Graph **application**
+  permission `User.Read.All` (admin-consented) so it can resolve any tenant member.
+- Set `Authentication:Entra:UseManagedIdentityForGraph=true` to use `DefaultAzureCredential` (managed
+  identity when deployed to Azure) instead - no client secret required in that case.
+- Credential construction and configuration validation are eager and local (no network call), but the
+  actual Graph token/HTTP call only ever happens the first time something resolves a tenant member -
+  never at startup, and never for `/health/live` or `/health/ready`.
+- A Graph outage or authorization failure (401/403/5xx/timeout/network error) surfaces as a visible
+  failure rather than silently treating every Inventory as orphaned; only a definitive 404, a
+  disabled/guest account, or an ambiguous address match is treated as "not found".
+- **`Test`** mode never contacts Graph at all - it substitutes `TestTenantMemberDirectory`, controlled
+  entirely through `/api/test/sign-in` and `/api/test/tenant-directory/register`.
+
 Then:
 
 - `GET /health/live` — liveness (no dependencies).

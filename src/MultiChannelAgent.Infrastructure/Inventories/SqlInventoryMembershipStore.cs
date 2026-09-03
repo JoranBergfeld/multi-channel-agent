@@ -64,7 +64,18 @@ public sealed class SqlInventoryMembershipStore(MultiChannelAgentDbContext db) :
             now);
         db.InventoryAudits.Add(InventoryAuditMapper.ToEntity(fact));
 
-        await db.SaveChangesAsync(cancellationToken);
+        try
+        {
+            await db.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            // A concurrent ownership transfer or recovery (or another grant/change request) already
+            // committed against this same Membership row between our read above and this save.
+            db.ChangeTracker.Clear();
+            return new MembershipGrantResult(MembershipGrantOutcome.ConcurrentModification);
+        }
+
         return new MembershipGrantResult(outcome);
     }
 
@@ -98,7 +109,20 @@ public sealed class SqlInventoryMembershipStore(MultiChannelAgentDbContext db) :
             AuditEventType.MembershipRemoved, AuditActorKind.Participant, requesterId.ToString(), inventoryId, targetParticipantId, "Removed", now);
         db.InventoryAudits.Add(InventoryAuditMapper.ToEntity(fact));
 
-        await db.SaveChangesAsync(cancellationToken);
+        try
+        {
+            await db.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            // A concurrent ownership transfer or recovery already committed against this same
+            // Membership row (or removed it outright) between our read above and this save - the
+            // audit fact and stale-selection removal staged above are discarded together with it,
+            // since nothing here has been persisted yet.
+            db.ChangeTracker.Clear();
+            return new MembershipRemovalResult(MembershipRemovalOutcome.ConcurrentModification);
+        }
+
         return new MembershipRemovalResult(MembershipRemovalOutcome.Removed);
     }
 

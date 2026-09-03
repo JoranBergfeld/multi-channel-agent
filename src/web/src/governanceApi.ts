@@ -5,14 +5,21 @@ export interface MemberView {
   role: string;
 }
 
-export type MembershipMutationOutcome = 'ok' | 'notFound' | 'forbidden' | 'invalid' | 'conflict';
+export type MembershipMutationOutcome = 'ok' | 'notFound' | 'forbidden' | 'invalid' | 'conflict' | 'transientFailure';
 
-function outcomeForStatus(status: number): MembershipMutationOutcome {
-  if (status === 404) return 'notFound';
-  if (status === 403) return 'forbidden';
-  if (status === 400) return 'invalid';
-  if (status === 409) return 'conflict';
-  return 'ok';
+/**
+ * Maps a mutation response to its typed outcome. The four explicitly-handled statuses come first;
+ * everything else is 'ok' only when the response itself reports success (2xx) - any other status
+ * (401, 429, 500, 502, 503, ...) is a 'transientFailure', never silently defaulted to 'ok'. A caller
+ * must show a failure and never clear inputs or claim success for anything but 'ok'.
+ */
+function outcomeForResponse(response: Response): MembershipMutationOutcome {
+  if (response.status === 404) return 'notFound';
+  if (response.status === 403) return 'forbidden';
+  if (response.status === 400) return 'invalid';
+  if (response.status === 409) return 'conflict';
+  if (response.ok) return 'ok';
+  return 'transientFailure';
 }
 
 /** Owner-only: lists the current membership roster for one Inventory. Never reachable by a non-Owner. */
@@ -47,7 +54,7 @@ export async function grantOrChangeRole(
     body: JSON.stringify({ targetIdentifier, role }),
   });
 
-  return outcomeForStatus(response.status);
+  return outcomeForResponse(response);
 }
 
 /** Owner-only: removes a non-Owner member. The current Owner can never be removed through this path. */
@@ -58,7 +65,7 @@ export async function removeMember(inventoryId: string, participantId: string, c
     headers: { 'X-CSRF-TOKEN': csrfToken },
   });
 
-  return outcomeForStatus(response.status);
+  return outcomeForResponse(response);
 }
 
 /**
@@ -74,5 +81,5 @@ export async function transferOwnership(inventoryId: string, targetIdentifier: s
     body: JSON.stringify({ targetIdentifier }),
   });
 
-  return outcomeForStatus(response.status);
+  return outcomeForResponse(response);
 }

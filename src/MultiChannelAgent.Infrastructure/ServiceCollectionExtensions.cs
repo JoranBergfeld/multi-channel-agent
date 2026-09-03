@@ -1,4 +1,6 @@
+using Azure.Core;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using MultiChannelAgent.Application.Authentication;
 using MultiChannelAgent.Application.Inventories;
@@ -12,7 +14,11 @@ namespace MultiChannelAgent.Infrastructure;
 
 public static class ServiceCollectionExtensions
 {
-    public static IServiceCollection AddMultiChannelAgentInfrastructure(this IServiceCollection services, string connectionString)
+    /// <summary>Microsoft Graph's base URL for the production tenant member directory adapter - <c>v1.0</c>, never <c>beta</c>.</summary>
+    private const string GraphBaseUrl = "https://graph.microsoft.com/v1.0/";
+
+    public static IServiceCollection AddMultiChannelAgentInfrastructure(
+        this IServiceCollection services, string connectionString, IConfiguration configuration)
     {
         services.AddDbContext<MultiChannelAgentDbContext>(options => options.UseSqlServer(
             connectionString,
@@ -38,7 +44,18 @@ public static class ServiceCollectionExtensions
         services.AddScoped<IInventoryMembershipStore, SqlInventoryMembershipStore>();
         services.AddScoped<IInventoryOwnershipStore, SqlInventoryOwnershipStore>();
         services.AddScoped<IInventoryRecoveryStore, SqlInventoryRecoveryStore>();
-        services.AddSingleton<ITenantMemberDirectory, PlaceholderTenantMemberDirectory>();
+
+        // Only ever constructed (and its TokenCredential only ever built/validated) the first time
+        // something actually resolves ITenantMemberDirectory - which never happens for
+        // Authentication:Provider=Test (Program.cs registers TestTenantMemberDirectory afterward, and
+        // ASP.NET Core resolves the last registration) nor for /health/live, so a Test-mode or
+        // liveness-only process never needs valid Graph configuration or network access. Scoped (not
+        // Singleton) to match the typed HttpClient's own recommended Transient-per-resolution
+        // lifetime, exactly like every other Scoped store above.
+        services.AddSingleton<TokenCredential>(_ => GraphCredentialFactory.Create(configuration));
+        services.AddHttpClient<GraphTenantMemberDirectory>(client => client.BaseAddress = new Uri(GraphBaseUrl));
+        services.AddScoped<ITenantMemberDirectory>(sp => sp.GetRequiredService<GraphTenantMemberDirectory>());
+
         services.AddScoped<IAuthTicketRepository, SqlAuthTicketRepository>();
         services.AddScoped<ParticipantSessionService>();
         services.AddScoped<InventoryCreationService>();

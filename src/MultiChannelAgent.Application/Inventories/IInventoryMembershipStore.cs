@@ -12,6 +12,9 @@ public enum MembershipGrantOutcome
     /// through this ordinary path can never touch the Owner; ownership transfer is the sole path.
     /// </summary>
     TargetIsOwner,
+
+    /// <summary>A concurrent ownership transfer or recovery committed against this same Membership row between this request's read and its write.</summary>
+    ConcurrentModification,
 }
 
 public sealed record MembershipGrantResult(MembershipGrantOutcome Outcome);
@@ -25,6 +28,9 @@ public enum MembershipRemovalOutcome
 
     /// <summary>The current Owner can never be removed through this ordinary path.</summary>
     TargetIsOwner,
+
+    /// <summary>A concurrent ownership transfer or recovery committed against this same Membership row between this request's read and its write.</summary>
+    ConcurrentModification,
 }
 
 public sealed record MembershipRemovalResult(MembershipRemovalOutcome Outcome);

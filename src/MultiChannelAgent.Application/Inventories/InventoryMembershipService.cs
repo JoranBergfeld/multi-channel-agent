@@ -25,6 +25,9 @@ public enum MembershipRequestOutcome
 
     /// <summary>Nothing to remove: the target holds no Membership on this Inventory.</summary>
     TargetNotAMember,
+
+    /// <summary>A concurrent ownership transfer or recovery committed against this same Membership row between this request's read and its write; retry.</summary>
+    ConcurrentModification,
 }
 
 public sealed record MembershipRequestResult(MembershipRequestOutcome Outcome);
@@ -92,6 +95,7 @@ public sealed class InventoryMembershipService(
             MembershipGrantOutcome.Granted => MembershipRequestOutcome.Granted,
             MembershipGrantOutcome.RoleChanged => MembershipRequestOutcome.RoleChanged,
             MembershipGrantOutcome.TargetIsOwner => MembershipRequestOutcome.TargetIsOwner,
+            MembershipGrantOutcome.ConcurrentModification => MembershipRequestOutcome.ConcurrentModification,
             _ => throw new InvalidOperationException($"Unhandled {nameof(MembershipGrantOutcome)}: {result.Outcome}"),
         });
     }
@@ -116,6 +120,7 @@ public sealed class InventoryMembershipService(
             MembershipRemovalOutcome.Removed => MembershipRequestOutcome.Removed,
             MembershipRemovalOutcome.NotAMember => MembershipRequestOutcome.TargetNotAMember,
             MembershipRemovalOutcome.TargetIsOwner => MembershipRequestOutcome.TargetIsOwner,
+            MembershipRemovalOutcome.ConcurrentModification => MembershipRequestOutcome.ConcurrentModification,
             _ => throw new InvalidOperationException($"Unhandled {nameof(MembershipRemovalOutcome)}: {result.Outcome}"),
         });
     }

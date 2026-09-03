@@ -149,6 +149,28 @@ public class InventoryMembershipServiceTests
     }
 
     [Fact]
+    public async Task Granting_propagates_a_concurrent_modification_outcome_from_the_store_as_a_typed_conflict()
+    {
+        var f = CreateFixture();
+        f.MembershipStore.ForceConcurrentModificationOnce = true;
+
+        var result = await f.Service.GrantOrChangeAsync(Owner, f.InventoryId, Recipient.ToString(), MembershipRole.Viewer, Now, CancellationToken.None);
+
+        Assert.Equal(MembershipRequestOutcome.ConcurrentModification, result.Outcome);
+    }
+
+    [Fact]
+    public async Task Removing_propagates_a_concurrent_modification_outcome_from_the_store_as_a_typed_conflict()
+    {
+        var f = CreateFixture();
+        f.MembershipStore.ForceConcurrentModificationOnce = true;
+
+        var result = await f.Service.RemoveAsync(Owner, f.InventoryId, Editor, Now, CancellationToken.None);
+
+        Assert.Equal(MembershipRequestOutcome.ConcurrentModification, result.Outcome);
+    }
+
+    [Fact]
     public async Task ListMembers_is_owner_only_and_a_non_owner_is_forbidden()
     {
         var f = CreateFixture();

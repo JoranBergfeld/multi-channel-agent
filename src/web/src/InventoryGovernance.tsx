@@ -1,11 +1,21 @@
 import { useCallback, useEffect, useState } from 'react';
-import { grantOrChangeRole, listMembers, removeMember, transferOwnership, type MemberView } from './governanceApi';
+import { grantOrChangeRole, listMembers, removeMember, transferOwnership, type MemberView, type MembershipMutationOutcome } from './governanceApi';
 
 interface Props {
   inventoryId: string;
   csrfToken: string;
   /** Refreshes the caller's own session bootstrap - needed after a transfer changes the caller's own role. */
   onOwnershipChanged: () => void;
+}
+
+/** A short, human-readable description for every non-'ok' outcome, used in the error banner below. */
+function describeFailure(outcome: Exclude<MembershipMutationOutcome, 'ok'>): string {
+  switch (outcome) {
+    case 'transientFailure':
+      return 'a temporary server error; please try again';
+    default:
+      return outcome;
+  }
 }
 
 /**
@@ -41,7 +51,7 @@ function InventoryGovernance({ inventoryId, csrfToken, onOwnershipChanged }: Pro
     try {
       const outcome = await grantOrChangeRole(inventoryId, targetIdentifier, role, csrfToken);
       if (outcome !== 'ok') {
-        setError(`Granting failed: ${outcome}.`);
+        setError(`Granting failed: ${describeFailure(outcome)}.`);
         return;
       }
       setTargetIdentifier('');
@@ -57,7 +67,7 @@ function InventoryGovernance({ inventoryId, csrfToken, onOwnershipChanged }: Pro
     try {
       const outcome = await removeMember(inventoryId, participantId, csrfToken);
       if (outcome !== 'ok') {
-        setError(`Removing failed: ${outcome}.`);
+        setError(`Removing failed: ${describeFailure(outcome)}.`);
         return;
       }
       await loadMembers();
@@ -73,7 +83,7 @@ function InventoryGovernance({ inventoryId, csrfToken, onOwnershipChanged }: Pro
     try {
       const outcome = await transferOwnership(inventoryId, transferTarget, csrfToken);
       if (outcome !== 'ok') {
-        setError(`Transferring ownership failed: ${outcome}.`);
+        setError(`Transferring ownership failed: ${describeFailure(outcome)}.`);
         return;
       }
       setTransferTarget('');

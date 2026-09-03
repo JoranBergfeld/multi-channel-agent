@@ -16,6 +16,7 @@ public class InventoryRecoveryServiceTests
         InventoryRecoveryService Service,
         InMemoryInventoryStore InventoryStore,
         InMemoryInventoryRecoveryStore RecoveryStore,
+        InMemoryTenantMemberDirectory Directory,
         InventoryId HealthyInventoryId,
         InventoryId OrphanedInventoryId);
 
@@ -46,7 +47,7 @@ public class InventoryRecoveryServiceTests
         inventoryStore.AddInventoryRecord(Inventory.Create("Healthy Warehouse", HealthyOwner, "seed-healthy", Now) with { Id = healthyInventoryId });
         inventoryStore.AddInventoryRecord(Inventory.Create("Orphaned Warehouse", OrphanedOwner, "seed-orphaned", Now) with { Id = orphanedInventoryId });
 
-        return new Fixture(service, inventoryStore, recoveryStore, healthyInventoryId, orphanedInventoryId);
+        return new Fixture(service, inventoryStore, recoveryStore, directory, healthyInventoryId, orphanedInventoryId);
     }
 
     [Fact]
@@ -67,6 +68,25 @@ public class InventoryRecoveryServiceTests
         var page = await f.Service.ListOrphanedAsync(Now, CancellationToken.None);
 
         Assert.Contains(page.Items, i => i.InventoryId == f.OrphanedInventoryId.ToString());
+    }
+
+    [Fact]
+    public async Task ListOrphaned_propagates_a_tenant_directory_outage_instead_of_swallowing_it_as_orphaned()
+    {
+        var f = CreateFixture();
+        f.Directory.ThrowUnavailable = true;
+
+        await Assert.ThrowsAsync<TenantDirectoryUnavailableException>(() => f.Service.ListOrphanedAsync(Now, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Recovering_propagates_a_tenant_directory_outage_instead_of_treating_the_owner_as_orphaned()
+    {
+        var f = CreateFixture();
+        f.Directory.ThrowUnavailable = true;
+
+        await Assert.ThrowsAsync<TenantDirectoryUnavailableException>(
+            () => f.Service.RecoverAsync(ActorId, f.HealthyInventoryId, Recovered.ToString(), Now, CancellationToken.None));
     }
 
     [Fact]

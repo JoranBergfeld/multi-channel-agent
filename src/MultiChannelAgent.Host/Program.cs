@@ -15,7 +15,7 @@ var builder = WebApplication.CreateBuilder(args);
 var connectionString = builder.Configuration.GetConnectionString("MultiChannelAgent")
     ?? throw new InvalidOperationException("Missing required 'ConnectionStrings:MultiChannelAgent' configuration value.");
 
-builder.Services.AddMultiChannelAgentInfrastructure(connectionString);
+builder.Services.AddMultiChannelAgentInfrastructure(connectionString, builder.Configuration);
 
 var authenticationProvider = builder.Configuration["Authentication:Provider"] ?? "Entra";
 var challengeScheme = string.Equals(authenticationProvider, "Test", StringComparison.OrdinalIgnoreCase)
@@ -24,9 +24,9 @@ var challengeScheme = string.Equals(authenticationProvider, "Test", StringCompar
 
 if (challengeScheme == ProviderSchemes.Test)
 {
-    // Overrides the production placeholder directory adapter with a deterministic double tests
-    // control entirely through HTTP (see TestAuthEndpoints) - never exercising the real,
-    // not-yet-wired Microsoft Graph boundary outside Production.
+    // Overrides the production Microsoft Graph-backed directory adapter with a deterministic double
+    // tests control entirely through HTTP (see TestAuthEndpoints) - never exercising the real
+    // Microsoft Graph boundary (or requiring Graph credentials/network access) outside Production.
     builder.Services.AddSingleton<ITenantMemberDirectory, TestTenantMemberDirectory>();
 }
 

@@ -85,6 +85,8 @@ public static class InventoryGovernanceEndpoints
                 }),
                 MembershipRequestOutcome.TargetIsOwner => Results.Conflict(
                     new { message = "The target already holds ownership; use ownership transfer instead." }),
+                MembershipRequestOutcome.ConcurrentModification => Results.Conflict(
+                    new { message = "This Inventory's membership changed concurrently; please retry." }),
                 _ => throw new InvalidOperationException($"Unhandled {nameof(MembershipRequestOutcome)}: {result.Outcome}"),
             };
         }).AddEndpointFilter<AntiforgeryEndpointFilter>();
@@ -108,6 +110,8 @@ public static class InventoryGovernanceEndpoints
                 MembershipRequestOutcome.TargetNotAMember => Results.NotFound(),
                 MembershipRequestOutcome.TargetIsOwner => Results.Conflict(
                     new { message = "The current Owner cannot be removed; use ownership transfer instead." }),
+                MembershipRequestOutcome.ConcurrentModification => Results.Conflict(
+                    new { message = "This Inventory's membership changed concurrently; please retry." }),
                 _ => throw new InvalidOperationException($"Unhandled {nameof(MembershipRequestOutcome)}: {result.Outcome}"),
             };
         }).AddEndpointFilter<AntiforgeryEndpointFilter>();

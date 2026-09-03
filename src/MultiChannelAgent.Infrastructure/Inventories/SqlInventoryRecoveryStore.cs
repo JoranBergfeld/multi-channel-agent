@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using Microsoft.EntityFrameworkCore;
 using MultiChannelAgent.Application.Inventories;
 using MultiChannelAgent.Domain.Inventories;
@@ -18,6 +19,9 @@ namespace MultiChannelAgent.Infrastructure.Inventories;
 /// </summary>
 public sealed class SqlInventoryRecoveryStore(MultiChannelAgentDbContext db, ITenantMemberDirectory directory) : IInventoryRecoveryStore
 {
+    /// <summary>Caps how many directory resolutions run at once during <see cref="ListOrphanedAsync"/> - concurrent enough to avoid an O(n) sequential round trip per distinct Owner, bounded enough to never hammer Microsoft Graph.</summary>
+    private const int MaxConcurrentDirectoryResolutions = 8;
+
     public async Task<OrphanedInventoriesPage> ListOrphanedAsync(int maxResults, DateTimeOffset now, CancellationToken cancellationToken)
     {
         var ownerRows = await (
@@ -29,13 +33,7 @@ public sealed class SqlInventoryRecoveryStore(MultiChannelAgentDbContext db, ITe
         ).ToListAsync(cancellationToken);
 
         var distinctOwnerIds = ownerRows.Select(r => r.OwnerId).Distinct().ToList();
-        var isActiveByOwnerId = new Dictionary<Guid, bool>();
-        foreach (var ownerId in distinctOwnerIds)
-        {
-            var identifier = TenantMemberIdentifier.Parse(ownerId.ToString())!;
-            var resolution = await directory.ResolveAsync(identifier, cancellationToken);
-            isActiveByOwnerId[ownerId] = resolution is not null;
-        }
+        var isActiveByOwnerId = await ResolveActiveStatusBoundedAsync(distinctOwnerIds, cancellationToken);
 
         var trackedOwners = await db.Participants.Where(p => distinctOwnerIds.Contains(p.Id)).ToListAsync(cancellationToken);
         var changed = false;
@@ -60,6 +58,41 @@ public sealed class SqlInventoryRecoveryStore(MultiChannelAgentDbContext db, ITe
             .ToList();
 
         return new OrphanedInventoriesPage(orphaned.Count, orphaned.Take(maxResults).ToList());
+    }
+
+    /// <summary>
+    /// Resolves every distinct Owner's active status concurrently, bounded by
+    /// <see cref="MaxConcurrentDirectoryResolutions"/> - avoiding an O(n) sequential round trip per
+    /// Owner without unbounded fan-out against Microsoft Graph. A directory failure for any single
+    /// Owner (a typed <see cref="TenantDirectoryUnavailableException"/> - never silently treated as
+    /// "not found") propagates out of the awaited <see cref="Task.WhenAll(Task[])"/> exactly as a
+    /// sequential loop would: the whole listing call fails outright, and no Owner's persisted
+    /// <see cref="ParticipantEntity.IsActive"/> flag is touched for this call, since that only happens
+    /// afterward and only if this method returns successfully.
+    /// </summary>
+    private async Task<Dictionary<Guid, bool>> ResolveActiveStatusBoundedAsync(IReadOnlyList<Guid> ownerIds, CancellationToken cancellationToken)
+    {
+        using var concurrencyLimiter = new SemaphoreSlim(MaxConcurrentDirectoryResolutions);
+        var isActiveByOwnerId = new ConcurrentDictionary<Guid, bool>();
+
+        var resolutions = ownerIds.Select(async ownerId =>
+        {
+            await concurrencyLimiter.WaitAsync(cancellationToken);
+            try
+            {
+                var identifier = TenantMemberIdentifier.Parse(ownerId.ToString())!;
+                var resolution = await directory.ResolveAsync(identifier, cancellationToken);
+                isActiveByOwnerId[ownerId] = resolution is not null;
+            }
+            finally
+            {
+                concurrencyLimiter.Release();
+            }
+        }).ToList();
+
+        await Task.WhenAll(resolutions);
+
+        return new Dictionary<Guid, bool>(isActiveByOwnerId);
     }
 
     public async Task<RecoveryResult> RecoverAsync(
