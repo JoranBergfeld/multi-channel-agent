@@ -159,11 +159,16 @@ public sealed class StockListingService(
         _ => "invalid_query",
     };
 
+    /// <summary>
+    /// The one place a Stock row is shaped for the application boundary - List and Find both use it -
+    /// so an amount is always rendered through <see cref="Quantity.ToInvariantText"/> and can never
+    /// reach a caller carrying whatever scale a particular database stored it at.
+    /// </summary>
     internal static StockRowView ToRowView(StockEntrySummary row) => new(
         row.Id.ToString(),
         row.Name,
         row.UnitCanonicalName,
         row.LocationName,
         row.Note,
-        row.Quantity.Value.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        row.Quantity.ToInvariantText());
 }

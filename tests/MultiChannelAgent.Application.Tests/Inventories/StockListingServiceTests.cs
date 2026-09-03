@@ -1,3 +1,4 @@
+using System.Globalization;
 using MultiChannelAgent.Application.Inventories;
 using MultiChannelAgent.Application.Tests.TestDoubles.Inventories;
 using MultiChannelAgent.Domain.Inventories;
@@ -167,6 +168,22 @@ public class StockListingServiceTests
             Viewer, SomeInventory, Request(), channelConversationId: null, Now, CancellationToken.None);
 
         Assert.Equal("12.375", result.View!.Rows[0].Quantity);
+    }
+
+    // A row read back from SQL Server carries its column's scale (decimal(28,10)), so the amount
+    // arrives as 12.0000000000 where another provider hands back 12. What a Participant sees must not
+    // depend on that.
+    [Fact]
+    public async Task Quantity_text_does_not_depend_on_the_scale_the_database_stored_it_at()
+    {
+        var (service, stockStore, _) = CreateService();
+        stockStore.Add(SomeInventory, Row("Bolts", decimal.Parse("12.0000000000", CultureInfo.InvariantCulture), "10000000"));
+        stockStore.Add(SomeInventory, Row("Nuts", decimal.Parse("0.3750000000", CultureInfo.InvariantCulture), "20000000"));
+
+        var result = await service.ListAsync(
+            Viewer, SomeInventory, Request(), channelConversationId: null, Now, CancellationToken.None);
+
+        Assert.Equal(["12", "0.375"], result.View!.Rows.Select(row => row.Quantity));
     }
     private static StockEntrySummary PlacedRow(string name, decimal quantity, string idHex, UnitId unitId, string unitName, LocationId? locationId, string? locationName) => new(
         new StockEntryId(Guid.Parse($"{idHex}-0000-0000-0000-000000000000")),

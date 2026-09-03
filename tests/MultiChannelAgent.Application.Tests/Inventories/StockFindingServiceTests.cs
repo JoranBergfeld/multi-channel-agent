@@ -1,3 +1,4 @@
+using System.Globalization;
 using MultiChannelAgent.Application.Inventories;
 using MultiChannelAgent.Application.Tests.TestDoubles.Inventories;
 using MultiChannelAgent.Domain.Inventories;
@@ -292,5 +293,20 @@ public class StockFindingServiceTests
 
         Assert.Equal(StockFindResultKind.Completed, result.Kind);
         Assert.Equal("Bolts", Assert.Single(result.View!.Candidates).Name);
+    }
+    // Find shapes its candidates through the same canonical path, so the amount a Participant is
+    // shown never depends on the scale the database stored it at.
+    [Fact]
+    public async Task Candidate_quantity_text_does_not_depend_on_the_scale_the_database_stored_it_at()
+    {
+        var (service, stockStore, _) = CreateService();
+        stockStore.Add(SomeInventory, Row("Bolts", "10000000") with
+        {
+            Quantity = Quantity.Create(decimal.Parse("12.0000000000", CultureInfo.InvariantCulture)),
+        });
+
+        var result = await service.FindAsync(Viewer, SomeInventory, Request("Bolts"), null, Now, CancellationToken.None);
+
+        Assert.Equal("12", Assert.Single(result.View!.Candidates).Quantity);
     }
 }
