@@ -28,8 +28,13 @@ namespace MultiChannelAgent.IntegrationTests.Inventories;
 /// </summary>
 public sealed class SqlStockProposalRetireLockOrderTests : SqlIntegrationTestBase
 {
-    /// <summary>Long enough that the other side has certainly reached its own gate, short enough to keep the suite quick.</summary>
-    private static readonly TimeSpan GateTimeout = TimeSpan.FromSeconds(5);
+    /// <summary>
+    /// The bound on waiting for the other side to reach its own gate. It only ever has to cover a
+    /// single statement, so it is short. When the shared order is right, one side is blocked outright
+    /// at its first lock and can never reach its gate at all - no wait would help, and this is what
+    /// keeps the test moving instead of hanging.
+    /// </summary>
+    private static readonly TimeSpan GateTimeout = TimeSpan.FromSeconds(2);
 
     private static readonly DateTimeOffset Now = new(2026, 9, 4, 10, 0, 0, TimeSpan.Zero);
 
@@ -131,6 +136,147 @@ public sealed class SqlStockProposalRetireLockOrderTests : SqlIntegrationTestBas
 
         // Whichever way it went, the one state that must be unreachable is unreachable.
         Assert.True(unit.RetiredAt is null || stockCount == 0);
+    }
+
+    [SkippableFact]
+    public async Task Confirming_a_reference_proposal_while_the_same_reference_is_retired_serializes_instead_of_deadlocking()
+    {
+        Skip.IfNot(DockerAvailable, "Docker is not available in this environment; skipping the SQL-backed lock order proof.");
+
+        var (inventoryId, participantId) = await SeedAsync();
+        var boxId = await SeedUnitAsync(inventoryId, "Cardboard Box");
+        var unitStamp = await UnitStampAsync(boxId);
+
+        // Two pending reference proposals over the same Unit, each in its own conversation so both may
+        // be pending at once, and each consuming its own proposal - which is the lock this exercises.
+        var renameProposal = await StoreReferenceProposalAsync(
+            inventoryId, participantId, "web:profile-rename", RenameChange(boxId), unitStamp);
+        var retireProposal = await StoreReferenceProposalAsync(
+            inventoryId, participantId, "web:profile-retire", RetireChange(boxId), unitStamp);
+
+        // The rename opens its gate once it holds its own proposal; the Retire opens its gate once it
+        // holds the Unit. Under the old order both open - the rename holding its proposal and waiting
+        // on the Unit, the Retire holding the Unit and about to settle that very proposal - and the
+        // pair cycles. Reference proposals are indexed exactly like stock ones, so the Retire's
+        // invalidation reaches for the rename's proposal and finds it held.
+        using var renameHoldsItsProposal = new SemaphoreSlim(0, 1);
+        using var retireHoldsTheUnit = new SemaphoreSlim(0, 1);
+
+        Task<ReferenceAdministrationStoreOutcome> ApplyAsync(
+            ConfirmationProposal proposal, string gateTable, SemaphoreSlim reached, SemaphoreSlim other) =>
+            Task.Run(async () =>
+            {
+                using var db = GatedContext(new GateInterceptor(gateTable, reached, other, GateTimeout));
+
+                var result = await new SqlReferenceAdministrationStore(db, new SqlConfirmationProposalStore(db)).ApplyAsync(
+                    ReferenceCommand(inventoryId, participantId, proposal, unitStamp), CancellationToken.None);
+
+                return result.Outcome;
+            });
+
+        var rename = ApplyAsync(renameProposal, "[ConfirmationProposals]", renameHoldsItsProposal, retireHoldsTheUnit);
+        var retire = ApplyAsync(retireProposal, "[Units]", retireHoldsTheUnit, renameHoldsItsProposal);
+
+        // Neither may fault. This cycle is avoidable, so a deadlock here is a failure, not a retry.
+        var renameOutcome = await rename;
+        var retireOutcome = await retire;
+
+        using var scope = Factory!.Services.CreateScope();
+        var db = Db(scope);
+        var unit = await db.Units.AsNoTracking().SingleAsync(u => u.Id == boxId);
+
+        // Exactly one won, and the loser answered with a typed conflict rather than a fault.
+        Assert.True(
+            (renameOutcome, retireOutcome) is (ReferenceAdministrationStoreOutcome.Applied, ReferenceAdministrationStoreOutcome.Conflict)
+                or (ReferenceAdministrationStoreOutcome.Conflict, ReferenceAdministrationStoreOutcome.Applied),
+            $"Expected exactly one winner but saw rename={renameOutcome}, retire={retireOutcome}.");
+
+        var ledgers = await db.ReferenceOperations.AsNoTracking().CountAsync(o => o.InventoryId == inventoryId);
+        Assert.Equal(1, ledgers);
+
+        if (renameOutcome == ReferenceAdministrationStoreOutcome.Applied)
+        {
+            Assert.Equal("Carton", unit.CanonicalName);
+            Assert.Null(unit.RetiredAt);
+            await AssertProposalAsync(db, renameProposal, ProposalStatus.Confirmed);
+
+            // The Retire never ran, so its own proposal is untouched and still awaiting its Participant.
+            await AssertProposalAsync(db, retireProposal, ProposalStatus.Pending);
+            Assert.Equal(1, await AuditCountAsync(db, inventoryId, AuditEventType.UnitRenamed));
+        }
+        else
+        {
+            Assert.NotNull(unit.RetiredAt);
+            Assert.Equal("Cardboard Box", unit.CanonicalName);
+            await AssertProposalAsync(db, retireProposal, ProposalStatus.Confirmed);
+
+            // Settled by the Retire's own invalidation, inside the very transaction that retired it.
+            await AssertProposalAsync(db, renameProposal, ProposalStatus.Conflicted);
+            Assert.Equal(1, await AuditCountAsync(db, inventoryId, AuditEventType.UnitRetired));
+            Assert.Equal(0, await AuditCountAsync(db, inventoryId, AuditEventType.UnitRenamed));
+        }
+    }
+
+    private static async Task AssertProposalAsync(
+        MultiChannelAgentDbContext db, ConfirmationProposal proposal, ProposalStatus expected)
+    {
+        var row = await db.ConfirmationProposals.AsNoTracking().SingleAsync(p => p.ProposalId == proposal.Id.Value);
+
+        Assert.Equal(expected.ToString(), row.Status);
+    }
+
+    private static async Task<int> AuditCountAsync(MultiChannelAgentDbContext db, Guid inventoryId, AuditEventType eventType) =>
+        await db.InventoryAudits.AsNoTracking()
+            .CountAsync(a => a.InventoryId == inventoryId && a.EventType == eventType.ToString());
+
+    private static ProposedReferenceChange RenameChange(Guid unitId) => new()
+    {
+        Order = 1,
+        Kind = ReferenceChangeKind.RenameUnit,
+        Target = new ProposedReferenceState(ReferenceKind.Unit, unitId, "Cardboard Box", "cardboard box", Reserved: false),
+        NewName = "Carton",
+        NewNormalizedName = "carton",
+    };
+
+    private static ProposedReferenceChange RetireChange(Guid unitId) => new()
+    {
+        Order = 1,
+        Kind = ReferenceChangeKind.RetireUnit,
+        Target = new ProposedReferenceState(ReferenceKind.Unit, unitId, "Cardboard Box", "cardboard box", Reserved: false),
+    };
+
+    private static ReferenceChangeSetCommand ReferenceCommand(
+        Guid inventoryId, Guid participantId, ConfirmationProposal proposal, Guid unitStamp) => new()
+        {
+            OperationId = proposal.ReferenceExecutionOperationId,
+            InventoryId = new InventoryId(inventoryId),
+            ActorId = new ParticipantId(participantId),
+            ConfirmedByTurnId = TurnId.NewId(),
+            ConsumesProposalId = proposal.Id,
+            Changes = proposal.ReferenceChanges,
+            ExpectedVersions = proposal.ExpectedReferenceVersions,
+            ExpectedTermAbsences = proposal.ExpectedTermAbsences,
+            Now = Now,
+        };
+
+    private async Task<ConfirmationProposal> StoreReferenceProposalAsync(
+        Guid inventoryId, Guid participantId, string conversationId, ProposedReferenceChange change, Guid unitStamp)
+    {
+        var proposal = ConfirmationProposal.CreateForReferences(
+            ConfirmationToken.HashOf(ConfirmationToken.Issue()),
+            new ParticipantId(participantId),
+            conversationId,
+            new InventoryId(inventoryId),
+            TurnId.NewId(),
+            [change],
+            [new ExpectedReferenceVersion(ReferenceKind.Unit, change.Target.ReferenceId, unitStamp)],
+            [],
+            Now);
+
+        using var scope = Factory!.Services.CreateScope();
+        await new SqlConfirmationProposalStore(Db(scope)).StoreAsync(proposal, Now, CancellationToken.None);
+
+        return proposal;
     }
 
     /// <summary>
