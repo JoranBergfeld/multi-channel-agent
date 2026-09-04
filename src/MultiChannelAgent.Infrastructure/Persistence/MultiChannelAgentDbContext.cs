@@ -54,6 +54,12 @@ public sealed class MultiChannelAgentDbContext(DbContextOptions<MultiChannelAgen
 
     public DbSet<StockChangeSetEffectEntity> StockChangeSetEffects => Set<StockChangeSetEffectEntity>();
 
+    public DbSet<ImportProposalEntity> ImportProposals => Set<ImportProposalEntity>();
+
+    public DbSet<ImportUploadEntity> ImportUploads => Set<ImportUploadEntity>();
+
+    public DbSet<ImportOperationEntity> ImportOperations => Set<ImportOperationEntity>();
+
     public DbSet<FoundryConversationBindingEntity> FoundryConversationBindings => Set<FoundryConversationBindingEntity>();
 
     /// <summary>
@@ -83,7 +89,7 @@ public sealed class MultiChannelAgentDbContext(DbContextOptions<MultiChannelAgen
     /// <see cref="string.CompareOrdinal"/>. SQLite already compares text binarily by default, so it
     /// needs nothing here.
     /// </summary>
-    private const string OrdinalSqlServerCollation = "Latin1_General_100_BIN2";
+    internal const string OrdinalSqlServerCollation = "Latin1_General_100_BIN2";
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {

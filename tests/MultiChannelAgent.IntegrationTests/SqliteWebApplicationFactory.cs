@@ -26,15 +26,23 @@ public sealed class SqliteWebApplicationFactory : WebApplicationFactory<Program>
     private readonly SqliteConnection _keepAliveConnection;
     private readonly string _connectionString = $"DataSource=file:{Guid.NewGuid()}?mode=memory&cache=shared";
     private readonly TimeProvider? _timeProvider;
+    private readonly Action<IServiceCollection>? _configureTestServices;
 
     /// <summary>
     /// <paramref name="timeProvider"/> lets a scenario advance time deliberately - the ten-minute
     /// confirmation lifetime is behavior, and a test that proved it by sleeping would be both slow
     /// and flaky.
+    ///
+    /// <paramref name="configureTestServices"/> lets one scenario add what the test server itself is
+    /// missing rather than what the Host is - see <see cref="ServerRequestSizeLimitExtensions"/>, which
+    /// supplies the request-body-size feature <c>Microsoft.AspNetCore.TestHost</c> does not implement.
     /// </summary>
-    public SqliteWebApplicationFactory(TimeProvider? timeProvider = null)
+    public SqliteWebApplicationFactory(
+        TimeProvider? timeProvider = null,
+        Action<IServiceCollection>? configureTestServices = null)
     {
         _timeProvider = timeProvider;
+        _configureTestServices = configureTestServices;
         _keepAliveConnection = new SqliteConnection(_connectionString);
         _keepAliveConnection.Open();
     }
@@ -76,6 +84,8 @@ public sealed class SqliteWebApplicationFactory : WebApplicationFactory<Program>
             {
                 services.AddSingleton(_timeProvider);
             }
+
+            _configureTestServices?.Invoke(services);
         });
     }
 

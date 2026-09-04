@@ -20,9 +20,10 @@ public sealed class InventoryAuditEntityConfiguration : IEntityTypeConfiguration
         // fact independent of later changes to (or eventual retirement of) either referenced row.
         builder.HasIndex(e => e.InventoryId);
 
-        // Supports a future 90-day-expiry sweeping job; not exercised by this ticket, but the access
-        // pattern (find rows past their expiry) is common enough to index up front, matching
-        // AuthTicketEntityConfiguration's ExpiresAtUtc index.
-        builder.HasIndex(e => e.ExpiresAtUtc);
+        // The ninety-day retention sweep finds rows by the age of the fact itself, so the index that
+        // serves it is on the mirrored ticks the sweep actually compares - not on ExpiresAtUtc, which
+        // was indexed for this job before the job existed and which no provider can be relied on to
+        // compare as a DateTimeOffset.
+        builder.HasIndex(e => e.OccurredAtUtcTicks);
     }
 }

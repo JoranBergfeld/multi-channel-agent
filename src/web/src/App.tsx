@@ -7,6 +7,7 @@ import {
   type BootstrapResponse,
   type InventoryView,
 } from './sessionApi';
+import InitialImport from './InitialImport';
 import InventoryGovernance from './InventoryGovernance';
 import ReferenceWorkspace from './ReferenceWorkspace';
 import StockWorkspace from './StockWorkspace';
@@ -213,6 +214,21 @@ function App() {
 
       {bootstrap.activeInventoryId && (
         <ReferenceWorkspace inventoryId={bootstrap.activeInventoryId} refetchToken={stockRefetchToken} />
+      )}
+
+      {/*
+        Keyed by the Active Inventory so switching Inventories starts the workflow over rather than
+        carrying a preview of one Inventory's file into another: an import proposal is bound to the
+        Inventory that issued it, so none of this component's state means anything anywhere else.
+      */}
+      {bootstrap.activeInventoryId && (
+        <InitialImport
+          key={bootstrap.activeInventoryId}
+          inventoryId={bootstrap.activeInventoryId}
+          csrfToken={session.csrfToken}
+          refetchToken={stockRefetchToken}
+          onStockMayHaveChanged={() => setStockRefetchToken((token) => token + 1)}
+        />
       )}
     </main>
   );

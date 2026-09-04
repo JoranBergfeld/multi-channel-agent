@@ -45,6 +45,7 @@ builder.Services.AddHostedService<TurnProcessingWorker>();
 builder.Services.AddHostedService<DeliveryDispatchWorker>();
 builder.Services.AddHostedService<OutcomePayloadCleanupWorker>();
 builder.Services.AddHostedService<ConfirmationProposalCleanupWorker>();
+builder.Services.AddHostedService<ImportCleanupWorker>();
 
 builder.Services
     .AddHealthChecks()
@@ -73,6 +74,7 @@ app.MapInventoryGovernanceEndpoints();
 app.MapInventoryRecoveryEndpoints();
 app.MapStockEndpoints();
 app.MapReferenceEndpoints();
+app.MapImportEndpoints();
 app.MapAuthEndpoints(challengeScheme);
 
 if (challengeScheme == ProviderSchemes.Test)

@@ -25,5 +25,14 @@ public sealed class InventoryAuditEntity
 
     public DateTimeOffset OccurredAtUtc { get; set; }
 
+    /// <summary>
+    /// <see cref="OccurredAtUtc"/> as UTC ticks. Retention sweeps compare and order on this rather
+    /// than on the <see cref="DateTimeOffset"/> itself, because that comparison is not translatable
+    /// on every relational provider the tests run against - and a retention rule that cannot be
+    /// executed everywhere it is claimed is not a retention rule. Required so no writer can leave it
+    /// at zero, which would make a fact recorded today look older than every other one forever.
+    /// </summary>
+    public required long OccurredAtUtcTicks { get; set; }
+
     public DateTimeOffset ExpiresAtUtc { get; set; }
 }

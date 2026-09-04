@@ -3,6 +3,7 @@ using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using MultiChannelAgent.Infrastructure.Persistence;
 
@@ -11,9 +12,11 @@ using MultiChannelAgent.Infrastructure.Persistence;
 namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
 {
     [DbContext(typeof(MultiChannelAgentDbContext))]
-    partial class MultiChannelAgentDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260904111714_AddInitialImport")]
+    partial class AddInitialImport
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -502,9 +505,6 @@ namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
                     b.Property<DateTimeOffset>("OccurredAtUtc")
                         .HasColumnType("datetimeoffset");
 
-                    b.Property<long>("OccurredAtUtcTicks")
-                        .HasColumnType("bigint");
-
                     b.Property<string>("OutcomeCode")
                         .IsRequired()
                         .HasMaxLength(64)
@@ -515,9 +515,9 @@ namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
 
                     b.HasKey("Id");
 
-                    b.HasIndex("InventoryId");
+                    b.HasIndex("ExpiresAtUtc");
 
-                    b.HasIndex("OccurredAtUtcTicks");
+                    b.HasIndex("InventoryId");
 
                     b.ToTable("InventoryAudits", (string)null);
                 });

@@ -18,6 +18,12 @@ public sealed class InMemoryReferenceCatalogStore : IReferenceCatalogStore
     private readonly List<LocationRow> _locations = [];
     private readonly Dictionary<(ReferenceKind, Guid), int> _stockReferences = [];
 
+    /// <summary>
+    /// How many times a suggestion lookup was performed, so a caller's claim that unknown-reference
+    /// suggestions are cached per distinct term can be proven rather than trusted.
+    /// </summary>
+    public int SuggestionCount { get; private set; }
+
     public UnitId AddUnit(
         InventoryId inventoryId, string canonicalName, string[] aliases, bool isReserved = false, bool retired = false)
     {
@@ -113,6 +119,8 @@ public sealed class InMemoryReferenceCatalogStore : IReferenceCatalogStore
     public Task<IReadOnlyList<string>> SuggestAsync(
         InventoryId inventoryId, ReferenceKind kind, string reference, CancellationToken cancellationToken)
     {
+        SuggestionCount++;
+
         var normalized = NameNormalization.Normalize(reference);
 
         var candidates = kind == ReferenceKind.Unit
