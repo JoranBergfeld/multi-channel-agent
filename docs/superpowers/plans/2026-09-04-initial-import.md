@@ -259,7 +259,7 @@ Denials reuse the shipped `AccessDenied` with `Denied:NotAMember` or `Denied:Ins
 
 ### 13. Upload transport
 
-`POST /api/inventories/{id}/import/validate` accepts `multipart/form-data` with exactly one part named `file`. The endpoint sets a per-route request body limit of 2 MiB + 64 KiB, so an oversized upload is refused by the server before it is buffered, and `CsvImportDocument.Read` re-checks the decoded byte count so the Domain rule stands on its own. The part is read into a pooled buffer of at most that size; nothing is written to disk.
+`POST /api/inventories/{id}/import/validate` accepts `multipart/form-data` with exactly one part named `file`. The endpoint sets a per-route request body limit of 2 MiB + 64 KiB, so an oversized upload is refused by the server before it is buffered, and `CsvImportDocument.Read` re-checks the decoded byte count so the Domain rule stands on its own. Route-local form options set both the multipart body limit and the in-memory buffering threshold to that same request bound. ASP.NET Core therefore either buffers the accepted request in memory or refuses it before its file section can spill to a temporary file; nothing is written to disk.
 
 The 64 KiB is transport framing margin, not import capacity. Multipart part headers and boundaries cost a few hundred bytes, but a body forwarded through an intermediary that re-chunks it arrives framed in ways this route never sees the shape of, and a margin measured in single kibibytes would turn a perfectly valid maximum-sized import into a 413 somewhere in the middle. What may be imported stays exactly 2 MiB, checked independently against the file part's own length, so raising the framing allowance never raises the file bound.
 
@@ -5978,6 +5978,9 @@ git commit -m "feat(inventories): sweep expired imports, their files, and audits
 - Create: `src/MultiChannelAgent.Host/Endpoints/ImportEndpoints.cs`
 - Modify: `src/MultiChannelAgent.Host/Program.cs`
 - Test: `tests/MultiChannelAgent.IntegrationTests/Inventories/ImportEndpointsHttpTests.cs`
+- Test: `tests/MultiChannelAgent.IntegrationTests/Inventories/ImportUploadLimitsHttpTests.cs`
+- Test support: `tests/MultiChannelAgent.IntegrationTests/ServerRequestSizeLimits.cs`
+- Test support: `tests/MultiChannelAgent.IntegrationTests/UploadSpillGuard.cs`
 
 Why: this is the only way in. It is also where the upload is bounded before it is buffered, where CSRF is enforced, and where "not a member" and "no such Inventory" must be made indistinguishable.
 
@@ -6367,7 +6370,10 @@ public static class ImportEndpoints
         })
         .RequireAuthorization(AuthorizationPolicies.ActiveTenantMember)
         .AddEndpointFilter<AntiforgeryEndpointFilter>()
-        .WithMetadata(new RequestSizeLimitMetadata(MaxRequestBodyBytes));
+        .WithMetadata(new RequestSizeLimitMetadata(MaxRequestBodyBytes))
+        .WithFormOptions(
+            memoryBufferThreshold: (int)MaxRequestBodyBytes,
+            multipartBodyLengthLimit: MaxRequestBodyBytes);
 
         endpoints.MapPost("/api/inventories/{inventoryId:guid}/import/confirm", async (
             Guid inventoryId,
@@ -6463,8 +6469,8 @@ app.MapImportEndpoints();
 
 - [ ] **Step 4: Run the test to verify it passes**
 
-Run: `dotnet test tests/MultiChannelAgent.IntegrationTests/MultiChannelAgent.IntegrationTests.csproj --filter "FullyQualifiedName~ImportEndpointsHttpTests"`
-Expected: PASS, 11 tests.
+Run: `dotnet test tests/MultiChannelAgent.IntegrationTests/MultiChannelAgent.IntegrationTests.csproj --filter "FullyQualifiedName~ImportEndpointsHttpTests|FullyQualifiedName~ImportUploadLimitsHttpTests"`
+Expected: PASS, 26 tests.
 
 - [ ] **Step 5: Commit**
 
