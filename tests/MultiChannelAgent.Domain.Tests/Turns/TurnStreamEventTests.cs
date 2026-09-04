@@ -15,13 +15,12 @@ public class TurnStreamEventTests
         Assert.True(TurnEventSequence.ForPart(TurnEventSequence.MaxParts) < TurnEventSequence.Outcome);
     }
 
-    [Theory]
-    [InlineData(1, 100L)]
-    [InlineData(2, 101L)]
-    [InlineData(64, 163L)]
-    public void For_part_sequences_follow_the_fixed_range(int order, long expectedSequence)
+    [Fact]
+    public void For_part_sequences_follow_the_fixed_range()
     {
-        Assert.Equal(expectedSequence, TurnEventSequence.ForPart(order));
+        Assert.Equal(100L, TurnEventSequence.ForPart(1));
+        Assert.Equal(101L, TurnEventSequence.ForPart(2));
+        Assert.Equal(163L, TurnEventSequence.ForPart(64));
     }
 
     [Theory]
