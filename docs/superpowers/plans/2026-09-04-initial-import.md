@@ -3597,6 +3597,20 @@ public class ImportConfirmationServiceTests
     }
 
     [Fact]
+    public async Task Replay_does_not_disclose_another_Participants_import()
+    {
+        var (proposal, token) = await StorePendingAsync();
+        await ConfirmAsync(token);
+        var otherEditor = new ParticipantId(Guid.NewGuid());
+        _inventories.GrantMembership(_inventoryId, otherEditor, MembershipRole.Editor, Now);
+
+        var replay = await Service().ReplayAsync(
+            otherEditor, _inventoryId, proposal.Id, Now, CancellationToken.None);
+
+        Assert.Equal(ImportConfirmationResultKind.NotFound, replay.Kind);
+    }
+
+    [Fact]
     public async Task Rejecting_settles_the_proposal_discards_the_file_and_creates_nothing()
     {
         var (proposal, token) = await StorePendingAsync();
@@ -3766,7 +3780,7 @@ public sealed class ImportConfirmationService(
         var recorded = await executionStore.FindRecordedAsync(
             inventoryId, ImportOperationId.DeriveForProposal(proposalId), cancellationToken);
 
-        return recorded is null ? NotFound() : Completed(recorded);
+        return recorded is null || recorded.ActorId != participantId ? NotFound() : Completed(recorded);
     }
 
     public async Task<ImportConfirmationResult> RejectAsync(
