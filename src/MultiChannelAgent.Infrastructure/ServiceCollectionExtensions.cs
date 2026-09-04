@@ -32,7 +32,12 @@ public static class ServiceCollectionExtensions
         services.AddScoped<IDeliverySender, LoggingDeliverySender>();
         services.AddSingleton(TimeProvider.System);
         services.AddScoped<IModelBoundary, ScriptedModelBoundary>();
-        services.AddScoped<IToolDispatcher, StockToolDispatcher>();
+        services.AddScoped<StockToolDispatcher>();
+        services.AddScoped<ReferenceToolDispatcher>();
+
+        // One registered dispatcher, which routes by an explicit closed set of tool names.
+        services.AddScoped<IToolDispatcher>(sp => new InventoryToolRouter(
+            sp.GetRequiredService<StockToolDispatcher>(), sp.GetRequiredService<ReferenceToolDispatcher>()));
         services.AddScoped<TurnAcceptanceService>();
         services.AddScoped<TurnProcessingCoordinator>();
         services.AddScoped<DeliveryDispatchCoordinator>();

@@ -34,6 +34,22 @@ public sealed class StockToolDispatcher(
     public const string ConfirmToolName = "confirm_inventory_operation";
     public const string RejectToolName = "reject_inventory_operation";
 
+    /// <summary>The exact tools this dispatcher owns, including the two conversation-wide confirmation tools it has always executed.</summary>
+    public static readonly IReadOnlyList<string> ToolNames =
+    [
+        ListStockToolName,
+        FindStockToolName,
+        AddStockToolName,
+        RemoveStockToolName,
+        SetStockToolName,
+        MoveStockToolName,
+        RenameStockToolName,
+        ForgetStockToolName,
+        ApplyStockChangesToolName,
+        ConfirmToolName,
+        RejectToolName,
+    ];
+
     /// <summary>
     /// The channel-neutral response part every answered read leaves behind. It names the conversation
     /// itself, not any one channel: each adapter renders this same part for its own medium, and
@@ -573,9 +589,12 @@ public sealed class StockToolDispatcher(
             SummarizeChanges(applied),
             JsonSerializer.Serialize(new StockChangesPayload(1, "stock_changes", applied.Changes), PayloadOptions)),
 
-        // A confirmed administration proposal is answered by the reference dispatcher's own shaping,
-        // reached through the router; a confirmation that executed one is reported here only as the
-        // completed fact it is, because this dispatcher owns no reference vocabulary.
+        // The Participant confirmed the one thing pending in this conversation, and it turned out to
+        // be an administration proposal. The answer is shaped by the dispatcher that owns that
+        // vocabulary, so `reference_changes` is built in exactly one place.
+        InventoryConfirmationResultKind.Completed when result.AppliedReferences is { } appliedReferences =>
+            ReferenceToolDispatcher.AppliedChanges(appliedReferences),
+
         InventoryConfirmationResultKind.Completed => Semantic(
             OutcomeCategory.Completed, "completed", "That change was applied."),
         InventoryConfirmationResultKind.Rejected => Semantic(
