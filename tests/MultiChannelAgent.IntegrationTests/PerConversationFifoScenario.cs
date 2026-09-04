@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
+using MultiChannelAgent.Application.Inventories;
 using MultiChannelAgent.Application.Turns;
 using MultiChannelAgent.Domain.Turns;
 
@@ -66,6 +67,7 @@ internal static class PerConversationFifoScenario
                 services.GetRequiredService<ILeaseCoordinator>(),
                 new RecordingModelBoundary(services.GetRequiredService<IModelBoundary>(), planned, () => faultInjected),
                 services.GetRequiredService<TurnExecutionContextFactory>(),
+                services.GetRequiredService<ConfirmationProposalLifecycle>(),
                 services.GetRequiredService<IToolDispatcher>(),
                 services.GetRequiredService<TimeProvider>(),
                 NullLogger<TurnProcessingCoordinator>.Instance);

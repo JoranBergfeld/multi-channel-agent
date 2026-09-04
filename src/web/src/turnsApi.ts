@@ -3,6 +3,12 @@ export interface SubmitTurnRequest {
   contentText: string;
   locale?: string;
   traceId?: string;
+  /**
+   * Whether this utterance was cut off. The server treats an interrupted Turn as authorizing
+   * nothing, and invalidates whatever confirmation was pending - a client can only ever use this to
+   * make its own Turn less trusted.
+   */
+  interrupted?: boolean;
 }
 
 export interface SubmitTurnAcceptance {
@@ -80,7 +86,77 @@ export interface StockMutationPayload {
   entry: StockMutationEntryView;
 }
 
-export type TurnOutcomePayload = StockListPayload | StockFindPayload | StockMutationPayload;
+/** One Stock Entry's before-and-after within a proposed or applied change. Quantities are exact decimal text, never numbers. */
+export interface StockEntryStateView {
+  stockEntryId: string | null;
+  name: string;
+  unit: string;
+  location: string | null;
+  note: string | null;
+  previousQuantity: string;
+  quantity: string;
+  /** True when this Stock Entry's identity ends - merged away, or forgotten. */
+  retired: boolean;
+}
+
+/** One change, exactly as proposed or exactly as applied. */
+export interface StockChangeView {
+  order: number;
+  operation: 'add' | 'remove' | 'set' | 'move' | 'rename' | 'forget';
+  effect:
+    | 'created'
+    | 'quantity_increased'
+    | 'quantity_decreased'
+    | 'quantity_set'
+    | 'quantity_cleared'
+    | 'placed'
+    | 'split'
+    | 'split_merged'
+    | 'merged'
+    | 'renamed'
+    | 'rename_merged'
+    | 'forgotten';
+  source: StockEntryStateView;
+  destination: StockEntryStateView | null;
+  transferredQuantity: string;
+  newName: string | null;
+  /** The Stock Entry that still exists afterwards. */
+  survivingStockEntryId: string | null;
+  /** The Stock Entry whose identity this change ends, or null when it ends none. */
+  retiredStockEntryId: string | null;
+}
+
+/**
+ * An exact set of changes awaiting explicit confirmation.
+ *
+ * `token` is the single-use confirmation code. The server's proposal record keeps only its hash, but
+ * this payload carries the plaintext, because the Participant has to quote it back and has to be able
+ * to reconnect to the answer that gave it to them. It stops meaning anything once used or once the
+ * proposal expires, and the server discards this payload at that same ten-minute mark - so treat it
+ * as a short-lived secret: render it, do not log it, and do not persist it separately.
+ */
+export interface StockProposalPayload {
+  version: number;
+  kind: 'stock_proposal';
+  token: string;
+  /** ISO-8601 round-trip instant, ten minutes after the proposal was made. */
+  expiresAt: string;
+  changes: StockChangeView[];
+}
+
+/** What one applied change set did. */
+export interface StockChangesPayload {
+  version: number;
+  kind: 'stock_changes';
+  changes: StockChangeView[];
+}
+
+export type TurnOutcomePayload =
+  | StockListPayload
+  | StockFindPayload
+  | StockMutationPayload
+  | StockProposalPayload
+  | StockChangesPayload;
 
 export interface TurnOutcomeView {
   turnId: string;

@@ -17,4 +17,14 @@ public interface IInventoryReferenceStore
     Task<UnitId?> ResolveUnitAsync(InventoryId inventoryId, string reference, CancellationToken cancellationToken);
 
     Task<LocationId?> ResolveLocationAsync(InventoryId inventoryId, string reference, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// The canonical name of an active Unit in this Inventory, or null when there is no such Unit
+    /// here. A proposal reports this rather than the alias or the raw text a request happened to use,
+    /// so what a Participant reviews is the name the Inventory actually holds.
+    /// </summary>
+    Task<string?> FindUnitCanonicalNameAsync(InventoryId inventoryId, UnitId unitId, CancellationToken cancellationToken);
+
+    /// <summary>The name of an active Location in this Inventory, or null when there is no such Location here. See <see cref="FindUnitCanonicalNameAsync"/>.</summary>
+    Task<string?> FindLocationNameAsync(InventoryId inventoryId, LocationId locationId, CancellationToken cancellationToken);
 }

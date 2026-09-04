@@ -243,4 +243,40 @@ public class InboundTurnTests
     [Fact]
     public void Content_past_its_maximum_length_is_rejected() =>
         Assert.Throws<ArgumentException>(() => InboundTurn.Create(Draft(contentText: new string('a', TurnContentPart.MaxTextLength + 1))));
+    [Fact]
+    public void A_Turn_is_not_interrupted_unless_its_channel_says_so()
+    {
+        var turn = InboundTurn.Create(InboundTurnDraft.DirectText(
+            "native-1",
+            new ParticipantId(Guid.NewGuid()),
+            "web:profile-1",
+            "web",
+            ChannelPrincipal.EntraUser("subject", "tenant"),
+            ChannelCapabilities.Text,
+            "confirm",
+            locale: null,
+            DateTimeOffset.UnixEpoch,
+            traceId: null));
+
+        Assert.False(turn.WasInterrupted);
+    }
+
+    [Fact]
+    public void A_channel_that_reports_an_interrupted_utterance_keeps_that_on_the_Turn()
+    {
+        var turn = InboundTurn.Create(InboundTurnDraft.DirectText(
+            "native-2",
+            new ParticipantId(Guid.NewGuid()),
+            "web:profile-1",
+            "web",
+            ChannelPrincipal.EntraUser("subject", "tenant"),
+            ChannelCapabilities.Text,
+            "confirm",
+            locale: null,
+            DateTimeOffset.UnixEpoch,
+            traceId: null,
+            wasInterrupted: true));
+
+        Assert.True(turn.WasInterrupted);
+    }
 }

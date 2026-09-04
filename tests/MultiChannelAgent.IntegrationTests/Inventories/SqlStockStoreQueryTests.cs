@@ -120,6 +120,25 @@ public sealed class SqlStockStoreQueryTests : IDisposable
         Assert.Contains("LIMIT", Assert.Single(_executedCommands), StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public async Task Reading_versions_returns_one_per_known_Stock_Entry_and_nothing_for_the_rest()
+    {
+        var first = SeedStock("Steel Bolts", 4m);
+        var second = SeedStock("Brass Rivets", 6m);
+
+        using var db = CreateContext();
+        var store = new SqlStockStore(db);
+
+        var versions = await store.ReadVersionsAsync(
+            new InventoryId(_inventoryId),
+            [new StockEntryId(first), new StockEntryId(second), new StockEntryId(Guid.NewGuid())],
+            CancellationToken.None);
+
+        Assert.Equal(2, versions.Count);
+        Assert.All(versions, version => Assert.NotEqual(Guid.Empty, version.ConcurrencyStamp));
+        Assert.Empty(await store.ReadVersionsAsync(new InventoryId(Guid.NewGuid()), [new StockEntryId(first)], CancellationToken.None));
+    }
+
     private StockListQuery Query(int pageSize, string? cursor = null) => StockListQuery.Create(
         new InventoryId(_inventoryId),
         includeZero: false,
@@ -177,12 +196,13 @@ public sealed class SqlStockStoreQueryTests : IDisposable
         return locationId;
     }
 
-    private void SeedStock(string name, decimal quantity, Guid? locationId = null)
+    private Guid SeedStock(string name, decimal quantity, Guid? locationId = null)
     {
         using var db = CreateContext();
+        var stockEntryId = Guid.NewGuid();
         db.StockEntries.Add(new StockEntryEntity
         {
-            Id = Guid.NewGuid(),
+            Id = stockEntryId,
             InventoryId = _inventoryId,
             UnitId = _unitId,
             LocationId = locationId,
@@ -192,6 +212,7 @@ public sealed class SqlStockStoreQueryTests : IDisposable
             CreatedAt = DateTimeOffset.UtcNow,
         });
         db.SaveChanges();
+        return stockEntryId;
     }
 
     private MultiChannelAgentDbContext CreateContext()

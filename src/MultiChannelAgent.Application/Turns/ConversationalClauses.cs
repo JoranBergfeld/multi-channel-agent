@@ -13,9 +13,13 @@ namespace MultiChannelAgent.Application.Turns;
 public static partial class ConversationalClauses
 {
     /// <summary>Clauses that stand alone; anything a caller writes after them belongs to the next clause.</summary>
-    private static readonly string[] FlagClauses = ["including zero", "unlocated"];
+    private static readonly string[] FlagClauses = ["including zero", "unlocated", "to unlocated", "all"];
 
-    [GeneratedRegex(@"\b(including zero|unlocated|named|unit|in|page size|after|quantity|note)\b", RegexOptions.IgnoreCase)]
+    // "to unlocated" precedes "to" and "unlocated" so a destination of "nowhere in particular" is
+    // read as its own flag rather than as a Location that happens to be called "unlocated".
+    [GeneratedRegex(
+        @"\b(including zero|to unlocated|unlocated|named|unit|in|page size|after|quantity|note|to|all)\b",
+        RegexOptions.IgnoreCase)]
     private static partial Regex ClauseScanner { get; }
 
     /// <summary>

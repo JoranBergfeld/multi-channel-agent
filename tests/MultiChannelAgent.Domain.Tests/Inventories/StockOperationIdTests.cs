@@ -52,4 +52,31 @@ public class StockOperationIdTests
             "8a9ee7f1-c583-ca1b-37fa-9d90d543eb10",
             StockOperationId.Derive(SomeTurn, "add_stock", sequence: 0).Value.ToString());
     }
+    [Fact]
+    public void A_proposals_execution_identity_is_derived_and_therefore_survives_a_restart()
+    {
+        var proposalId = new ProposalId(Guid.NewGuid());
+
+        Assert.Equal(StockOperationId.DeriveForProposal(proposalId), StockOperationId.DeriveForProposal(proposalId));
+    }
+
+    [Fact]
+    public void Two_proposals_never_share_an_execution_identity()
+    {
+        Assert.NotEqual(
+            StockOperationId.DeriveForProposal(new ProposalId(Guid.NewGuid())),
+            StockOperationId.DeriveForProposal(new ProposalId(Guid.NewGuid())));
+    }
+
+    [Fact]
+    public void A_proposals_execution_identity_can_never_collide_with_a_Turns_tool_identity()
+    {
+        // The two derivations hash differently shaped material, so no Turn/tool/sequence triple can
+        // ever produce a proposal's identity - the two ledgers stay disjoint by construction.
+        var shared = Guid.NewGuid();
+
+        Assert.NotEqual(
+            StockOperationId.DeriveForProposal(new ProposalId(shared)),
+            StockOperationId.Derive(new TurnId(shared), "confirm_inventory_operation", sequence: 0));
+    }
 }

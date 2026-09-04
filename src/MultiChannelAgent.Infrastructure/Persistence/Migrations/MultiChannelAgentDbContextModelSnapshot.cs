@@ -70,6 +70,81 @@ namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
                     b.ToTable("AuthTickets", (string)null);
                 });
 
+            modelBuilder.Entity("MultiChannelAgent.Infrastructure.Persistence.Entities.ConfirmationProposalEntity", b =>
+                {
+                    b.Property<Guid>("ProposalId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("ChangesJson")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("ChannelConversationId")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<string>("ExpectedAbsencesJson")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("ExpectedVersionsJson")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<DateTimeOffset>("ExpiresAt")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<long>("ExpiresAtTicks")
+                        .HasColumnType("bigint");
+
+                    b.Property<Guid>("InventoryId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("ParticipantId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("ProposedInTurnId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTimeOffset?>("SettledAt")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<long?>("SettledAtTicks")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("nvarchar(32)");
+
+                    b.Property<string>("TokenHash")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)");
+
+                    b.HasKey("ProposalId");
+
+                    b.HasIndex("InventoryId");
+
+                    b.HasIndex("SettledAtTicks");
+
+                    b.HasIndex("TokenHash")
+                        .IsUnique();
+
+                    b.HasIndex("ParticipantId", "ChannelConversationId")
+                        .IsUnique()
+                        .HasFilter("Status = 'Pending'");
+
+                    b.HasIndex("Status", "ExpiresAtTicks");
+
+                    b.ToTable("ConfirmationProposals", (string)null);
+                });
+
             modelBuilder.Entity("MultiChannelAgent.Infrastructure.Persistence.Entities.DeliveryEntity", b =>
                 {
                     b.Property<Guid>("DeliveryId")
@@ -223,6 +298,9 @@ namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
                     b.Property<string>("TraceId")
                         .HasMaxLength(128)
                         .HasColumnType("nvarchar(128)");
+
+                    b.Property<bool>("WasInterrupted")
+                        .HasColumnType("bit");
 
                     b.HasKey("TurnId");
 
@@ -480,6 +558,127 @@ namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
                     b.ToTable("Participants", (string)null);
                 });
 
+            modelBuilder.Entity("MultiChannelAgent.Infrastructure.Persistence.Entities.StockChangeSetEffectEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("DestinationLocationName")
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.Property<string>("DestinationName")
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.Property<decimal?>("DestinationPreviousQuantity")
+                        .HasPrecision(28, 10)
+                        .HasColumnType("decimal(28,10)");
+
+                    b.Property<decimal?>("DestinationResultingQuantity")
+                        .HasPrecision(28, 10)
+                        .HasColumnType("decimal(28,10)");
+
+                    b.Property<Guid?>("DestinationStockEntryId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("DestinationUnitCanonicalName")
+                        .HasMaxLength(100)
+                        .HasColumnType("nvarchar(100)");
+
+                    b.Property<string>("Effect")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("nvarchar(32)");
+
+                    b.Property<string>("Kind")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("nvarchar(16)");
+
+                    b.Property<string>("NewName")
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.Property<Guid>("OperationId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<int>("Order")
+                        .HasColumnType("int");
+
+                    b.Property<string>("SourceLocationName")
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.Property<string>("SourceName")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.Property<decimal>("SourcePreviousQuantity")
+                        .HasPrecision(28, 10)
+                        .HasColumnType("decimal(28,10)");
+
+                    b.Property<decimal>("SourceResultingQuantity")
+                        .HasPrecision(28, 10)
+                        .HasColumnType("decimal(28,10)");
+
+                    b.Property<bool>("SourceRetired")
+                        .HasColumnType("bit");
+
+                    b.Property<Guid>("SourceStockEntryId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("SourceUnitCanonicalName")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("nvarchar(100)");
+
+                    b.Property<decimal>("TransferredQuantity")
+                        .HasPrecision(28, 10)
+                        .HasColumnType("decimal(28,10)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("OperationId", "Order")
+                        .IsUnique();
+
+                    b.ToTable("StockChangeSetEffects", (string)null);
+                });
+
+            modelBuilder.Entity("MultiChannelAgent.Infrastructure.Persistence.Entities.StockChangeSetOperationEntity", b =>
+                {
+                    b.Property<Guid>("OperationId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTimeOffset>("AppliedAt")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<Guid>("ConfirmedByTurnId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("InventoryId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid?>("ProposalId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.HasKey("OperationId");
+
+                    b.HasIndex("AppliedAt");
+
+                    b.HasIndex("ProposalId")
+                        .IsUnique()
+                        .HasFilter("ProposalId IS NOT NULL");
+
+                    b.HasIndex("InventoryId", "ConfirmedByTurnId")
+                        .IsUnique();
+
+                    b.ToTable("StockChangeSetOperations", (string)null);
+                });
+
             modelBuilder.Entity("MultiChannelAgent.Infrastructure.Persistence.Entities.StockEntryEntity", b =>
                 {
                     b.Property<Guid>("Id")
@@ -683,6 +882,15 @@ namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
                         .IsRequired();
                 });
 
+            modelBuilder.Entity("MultiChannelAgent.Infrastructure.Persistence.Entities.ConfirmationProposalEntity", b =>
+                {
+                    b.HasOne("MultiChannelAgent.Infrastructure.Persistence.Entities.InventoryEntity", null)
+                        .WithMany()
+                        .HasForeignKey("InventoryId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
             modelBuilder.Entity("MultiChannelAgent.Infrastructure.Persistence.Entities.DeliveryEntity", b =>
                 {
                     b.HasOne("MultiChannelAgent.Infrastructure.Persistence.Entities.InboxEntryEntity", null)
@@ -748,6 +956,24 @@ namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
                     b.HasOne("MultiChannelAgent.Infrastructure.Persistence.Entities.InboxEntryEntity", null)
                         .WithOne()
                         .HasForeignKey("MultiChannelAgent.Infrastructure.Persistence.Entities.OutcomeEntity", "TurnId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("MultiChannelAgent.Infrastructure.Persistence.Entities.StockChangeSetEffectEntity", b =>
+                {
+                    b.HasOne("MultiChannelAgent.Infrastructure.Persistence.Entities.StockChangeSetOperationEntity", null)
+                        .WithMany()
+                        .HasForeignKey("OperationId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("MultiChannelAgent.Infrastructure.Persistence.Entities.StockChangeSetOperationEntity", b =>
+                {
+                    b.HasOne("MultiChannelAgent.Infrastructure.Persistence.Entities.InventoryEntity", null)
+                        .WithMany()
+                        .HasForeignKey("InventoryId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
                 });

@@ -235,4 +235,15 @@ public sealed class StockConversationScenarioTests : SqlIntegrationTestBase
 
         await StockMutationScenario.RunAsync(Factory!);
     }
+
+    // Every confirmed stock mutation acceptance criterion for #32, end to end against real SQL Server
+    // with production migrations applied. ConfirmedStockMutationSqliteTests proves the identical
+    // behavior Docker-free.
+    [SkippableFact]
+    public async Task Moving_renaming_forgetting_and_confirming_stock_behaves_exactly_as_specified()
+    {
+        Skip.IfNot(DockerAvailable, "Docker is not available in this environment; skipping the SQL-backed confirmed mutation scenario.");
+
+        await ConfirmedStockMutationScenario.RunAsync(Factory!);
+    }
 }

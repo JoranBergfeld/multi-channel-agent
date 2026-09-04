@@ -16,7 +16,8 @@ public sealed record SubmitTurnHttpRequest(
     string? NativeMessageId,
     string? ContentText,
     string? Locale,
-    string? TraceId);
+    string? TraceId,
+    bool Interrupted = false);
 
 /// <summary>
 /// What the signed-in web channel is, as declared to the channel-neutral core: its name, and what it
@@ -70,7 +71,8 @@ public static class TurnEndpoints
                     WebChannel.Capabilities,
                     request.ContentText!,
                     request.Locale,
-                    request.TraceId),
+                    request.TraceId,
+                    request.Interrupted),
                 timeProvider.GetUtcNow(),
                 cancellationToken);
 

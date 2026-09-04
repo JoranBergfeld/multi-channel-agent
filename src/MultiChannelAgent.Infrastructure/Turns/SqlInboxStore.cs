@@ -72,6 +72,7 @@ public sealed class SqlInboxStore(MultiChannelAgentDbContext db) : IInboxStore
                 Capabilities = turn.Capabilities,
                 Locale = turn.Locale,
                 TraceId = turn.TraceId,
+                WasInterrupted = turn.WasInterrupted,
                 ReceivedAt = turn.ReceivedAt,
                 ReceivedAtTicks = turn.ReceivedAt.UtcTicks,
                 CreatedAt = turn.ReceivedAt,
@@ -226,6 +227,7 @@ public sealed class SqlInboxStore(MultiChannelAgentDbContext db) : IInboxStore
                 : throw new InvalidOperationException($"Accepted Turn {entity.TurnId} has no durable content parts."),
             Locale = entity.Locale,
             TraceId = entity.TraceId,
+            WasInterrupted = entity.WasInterrupted,
             ReceivedAt = entity.ReceivedAt,
         }).ToList();
     }

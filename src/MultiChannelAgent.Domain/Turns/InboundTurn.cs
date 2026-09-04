@@ -48,6 +48,14 @@ public sealed record InboundTurnDraft
     public string? TraceId { get; init; }
 
     /// <summary>
+    /// Whether the channel observed this utterance being interrupted - cut off mid-sentence, barged
+    /// in on, or otherwise left unfinished. Only the adapter can know this, and it changes what the
+    /// content may be used for: an interrupted utterance is never a reliable statement of intent, so
+    /// it may never confirm anything and it invalidates whatever confirmation was pending.
+    /// </summary>
+    public bool WasInterrupted { get; init; }
+
+    /// <summary>
     /// The common case every text-only channel produces today: one part, authored directly by the
     /// authenticated Participant in this Turn.
     /// </summary>
@@ -61,7 +69,8 @@ public sealed record InboundTurnDraft
         string? contentText,
         string? locale,
         DateTimeOffset receivedAt,
-        string? traceId) => new()
+        string? traceId,
+        bool wasInterrupted = false) => new()
         {
             NativeMessageId = nativeMessageId,
             ParticipantId = participantId,
@@ -73,6 +82,7 @@ public sealed record InboundTurnDraft
             Locale = locale,
             ReceivedAt = receivedAt,
             TraceId = traceId,
+            WasInterrupted = wasInterrupted,
         };
 }
 
@@ -132,6 +142,9 @@ public sealed record InboundTurn
 
     public string? TraceId { get; init; }
 
+    /// <summary>See <see cref="InboundTurnDraft.WasInterrupted"/>. Durable, because it decides what this Turn may authorize.</summary>
+    public bool WasInterrupted { get; init; }
+
     public required DateTimeOffset ReceivedAt { get; init; }
 
     /// <summary>The scope-complete identity duplicate native delivery is detected by.</summary>
@@ -178,6 +191,7 @@ public sealed record InboundTurn
             ContentParts = contentParts,
             Locale = RequireOptionalWithinBounds(draft.Locale, MaxLocaleLength, nameof(draft.Locale)),
             TraceId = RequireOptionalWithinBounds(draft.TraceId, MaxTraceIdLength, nameof(draft.TraceId)),
+            WasInterrupted = draft.WasInterrupted,
             ReceivedAt = draft.ReceivedAt,
         };
     }

@@ -108,4 +108,102 @@ public class StockMutationPlanTests
         Assert.Equal(expectedEventType, StockAuditFacts.EventTypeFor(kind));
         Assert.Equal(expectedOutcomeCode, StockAuditFacts.OutcomeCodeFor(kind, createdEntry));
     }
+    [Theory]
+    [InlineData(StockMutationKind.Add, "add")]
+    [InlineData(StockMutationKind.Remove, "remove")]
+    [InlineData(StockMutationKind.Set, "set")]
+    [InlineData(StockMutationKind.Move, "move")]
+    [InlineData(StockMutationKind.Rename, "rename")]
+    [InlineData(StockMutationKind.Forget, "forget")]
+    public void Every_mutation_kind_has_stable_machine_text_that_round_trips(StockMutationKind kind, string expected)
+    {
+        Assert.Equal(expected, StockMutationKinds.ToMachineText(kind));
+        Assert.True(StockMutationKinds.TryParse(expected, out var parsed));
+        Assert.Equal(kind, parsed);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData("delete")]
+    [InlineData("Add ")]
+    public void Text_that_is_not_a_mutation_kind_does_not_parse(string? text)
+    {
+        Assert.False(StockMutationKinds.TryParse(text, out var parsed));
+        Assert.Equal(default, parsed);
+    }
+
+    [Theory]
+    [InlineData(StockMutationKind.Add, true)]
+    [InlineData(StockMutationKind.Remove, true)]
+    [InlineData(StockMutationKind.Set, true)]
+    [InlineData(StockMutationKind.Move, false)]
+    [InlineData(StockMutationKind.Rename, false)]
+    [InlineData(StockMutationKind.Forget, false)]
+    public void Only_Add_Remove_and_Set_state_an_amount_of_their_own(StockMutationKind kind, bool expected) =>
+        Assert.Equal(expected, StockMutationKinds.IsQuantityChange(kind));
+
+    [Theory]
+    [InlineData(StockChangeEffectKind.Merged)]
+    [InlineData(StockChangeEffectKind.RenameMerged)]
+    [InlineData(StockChangeEffectKind.Forgotten)]
+    public void An_effect_that_ends_a_Stock_Entrys_identity_retires_its_source(StockChangeEffectKind effect)
+    {
+        Assert.True(StockAuditFacts.RetiresSource(effect));
+        Assert.True(StockAuditFacts.RequiresConfirmation(effect));
+    }
+
+    [Theory]
+    [InlineData(StockChangeEffectKind.Created)]
+    [InlineData(StockChangeEffectKind.QuantityIncreased)]
+    [InlineData(StockChangeEffectKind.QuantityDecreased)]
+    [InlineData(StockChangeEffectKind.QuantitySet)]
+    [InlineData(StockChangeEffectKind.Placed)]
+    [InlineData(StockChangeEffectKind.Split)]
+    [InlineData(StockChangeEffectKind.SplitMerged)]
+    [InlineData(StockChangeEffectKind.Renamed)]
+    public void An_effect_that_keeps_every_identity_needs_no_confirmation(StockChangeEffectKind effect)
+    {
+        Assert.False(StockAuditFacts.RetiresSource(effect));
+        Assert.False(StockAuditFacts.RequiresConfirmation(effect));
+    }
+
+    [Fact]
+    public void Clearing_Stock_keeps_its_identity_but_is_still_deliberate()
+    {
+        Assert.False(StockAuditFacts.RetiresSource(StockChangeEffectKind.QuantityCleared));
+        Assert.True(StockAuditFacts.RequiresConfirmation(StockChangeEffectKind.QuantityCleared));
+    }
+
+    [Theory]
+    [InlineData(StockMutationKind.Move, AuditEventType.StockMoved)]
+    [InlineData(StockMutationKind.Rename, AuditEventType.StockRenamed)]
+    [InlineData(StockMutationKind.Forget, AuditEventType.StockForgotten)]
+    public void Every_new_mutation_kind_appends_its_own_audit_event_type(StockMutationKind kind, AuditEventType expected) =>
+        Assert.Equal(expected, StockAuditFacts.EventTypeFor(kind));
+
+    [Theory]
+    [InlineData(StockChangeEffectKind.Created, "Add:Created")]
+    [InlineData(StockChangeEffectKind.QuantityIncreased, "Add:Increased")]
+    [InlineData(StockChangeEffectKind.QuantityDecreased, "Remove:Decreased")]
+    [InlineData(StockChangeEffectKind.QuantitySet, "Set:Applied")]
+    [InlineData(StockChangeEffectKind.QuantityCleared, "Set:Cleared")]
+    [InlineData(StockChangeEffectKind.Placed, "Move:Placed")]
+    [InlineData(StockChangeEffectKind.Split, "Move:Split")]
+    [InlineData(StockChangeEffectKind.SplitMerged, "Move:SplitMerged")]
+    [InlineData(StockChangeEffectKind.Merged, "Move:Merged")]
+    [InlineData(StockChangeEffectKind.Renamed, "Rename:Renamed")]
+    [InlineData(StockChangeEffectKind.RenameMerged, "Rename:Merged")]
+    [InlineData(StockChangeEffectKind.Forgotten, "Forget:Forgotten")]
+    public void Every_effect_has_a_coarse_audit_outcome_code(StockChangeEffectKind effect, string expected)
+    {
+        var code = StockAuditFacts.OutcomeCodeFor(effect);
+
+        Assert.Equal(expected, code);
+
+        // The audit column bounds this at 64 characters, and an audit fact must never carry detail
+        // beyond a coarse code, so an over-long one is a design error rather than a truncation.
+        Assert.True(code.Length <= 64);
+    }
 }

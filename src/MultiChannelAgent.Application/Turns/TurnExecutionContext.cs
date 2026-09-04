@@ -18,7 +18,9 @@ public sealed record TurnExecutionContext(
     FoundryConversationId FoundryConversationId,
     int FoundryConversationGeneration,
     InventoryId? ActiveInventoryId,
-    string? TraceId);
+    string? TraceId,
+    DirectConfirmationEvidence Confirmation = DirectConfirmationEvidence.None,
+    bool WasInterrupted = false);
 
 /// <summary>
 /// Assembles the trusted <see cref="TurnExecutionContext"/> for one claimed Turn: gets or creates its
@@ -45,6 +47,11 @@ public sealed class TurnExecutionContextFactory(
             binding.FoundryConversationId,
             binding.Generation,
             activeInventoryId,
-            turn.TraceId);
+            turn.TraceId,
+
+            // Derived from the Turn's own direct content, here, before the model is asked anything -
+            // so no proposal the model makes can ever be the reason a mutation was approved.
+            DirectConfirmationEvidenceReader.Read(turn),
+            turn.WasInterrupted);
     }
 }

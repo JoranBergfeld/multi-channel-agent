@@ -20,4 +20,5 @@ public sealed record SubmitTurnRequest(
     ChannelCapabilities Capabilities,
     string ContentText,
     string? Locale,
-    string? TraceId);
+    string? TraceId,
+    bool WasInterrupted = false);

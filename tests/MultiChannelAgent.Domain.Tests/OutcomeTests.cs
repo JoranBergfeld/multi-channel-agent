@@ -4,6 +4,8 @@ namespace MultiChannelAgent.Domain.Tests;
 
 public class OutcomeTests
 {
+    private static readonly DateTimeOffset Now = new(2026, 9, 4, 10, 0, 0, TimeSpan.Zero);
+
     [Fact]
     public void Completed_outcome_carries_turn_id_code_and_summary()
     {
@@ -133,5 +135,45 @@ public class OutcomeTests
         Assert.Equal(OutcomeCategory.Ambiguous, cleaned.Category);
         Assert.Equal("ambiguous", cleaned.Code);
         Assert.Equal("2 Stock Entries match.", cleaned.Summary);
+    }
+    [Fact]
+    public void A_payload_is_retained_for_the_ordinary_window_unless_a_shorter_one_is_asked_for()
+    {
+        var recorded = Outcome.Record(
+            TurnId.NewId(), OutcomeCategory.Completed, "completed", "Done.", Now, payload: "{}");
+
+        Assert.Equal(Now + Outcome.PayloadRetention, recorded.PayloadExpiresAt);
+    }
+
+    [Fact]
+    public void A_payload_that_carries_something_short_lived_may_be_retained_only_that_long()
+    {
+        // A confirmation payload carries a single-use token that stops meaning anything after ten
+        // minutes, so retaining it for the ordinary window would keep a spent secret readable for a day.
+        var recorded = Outcome.Record(
+            TurnId.NewId(),
+            OutcomeCategory.ConfirmationRequired,
+            "confirmation_required",
+            "Confirm this.",
+            Now,
+            payload: "{}",
+            payloadRetention: TimeSpan.FromMinutes(10));
+
+        Assert.Equal(Now.AddMinutes(10), recorded.PayloadExpiresAt);
+    }
+
+    [Fact]
+    public void A_shorter_retention_is_meaningless_without_a_payload_and_is_simply_ignored()
+    {
+        var recorded = Outcome.Record(
+            TurnId.NewId(),
+            OutcomeCategory.NotFound,
+            "not_found",
+            "Nothing here.",
+            Now,
+            payload: null,
+            payloadRetention: TimeSpan.FromMinutes(10));
+
+        Assert.Null(recorded.PayloadExpiresAt);
     }
 }

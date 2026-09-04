@@ -50,9 +50,9 @@ public sealed record Outcome
     public required DateTimeOffset CreatedAt { get; init; }
 
     /// <summary>
-    /// How long a recorded payload is retained. Long enough to survive a Participant reconnecting to
-    /// an answer they were already given; short enough that a stale projection is never mistaken for
-    /// current Inventory state.
+    /// How long a recorded payload is retained by default. Long enough to survive a Participant
+    /// reconnecting to an answer they were already given; short enough that a stale projection is
+    /// never mistaken for current Inventory state.
     /// </summary>
     public static readonly TimeSpan PayloadRetention = TimeSpan.FromHours(24);
 
@@ -61,8 +61,21 @@ public sealed record Outcome
     /// here rather than supplied, so no caller can record a semantic answer as a system failure (or
     /// the reverse) by mistake.
     /// </summary>
+    /// <param name="payloadRetention">
+    /// How long to retain this particular payload, when the ordinary window is too generous for what
+    /// it carries. A confirmation payload carries a single-use token that stops meaning anything once
+    /// its proposal expires, so it asks for exactly that shorter window rather than leaving a spent
+    /// secret readable for a day. Null takes <see cref="PayloadRetention"/>, and it is meaningless -
+    /// and therefore ignored - when there is no payload.
+    /// </param>
     public static Outcome Record(
-        TurnId turnId, OutcomeCategory category, string code, string summary, DateTimeOffset createdAt, string? payload = null) =>
+        TurnId turnId,
+        OutcomeCategory category,
+        string code,
+        string summary,
+        DateTimeOffset createdAt,
+        string? payload = null,
+        TimeSpan? payloadRetention = null) =>
         new()
         {
             TurnId = turnId,
@@ -71,7 +84,7 @@ public sealed record Outcome
             Code = code,
             Summary = summary,
             Payload = payload,
-            PayloadExpiresAt = payload is null ? null : createdAt + PayloadRetention,
+            PayloadExpiresAt = payload is null ? null : createdAt + (payloadRetention ?? PayloadRetention),
             CreatedAt = createdAt,
         };
 

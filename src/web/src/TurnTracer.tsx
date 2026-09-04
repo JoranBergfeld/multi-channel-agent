@@ -2,8 +2,11 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   getTurnOutcome,
   submitTurn,
+  type StockChangeView,
+  type StockChangesPayload,
   type StockMutationPayload,
   type StockNarrowingHints,
+  type StockProposalPayload,
   type StockRowView,
   type TurnOutcomeView,
 } from './turnsApi';
@@ -83,6 +86,113 @@ function StockMutationResult({ payload }: { payload: StockMutationPayload }) {
   );
 }
 
+/** What one change does, in the same words the conversational answer uses. */
+const EFFECT_LABELS: Record<StockChangeView['effect'], string> = {
+  created: 'Create',
+  quantity_increased: 'Add',
+  quantity_decreased: 'Remove',
+  quantity_set: 'Set',
+  quantity_cleared: 'Clear',
+  placed: 'Move',
+  split: 'Move part',
+  split_merged: 'Move part and merge',
+  merged: 'Move all and merge',
+  renamed: 'Rename',
+  rename_merged: 'Rename and merge',
+  forgotten: 'Forget',
+};
+
+function placementOf(state: { location: string | null }) {
+  return state.location ?? 'Unlocated';
+}
+
+/**
+ * Every change of a proposal or an applied change set, exactly. The Identity column is the one a
+ * merge-retiring Move or Rename owes the Participant: which Stock Entry survives, and which one's
+ * identity ends.
+ */
+function StockChangeRows({ changes }: { changes: StockChangeView[] }) {
+  return (
+    <table>
+      <thead>
+        <tr>
+          <th>Change</th>
+          <th>Stock Entry</th>
+          <th>Quantity</th>
+          <th>Identity</th>
+        </tr>
+      </thead>
+      <tbody>
+        {changes.map((change) => (
+          <tr key={change.order}>
+            <td>{EFFECT_LABELS[change.effect]}</td>
+            <td>
+              <div>
+                {change.source.name} ({placementOf(change.source)})
+              </div>
+              {change.destination && (
+                <div>
+                  → {change.newName ?? change.destination.name} ({placementOf(change.destination)})
+                </div>
+              )}
+            </td>
+            <td>
+              <div>
+                {change.source.previousQuantity} → {change.source.quantity} {change.source.unit}
+              </div>
+              {change.destination && (
+                <div>
+                  {change.destination.previousQuantity} → {change.destination.quantity} {change.destination.unit}
+                </div>
+              )}
+            </td>
+            <td>
+              <div>Survives: {change.survivingStockEntryId ?? 'nothing'}</div>
+              {change.retiredStockEntryId !== null && <div>Retires: {change.retiredStockEntryId}</div>}
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+/**
+ * The exact changes awaiting confirmation. The buttons fill the message box rather than submitting:
+ * the server only ever accepts an affirmative the Participant themselves said in their own next
+ * Turn's direct content, so a button that submitted for them would be approving on their behalf.
+ */
+function StockProposal({
+  payload,
+  onCommand,
+}: {
+  payload: StockProposalPayload;
+  onCommand: (command: string) => void;
+}) {
+  return (
+    <>
+      <h3>Confirm these changes</h3>
+      <StockChangeRows changes={payload.changes} />
+      <p>Expires at {new Date(payload.expiresAt).toLocaleTimeString()}</p>
+      <button type="button" onClick={() => onCommand(`confirm ${payload.token}`)}>
+        Confirm
+      </button>
+      <button type="button" onClick={() => onCommand('reject')}>
+        Reject
+      </button>
+    </>
+  );
+}
+
+function StockChanges({ payload }: { payload: StockChangesPayload }) {
+  return (
+    <>
+      <h3>Applied</h3>
+      <StockChangeRows changes={payload.changes} />
+    </>
+  );
+}
+
 interface TurnTracerProps {
   csrfToken: string;
   /** Called once a terminal Outcome arrives, so the workspace can refetch its authoritative projection. */
@@ -91,7 +201,7 @@ interface TurnTracerProps {
 
 /**
  * Submits a Turn to the application boundary and renders its recorded terminal Outcome, including
- * the typed semantic List/Find/mutation payload when the Outcome carries one. Every terminal Outcome
+ * the typed semantic List/Find/mutation/proposal/change-set payload when the Outcome carries one. Every terminal Outcome
  * also signals the parent, which is what invalidates and refetches the authoritative Inventory
  * workspace - so a mutation made in the conversation is visible in the workspace immediately.
  * Participant/ChannelConversation identity is always derived server-side; this component never
@@ -172,6 +282,12 @@ function TurnTracer({ csrfToken, onTerminalOutcome }: TurnTracerProps) {
         Add <code>unit &lt;unit&gt;</code>, <code>in &lt;location&gt;</code>, <code>unlocated</code>, or{' '}
         <code>note &lt;text&gt;</code> to any of them.
       </p>
+      <p>
+        Confirm: <code>move stock Steel Bolts all to Shelf A</code>,{' '}
+        <code>rename stock Steel Bolts to Brass Rivets</code>, <code>forget stock Steel Bolts</code>, or{' '}
+        <code>change stock: add Steel Bolts quantity 2; forget Brass Rivets</code>. Anything that clears, merges, or
+        forgets asks first - answer with <code>confirm &lt;code&gt;</code> or <code>reject</code>.
+      </p>
       <form onSubmit={handleSubmit}>
         <label htmlFor="contentText">Message</label>
         <textarea
@@ -237,6 +353,12 @@ function TurnTracer({ csrfToken, onTerminalOutcome }: TurnTracerProps) {
           )}
 
           {outcome.payload?.kind === 'stock_mutation' && <StockMutationResult payload={outcome.payload} />}
+
+          {outcome.payload?.kind === 'stock_proposal' && (
+            <StockProposal payload={outcome.payload} onCommand={setContentText} />
+          )}
+
+          {outcome.payload?.kind === 'stock_changes' && <StockChanges payload={outcome.payload} />}
 
           {outcome.deliveries.length > 0 && (
             <>

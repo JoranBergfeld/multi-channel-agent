@@ -128,6 +128,20 @@ public sealed class ConversationTestClient
         return (await response.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("turnId").GetGuid();
     }
 
+    /// <summary>Submits a Turn the channel reports as interrupted - a cut-off utterance that may authorize nothing.</summary>
+    public async Task<Guid> SubmitInterruptedTurnAsync(string nativeMessageId, string contentText)
+    {
+        var response = await SendAsync(
+            new HttpRequestMessage(HttpMethod.Post, "/api/turns")
+            {
+                Content = JsonContent.Create(new { nativeMessageId, contentText, interrupted = true }),
+            },
+            withCsrf: true);
+
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+        return (await response.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("turnId").GetGuid();
+    }
+
     public async Task<JsonElement?> GetOutcomeAsync(Guid turnId)
     {
         var response = await SendAsync(new HttpRequestMessage(HttpMethod.Get, $"/api/turns/{turnId}/outcome"));

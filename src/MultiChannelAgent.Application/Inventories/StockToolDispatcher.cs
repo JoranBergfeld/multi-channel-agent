@@ -6,8 +6,9 @@ using MultiChannelAgent.Domain.Turns;
 namespace MultiChannelAgent.Application.Inventories;
 
 /// <summary>
-/// Executes list_stock/find_stock/add_stock/remove_stock/set_stock tool calls proposed by the model
-/// boundary, always under the trusted
+/// Executes list_stock/find_stock/add_stock/remove_stock/set_stock/move_stock/rename_stock/
+/// forget_stock/apply_stock_changes/confirm_inventory_operation/reject_inventory_operation tool calls
+/// proposed by the model boundary, always under the trusted
 /// <see cref="TurnExecutionContext"/> assembled by <see cref="TurnExecutionContextFactory"/> - never
 /// the proposal's own untrusted arguments, which are only ever free-form filter text (for example
 /// <c>includeZero</c> or <c>reference</c>), never identity. A malicious or buggy proposal cannot widen
@@ -17,13 +18,21 @@ namespace MultiChannelAgent.Application.Inventories;
 public sealed class StockToolDispatcher(
     StockListingService listingService,
     StockFindingService findingService,
-    StockMutationService mutationService) : IToolDispatcher
+    StockMutationService mutationService,
+    StockChangeSetService changeSetService,
+    StockConfirmationService confirmationService) : IToolDispatcher
 {
     public const string ListStockToolName = "list_stock";
     public const string FindStockToolName = "find_stock";
     public const string AddStockToolName = "add_stock";
     public const string RemoveStockToolName = "remove_stock";
     public const string SetStockToolName = "set_stock";
+    public const string MoveStockToolName = "move_stock";
+    public const string RenameStockToolName = "rename_stock";
+    public const string ForgetStockToolName = "forget_stock";
+    public const string ApplyStockChangesToolName = "apply_stock_changes";
+    public const string ConfirmToolName = "confirm_inventory_operation";
+    public const string RejectToolName = "reject_inventory_operation";
 
     /// <summary>
     /// The channel-neutral response part every answered read leaves behind. It names the conversation
@@ -52,8 +61,27 @@ public sealed class StockToolDispatcher(
                 Domain.Inventories.StockMutationKind.Add, proposal, context, inventoryId, now, cancellationToken),
             RemoveStockToolName => await DispatchMutationAsync(
                 Domain.Inventories.StockMutationKind.Remove, proposal, context, inventoryId, now, cancellationToken),
+            // A Set to zero clears stock, which #31 could only refuse because it had nowhere to put a
+            // proposal. It is decided exactly like any other change, so it takes the change-set path
+            // and comes back as an exact proposal; every other Set keeps the shipped single-mutation
+            // path and its own ledger.
+            SetStockToolName when IsClearingSet(proposal.UntrustedArgs) => await DispatchChangeSetAsync(
+                SingleChange(Domain.Inventories.StockMutationKind.Set, proposal.UntrustedArgs),
+                proposal, context, inventoryId, now, cancellationToken),
             SetStockToolName => await DispatchMutationAsync(
                 Domain.Inventories.StockMutationKind.Set, proposal, context, inventoryId, now, cancellationToken),
+            MoveStockToolName => await DispatchChangeSetAsync(
+                SingleChange(Domain.Inventories.StockMutationKind.Move, proposal.UntrustedArgs),
+                proposal, context, inventoryId, now, cancellationToken),
+            RenameStockToolName => await DispatchChangeSetAsync(
+                SingleChange(Domain.Inventories.StockMutationKind.Rename, proposal.UntrustedArgs),
+                proposal, context, inventoryId, now, cancellationToken),
+            ForgetStockToolName => await DispatchChangeSetAsync(
+                SingleChange(Domain.Inventories.StockMutationKind.Forget, proposal.UntrustedArgs),
+                proposal, context, inventoryId, now, cancellationToken),
+            ApplyStockChangesToolName => await DispatchBatchAsync(proposal, context, inventoryId, now, cancellationToken),
+            ConfirmToolName => await DispatchConfirmAsync(proposal.UntrustedArgs, context, inventoryId, now, cancellationToken),
+            RejectToolName => await DispatchRejectAsync(proposal.UntrustedArgs, context, inventoryId, now, cancellationToken),
 
             // An unrecognized tool name is the model proposing something this application cannot
             // execute - a model/system failure, not an answer to the Participant's request.
@@ -396,4 +424,276 @@ public sealed class StockToolDispatcher(
         public static NarrowingHintsPayload From(StockNarrowingHints hints) =>
             new(hints.Units, hints.Locations, hints.IncludesUnlocated);
     }
+    /// <summary>
+    /// Whether this Set asks for zero - the one Set that ends up with an empty Stock Entry and so has
+    /// to be confirmed. An unparseable amount is not a clearing Set: it is a malformed one, and the
+    /// shipped path already answers it exactly.
+    /// </summary>
+    private static bool IsClearingSet(IReadOnlyDictionary<string, string> untrustedArgs) =>
+        Domain.Inventories.Quantity.TryParseInvariant(untrustedArgs.GetValueOrDefault("quantity"), out var amount)
+        && !amount.IsOnHand;
+
+    /// <summary>
+    /// Reads one change from a single-change tool's untrusted arguments. Every value is untrusted
+    /// text - a name, an amount, exact Unit/Location references, a destination, a new name. None of
+    /// them is identity, and none can widen what this Turn may touch.
+    /// </summary>
+    private static IReadOnlyList<StockChangeRequest> SingleChange(
+        Domain.Inventories.StockMutationKind kind, IReadOnlyDictionary<string, string> untrustedArgs) =>
+    [
+        new StockChangeRequest
+        {
+            Order = 1,
+            Kind = kind,
+            Reference = untrustedArgs.GetValueOrDefault("reference"),
+            QuantityText = untrustedArgs.GetValueOrDefault("quantity"),
+            MoveAll = ParseFlag(untrustedArgs, "all"),
+            UnitReference = untrustedArgs.GetValueOrDefault("unit"),
+            LocationReference = untrustedArgs.GetValueOrDefault("location"),
+            UnlocatedOnly = ParseFlag(untrustedArgs, "unlocated"),
+            DestinationLocationReference = untrustedArgs.GetValueOrDefault("to"),
+            DestinationUnlocated = ParseFlag(untrustedArgs, "toUnlocated"),
+            NewName = untrustedArgs.GetValueOrDefault("newName"),
+            Note = untrustedArgs.GetValueOrDefault("note"),
+        },
+    ];
+
+    private async Task<ModelDecision> DispatchBatchAsync(
+        ToolCallProposal proposal,
+        TurnExecutionContext context,
+        Domain.Inventories.InventoryId inventoryId,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        if (!StockChangeSetParser.TryParse(proposal.UntrustedArgs.GetValueOrDefault("changes"), out var requests, out var code))
+        {
+            return Semantic(OutcomeCategory.Invalid, code, InvalidChangeSetSummary(code));
+        }
+
+        return await DispatchChangeSetAsync(requests, proposal, context, inventoryId, now, cancellationToken);
+    }
+
+    private async Task<ModelDecision> DispatchChangeSetAsync(
+        IReadOnlyList<StockChangeRequest> requests,
+        ToolCallProposal proposal,
+        TurnExecutionContext context,
+        Domain.Inventories.InventoryId inventoryId,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        // Derived from the durably accepted Turn and the tool being executed - both trusted, both
+        // stable across retries - so replaying this Turn re-reports the recorded effect instead of
+        // applying a second one. Nothing the model proposes contributes to it.
+        var operationId = Domain.Inventories.StockOperationId.Derive(context.TurnId, proposal.ToolName, sequence: 0);
+
+        var result = await changeSetService.ApplyAsync(
+            context.ParticipantId,
+            inventoryId,
+            context.TurnId,
+            operationId,
+            requests,
+            context.ChannelConversationId.Value,
+            now,
+            cancellationToken);
+
+        return result.Kind switch
+        {
+            StockChangeSetResultKind.Completed => Completed(
+                "completed",
+                SummarizeChanges(result.Applied!),
+                JsonSerializer.Serialize(new StockChangesPayload(1, "stock_changes", result.Applied!.Changes), PayloadOptions)),
+            StockChangeSetResultKind.ConfirmationRequired => ConfirmationRequired(result.Proposal!),
+            StockChangeSetResultKind.Ambiguous => Ambiguous(
+                "ambiguous",
+                SummarizeAmbiguity(result.Candidates!),
+                JsonSerializer.Serialize(
+                    new StockFindPayload(
+                        1,
+                        "stock_find",
+                        result.Candidates!.Candidates,
+                        result.Candidates.HasMoreCandidates,
+                        NarrowingHintsPayload.From(result.Candidates.NarrowingHints)),
+                    PayloadOptions)),
+            StockChangeSetResultKind.NotFound => Semantic(OutcomeCategory.NotFound, "not_found", "No matching Stock Entry was found."),
+            StockChangeSetResultKind.ReferenceNotFound => Semantic(
+                OutcomeCategory.NotFound, "reference_not_found", UnresolvedReferenceSummary(result.UnresolvedReference)),
+            StockChangeSetResultKind.Conflict => Semantic(OutcomeCategory.Conflict, result.Code, ChangeSetConflictSummary(result.Code)),
+            StockChangeSetResultKind.Invalid => Semantic(OutcomeCategory.Invalid, result.Code, InvalidChangeSetSummary(result.Code)),
+            _ => Semantic(OutcomeCategory.Forbidden, "forbidden", "That request could not be completed."),
+        };
+    }
+
+    private async Task<ModelDecision> DispatchConfirmAsync(
+        IReadOnlyDictionary<string, string> untrustedArgs,
+        TurnExecutionContext context,
+        Domain.Inventories.InventoryId inventoryId,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        // The token is the only thing the model may supply here. Whether the Participant actually
+        // confirmed comes from trusted context, derived from their own direct content in this Turn -
+        // so a tool call the model invented on its own approves nothing.
+        var result = await confirmationService.ConfirmAsync(
+            context.ParticipantId,
+            inventoryId,
+            context.TurnId,
+            untrustedArgs.GetValueOrDefault("token"),
+            context.Confirmation,
+            context.ChannelConversationId.Value,
+            now,
+            cancellationToken);
+
+        return ToDecision(result);
+    }
+
+    private async Task<ModelDecision> DispatchRejectAsync(
+        IReadOnlyDictionary<string, string> untrustedArgs,
+        TurnExecutionContext context,
+        Domain.Inventories.InventoryId inventoryId,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        var result = await confirmationService.RejectAsync(
+            context.ParticipantId,
+            inventoryId,
+            context.TurnId,
+            untrustedArgs.GetValueOrDefault("token"),
+            context.Confirmation,
+            context.ChannelConversationId.Value,
+            now,
+            cancellationToken);
+
+        return ToDecision(result);
+    }
+
+    private static ModelDecision ToDecision(StockConfirmationResult result) => result.Kind switch
+    {
+        StockConfirmationResultKind.Completed => Completed(
+            "completed",
+            SummarizeChanges(result.Applied!),
+            JsonSerializer.Serialize(new StockChangesPayload(1, "stock_changes", result.Applied!.Changes), PayloadOptions)),
+        StockConfirmationResultKind.Rejected => Semantic(
+            OutcomeCategory.Completed, "rejected", "That change was not made, and nothing was changed."),
+        StockConfirmationResultKind.NotFound => Semantic(
+            OutcomeCategory.NotFound, result.Code, "There is nothing waiting for your confirmation here."),
+        StockConfirmationResultKind.Conflict => Semantic(OutcomeCategory.Conflict, result.Code, ConfirmationConflictSummary(result.Code)),
+        StockConfirmationResultKind.Invalid => Semantic(OutcomeCategory.Invalid, result.Code, InvalidConfirmationSummary(result.Code)),
+        _ => Semantic(OutcomeCategory.Forbidden, "forbidden", "That request could not be completed."),
+    };
+
+    private static ModelDecision ConfirmationRequired(StockProposalView proposal)
+    {
+        var payload = JsonSerializer.Serialize(
+            new StockProposalPayload(1, "stock_proposal", proposal.Token, proposal.ExpiresAt, proposal.Changes), PayloadOptions);
+
+        return new ModelDecision
+        {
+            Category = OutcomeCategory.ConfirmationRequired,
+            Code = "confirmation_required",
+            Summary = SummarizeProposal(proposal),
+            Payload = payload,
+
+            // The token is a bearer secret with a ten-minute life. It has to reach the Participant, and
+            // the answer they can reconnect to has to still carry it, so it is retained for exactly
+            // that window rather than the ordinary payload retention: once the proposal expires the
+            // token means nothing, and keeping it readable for a day would buy nothing.
+            PayloadRetention = TimeSpan.FromMinutes(Domain.Inventories.ConfirmationProposal.LifetimeMinutes),
+
+            // The proposal is the answer's channel-neutral content: the summary alone would lose the
+            // exact effects the Participant is being asked to approve. This is the same payload the
+            // Outcome records, so the token reaches a client exactly once rather than twice.
+            Deliveries = [new RequestedDelivery(ResponseChannel, payload)],
+        };
+    }
+
+    /// <summary>
+    /// States exactly what will happen and what it costs in identity, then asks. It names no
+    /// Inventory and no other Participant - and deliberately no token: the payload beside it carries
+    /// the code, and repeating a bearer secret into the Outcome's permanent summary column would keep
+    /// it long after the payload it belongs to has been discarded.
+    /// </summary>
+    private static string SummarizeProposal(StockProposalView proposal)
+    {
+        var lines = proposal.Changes.Select(DescribeChange).ToList();
+        var opening = lines.Count == 1
+            ? $"This needs your confirmation: {lines[0]}"
+            : $"These {lines.Count} changes apply together, or not at all: {string.Join(" ", lines)}";
+
+        return $"{opening} Reply with \"confirm\" followed by the confirmation code shown with this "
+            + "answer to apply it, or \"reject\" to leave everything as it is.";
+    }
+
+    private static string SummarizeChanges(StockChangeSetView applied) =>
+        string.Join(" ", applied.Changes.Select(DescribeChange));
+
+    /// <summary>One change in plain words, always naming the surviving Stock Entry and any identity that ends.</summary>
+    private static string DescribeChange(StockChangeView change)
+    {
+        var placement = change.Source.Location is null ? "unlocated" : $"in {change.Source.Location}";
+        var destination = change.Destination?.Location is null ? "unlocated" : $"in {change.Destination.Location}";
+
+        return change.Effect switch
+        {
+            "created" => $"Create {change.Source.Name} ({placement}) at {change.Source.Quantity} {change.Source.Unit}.",
+            "quantity_increased" => $"Add to {change.Source.Name} ({placement}): {change.Source.PreviousQuantity} becomes {change.Source.Quantity} {change.Source.Unit}.",
+            "quantity_decreased" => $"Remove from {change.Source.Name} ({placement}): {change.Source.PreviousQuantity} becomes {change.Source.Quantity} {change.Source.Unit}.",
+            "quantity_set" => $"Set {change.Source.Name} ({placement}) to {change.Source.Quantity} {change.Source.Unit}.",
+            "quantity_cleared" => $"Clear {change.Source.Name} ({placement}), leaving 0 {change.Source.Unit} and an empty record.",
+            "placed" => $"Move all {change.Source.Quantity} {change.Source.Unit} of {change.Source.Name} from {placement} to {destination}.",
+            "split" => $"Move {change.TransferredQuantity} {change.Source.Unit} of {change.Source.Name} from {placement} to {destination}, leaving {change.Source.Quantity}.",
+            "split_merged" => $"Move {change.TransferredQuantity} {change.Source.Unit} of {change.Source.Name} into the {change.Destination!.PreviousQuantity} already {destination}, leaving {change.Source.Quantity}.",
+            "merged" => $"Merge all {change.TransferredQuantity} {change.Source.Unit} of {change.Source.Name} from {placement} into the entry {destination}, which becomes {change.Destination!.Quantity}. The {placement} entry is retired.",
+            "renamed" => $"Rename {change.Source.Name} ({placement}) to {change.NewName ?? change.Source.Name}.",
+            "rename_merged" => $"Merge {change.Source.Name} ({placement}) into {change.Destination!.Name}, which becomes {change.Destination.Quantity} {change.Destination.Unit}. The {change.Source.Name} entry is retired.",
+            "forgotten" => $"Forget the empty {change.Source.Name} ({placement}) entry permanently.",
+            _ => $"Change {change.Source.Name} ({placement}).",
+        };
+    }
+
+    private static string ChangeSetConflictSummary(string code) => code switch
+    {
+        "insufficient_quantity" => "That is more than the Quantity on hand, so nothing was changed.",
+        "forget_requires_zero_quantity" => "Only an empty Stock Entry can be forgotten. Remove or Set its Quantity to zero first.",
+        "no_change" => "That would leave everything exactly as it is, so nothing was changed.",
+        "state_changed" => "That Stock changed while this request was being prepared, so nothing was changed. Ask again.",
+        _ => "That request conflicts with current Stock, so nothing was changed.",
+    };
+
+    private static string ConfirmationConflictSummary(string code) => code switch
+    {
+        "proposal_expired" => "That confirmation is older than ten minutes, so nothing was changed. Ask again to get a fresh one.",
+        "state_changed" => "That Stock changed since this was proposed, so nothing was changed. Ask again.",
+        _ => "That could no longer be applied, so nothing was changed.",
+    };
+
+    private static string InvalidConfirmationSummary(string code) => code switch
+    {
+        "confirmation_evidence_missing" => "Confirm in your own words - for example \"confirm\" followed by the code - and nothing else will do it for you.",
+        "rejection_evidence_missing" => "Say so in your own words - for example \"reject\" - to leave everything as it is.",
+        "proposal_token_mismatch" => "That confirmation code does not match what is waiting here, so nothing was changed.",
+        _ => "That request could not be understood.",
+    };
+
+    private static string InvalidChangeSetSummary(string code) => code switch
+    {
+        "invalid_changes" => "State each change plainly - what to change, and by how much.",
+        "too_many_changes" => $"Ask for at most {Domain.Inventories.ConfirmationProposal.MaxChanges} changes at a time.",
+        "conflicting_changes" => "Two of those changes act on the same Stock Entry. Ask for them one at a time.",
+        "invalid_destination" => "Name one destination: either a Location, or unlocated stock.",
+        "invalid_quantity" => "State a Quantity as a plain decimal number, or ask to move all of it - not both.",
+        "invalid_name" => $"A Stock Entry name must be 1 to {Domain.Inventories.StockEntry.MaxNameLength} characters.",
+        "invalid_note" => $"A Note must not exceed {Domain.Inventories.StockEntry.MaxNoteLength} characters.",
+        "invalid_reference" => "Name the Stock Entry to change.",
+        "quantity_out_of_bounds" =>
+            $"That Quantity is larger than an Inventory can record ({Domain.Inventories.Quantity.MaxIntegerDigits} digits "
+            + $"before the decimal point and {Domain.Inventories.Quantity.MaxScale} after it).",
+        _ => "That request could not be understood.",
+    };
+
+    /// <summary>The exact proposal a Participant is being asked to approve, versioned like every other payload.</summary>
+    private sealed record StockProposalPayload(
+        int Version, string Kind, string Token, string ExpiresAt, IReadOnlyList<StockChangeView> Changes);
+
+    /// <summary>The typed read-back one applied change set leaves behind.</summary>
+    private sealed record StockChangesPayload(int Version, string Kind, IReadOnlyList<StockChangeView> Changes);
 }

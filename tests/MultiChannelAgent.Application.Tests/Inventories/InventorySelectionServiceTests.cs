@@ -1,6 +1,7 @@
 using MultiChannelAgent.Application.Inventories;
 using MultiChannelAgent.Application.Tests.TestDoubles.Inventories;
 using MultiChannelAgent.Domain.Inventories;
+using MultiChannelAgent.Domain.Turns;
 
 namespace MultiChannelAgent.Application.Tests.Inventories;
 
@@ -14,14 +15,23 @@ public class InventorySelectionServiceTests
     private static (InventorySelectionService Service, InMemoryInventoryStore InventoryStore, InMemoryActiveInventorySelectionStore SelectionStore, InventoryId InventoryId)
         CreateServiceWithOneInventory()
     {
+        var (service, inventoryStore, selectionStore, _, inventoryId) = CreateServiceWithProposalStore();
+
+        return (service, inventoryStore, selectionStore, inventoryId);
+    }
+
+    private static (InventorySelectionService Service, InMemoryInventoryStore InventoryStore, InMemoryActiveInventorySelectionStore SelectionStore, InMemoryConfirmationProposalStore ProposalStore, InventoryId InventoryId)
+        CreateServiceWithProposalStore()
+    {
         var inventoryStore = new InMemoryInventoryStore(_ => "Owner Name");
         var creation = new InventoryCreationService(inventoryStore);
         var view = creation.CreateAsync(Member, "Owner Name", "Warehouse", "req-1", Now, CancellationToken.None).GetAwaiter().GetResult();
         var selectionStore = new InMemoryActiveInventorySelectionStore();
         var authorizationService = new InventoryAuthorizationService(inventoryStore, new InMemoryInventoryAuthorizationAuditStore(selectionStore));
-        var service = new InventorySelectionService(authorizationService, selectionStore);
+        var proposalStore = new InMemoryConfirmationProposalStore();
+        var service = new InventorySelectionService(authorizationService, selectionStore, proposalStore);
 
-        return (service, inventoryStore, selectionStore, new InventoryId(Guid.Parse(view.Id)));
+        return (service, inventoryStore, selectionStore, proposalStore, new InventoryId(Guid.Parse(view.Id)));
     }
 
     [Fact]
@@ -111,5 +121,61 @@ public class InventorySelectionServiceTests
 
         Assert.Null(active);
         Assert.False(selectionStore.Selections.ContainsKey((Member, ConversationId)));
+    }
+    [Fact]
+    public async Task Switching_the_Active_Inventory_invalidates_the_pending_proposal_in_that_conversation()
+    {
+        var (service, inventoryStore, _, proposalStore, inventoryId) = CreateServiceWithProposalStore();
+        var creation = new InventoryCreationService(inventoryStore);
+        var other = new InventoryId(Guid.Parse(
+            (await creation.CreateAsync(Member, "Owner Name", "Annex", "req-2", Now, CancellationToken.None)).Id));
+
+        await service.SelectAsync(Member, inventoryId, ConversationId, Now, CancellationToken.None);
+        var proposal = PendingProposal(inventoryId);
+        await proposalStore.StoreAsync(proposal, Now, CancellationToken.None);
+
+        await service.SelectAsync(Member, other, ConversationId, Now, CancellationToken.None);
+
+        Assert.Equal(ProposalStatus.InventorySwitched, await proposalStore.FindStatusAsync(proposal.Id, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Selecting_the_Inventory_that_is_already_active_leaves_the_pending_proposal_alone()
+    {
+        var (service, _, _, proposalStore, inventoryId) = CreateServiceWithProposalStore();
+
+        await service.SelectAsync(Member, inventoryId, ConversationId, Now, CancellationToken.None);
+        var proposal = PendingProposal(inventoryId);
+        await proposalStore.StoreAsync(proposal, Now, CancellationToken.None);
+
+        await service.SelectAsync(Member, inventoryId, ConversationId, Now, CancellationToken.None);
+
+        Assert.Equal(ProposalStatus.Pending, await proposalStore.FindStatusAsync(proposal.Id, CancellationToken.None));
+    }
+
+    private static ConfirmationProposal PendingProposal(InventoryId inventoryId)
+    {
+        var stockEntryId = new StockEntryId(Guid.NewGuid());
+
+        return ConfirmationProposal.Create(
+            ConfirmationToken.HashOf(ConfirmationToken.Issue()),
+            Member,
+            ConversationId,
+            inventoryId,
+            TurnId.NewId(),
+            [
+                new ProposedChange
+                {
+                    Order = 1,
+                    Kind = StockMutationKind.Forget,
+                    Effect = StockChangeEffectKind.Forgotten,
+                    Source = new ProposedEntryState(
+                        stockEntryId, "Steel Bolts", "steel bolts", new UnitId(Guid.NewGuid()), "each",
+                        null, null, null, Quantity.Zero, Quantity.Zero, Retired: true),
+                },
+            ],
+            [new ExpectedEntryVersion(stockEntryId, Guid.NewGuid())],
+            [],
+            Now);
     }
 }

@@ -25,9 +25,16 @@ public sealed class SqliteWebApplicationFactory : WebApplicationFactory<Program>
     // the database alive across the separate DbContext instances each request scope resolves.
     private readonly SqliteConnection _keepAliveConnection;
     private readonly string _connectionString = $"DataSource=file:{Guid.NewGuid()}?mode=memory&cache=shared";
+    private readonly TimeProvider? _timeProvider;
 
-    public SqliteWebApplicationFactory()
+    /// <summary>
+    /// <paramref name="timeProvider"/> lets a scenario advance time deliberately - the ten-minute
+    /// confirmation lifetime is behavior, and a test that proved it by sleeping would be both slow
+    /// and flaky.
+    /// </summary>
+    public SqliteWebApplicationFactory(TimeProvider? timeProvider = null)
     {
+        _timeProvider = timeProvider;
         _keepAliveConnection = new SqliteConnection(_connectionString);
         _keepAliveConnection.Open();
     }
@@ -63,6 +70,12 @@ public sealed class SqliteWebApplicationFactory : WebApplicationFactory<Program>
             }
 
             services.AddDbContext<MultiChannelAgentDbContext>(options => options.UseSqlite(_connectionString));
+
+            // Registered last so it wins over the infrastructure's TimeProvider.System.
+            if (_timeProvider is not null)
+            {
+                services.AddSingleton(_timeProvider);
+            }
         });
     }
 

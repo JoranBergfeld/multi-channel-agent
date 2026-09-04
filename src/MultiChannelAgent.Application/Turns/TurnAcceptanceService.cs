@@ -40,7 +40,8 @@ public sealed class TurnAcceptanceService(IInboxStore inboxStore)
             request.ContentText,
             request.Locale,
             receivedAt,
-            request.TraceId));
+            request.TraceId,
+            request.WasInterrupted));
 
         var accepted = await inboxStore.AcceptAsync(turn, cancellationToken);
 

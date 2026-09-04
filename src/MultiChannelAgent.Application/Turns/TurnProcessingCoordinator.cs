@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging;
+using MultiChannelAgent.Application.Inventories;
 using MultiChannelAgent.Domain.Turns;
 
 namespace MultiChannelAgent.Application.Turns;
@@ -12,6 +13,10 @@ namespace MultiChannelAgent.Application.Turns;
 /// owned by <see cref="IInboxStore.ClaimPendingAsync"/>, which only ever offers a conversation's
 /// head; this coordinator additionally stops offering a conversation any further Turn for the rest of
 /// the pass once its head fails, while unrelated ChannelConversations proceed independently.
+///
+/// It also reconciles pending confirmation state against the freshly assembled trusted context before
+/// the Turn is interpreted, so an interrupted Turn, a switched Active Inventory, or lost access can
+/// never leave a confirmable proposal behind.
 /// </summary>
 public sealed class TurnProcessingCoordinator(
     IInboxStore inboxStore,
@@ -19,6 +24,7 @@ public sealed class TurnProcessingCoordinator(
     ILeaseCoordinator leaseCoordinator,
     IModelBoundary modelBoundary,
     TurnExecutionContextFactory executionContextFactory,
+    ConfirmationProposalLifecycle proposalLifecycle,
     IToolDispatcher toolDispatcher,
     TimeProvider timeProvider,
     ILogger<TurnProcessingCoordinator> logger)
@@ -109,6 +115,11 @@ public sealed class TurnProcessingCoordinator(
         // derived from anything the proposal itself claims.
         var executionContext = await executionContextFactory.CreateAsync(turn, now, cancellationToken);
 
+        // Settled before the model is asked anything, so an interrupted Turn, a switched Active
+        // Inventory, or lost access can never leave a confirmable proposal behind for this Turn - or
+        // any later one - to trigger.
+        await proposalLifecycle.ReconcileAsync(executionContext, now, cancellationToken);
+
         var proposal = await modelBoundary.ProposeAsync(
             turn,
             new ModelInvocationContext(executionContext.FoundryConversationId, executionContext.FoundryConversationGeneration, turn.Locale),
@@ -118,7 +129,8 @@ public sealed class TurnProcessingCoordinator(
             ? proposal.Direct!
             : await toolDispatcher.DispatchAsync(proposal.ToolCall!, executionContext, now, cancellationToken);
 
-        var outcome = Outcome.Record(turn.TurnId, decision.Category, decision.Code, decision.Summary, now, decision.Payload);
+        var outcome = Outcome.Record(
+            turn.TurnId, decision.Category, decision.Code, decision.Summary, now, decision.Payload, decision.PayloadRetention);
 
         var deliveries = decision.Deliveries
             .Select(requested => Delivery.Request(turn.TurnId, requested.Channel, requested.Payload, now))
