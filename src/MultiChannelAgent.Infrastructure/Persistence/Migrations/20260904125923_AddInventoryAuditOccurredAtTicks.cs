@@ -36,6 +36,19 @@ namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
                     + DATEDIFF_BIG(nanosecond, CONVERT(time, '00:00:00'), CONVERT(time, SWITCHOFFSET(OccurredAtUtc, 0))) / 100;
                 """);
 
+            // The zero default exists only so SQL Server can add the required column to a populated
+            // table. Remove it after the backfill: an older application revision that omits this
+            // column must fail its write rather than create an audit the retention sweep sees as
+            // ancient and deletes.
+            migrationBuilder.AlterColumn<long>(
+                name: "OccurredAtUtcTicks",
+                table: "InventoryAudits",
+                type: "bigint",
+                nullable: false,
+                oldClrType: typeof(long),
+                oldType: "bigint",
+                oldDefaultValue: 0L);
+
             migrationBuilder.CreateIndex(
                 name: "IX_InventoryAudits_OccurredAtUtcTicks",
                 table: "InventoryAudits",
