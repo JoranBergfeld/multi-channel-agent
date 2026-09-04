@@ -314,6 +314,7 @@ public sealed class SqlImportProposalStoreTests : SqlIntegrationTestBase
         InventoryId = _inventory.Value,
         OutcomeCode = "granted",
         OccurredAtUtc = occurredAt,
+        OccurredAtUtcTicks = occurredAt.UtcTicks,
         ExpiresAtUtc = occurredAt.AddDays(AuditFact.RetentionDays),
     };
 

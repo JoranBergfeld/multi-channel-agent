@@ -60,6 +60,10 @@ public static class ServiceCollectionExtensions
         services.AddScoped<IStockChangeSetStore, SqlStockChangeSetStore>();
         services.AddScoped<IReferenceCatalogStore, SqlReferenceCatalogStore>();
         services.AddScoped<IReferenceAdministrationStore, SqlReferenceAdministrationStore>();
+        services.AddScoped<IImportProposalStore, SqlImportProposalStore>();
+        services.AddScoped<IImportExecutionStore, SqlImportExecutionStore>();
+        services.AddScoped<IStockEmptyStateReader, SqlStockEmptyStateReader>();
+        services.AddScoped<IInventoryAuditRetentionStore, SqlInventoryAuditRetentionStore>();
         services.AddScoped<ReferenceChangeResolver>();
         services.AddScoped<ReferenceAdministrationService>();
         services.AddScoped<ReferenceListingService>();
@@ -93,6 +97,10 @@ public static class ServiceCollectionExtensions
         services.AddScoped<InventoryConfirmationService>();
         services.AddScoped<ConfirmationProposalLifecycle>();
         services.AddScoped<ConfirmationProposalCleanupCoordinator>();
+        services.AddScoped<ImportReferenceResolver>();
+        services.AddScoped<InitialImportService>();
+        services.AddScoped<ImportConfirmationService>();
+        services.AddScoped<ImportCleanupCoordinator>();
 
         return services;
     }

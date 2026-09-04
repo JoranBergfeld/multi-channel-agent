@@ -16,6 +16,7 @@ internal static class InventoryAuditMapper
         SubjectParticipantId = fact.SubjectParticipantId?.Value,
         OutcomeCode = fact.OutcomeCode,
         OccurredAtUtc = fact.OccurredAt,
+        OccurredAtUtcTicks = fact.OccurredAt.UtcTicks,
         ExpiresAtUtc = fact.ExpiresAt,
     };
 }
