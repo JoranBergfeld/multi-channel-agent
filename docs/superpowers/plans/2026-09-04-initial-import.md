@@ -3928,7 +3928,6 @@ public sealed class ImportRelationalModelTests
                 }));
 
         Assert.True(index.IsUnique);
-        Assert.NotNull(operation.FindProperty(nameof(ImportOperationEntity.ActorId)));
         Assert.Equal($"Status = '{nameof(ImportProposalStatus.Pending)}'", index.GetFilter());
     }
 
@@ -3959,6 +3958,7 @@ public sealed class ImportRelationalModelTests
     public void An_import_ledger_row_is_keyed_by_its_operation_and_unique_per_proposal()
     {
         var operation = BuildModel().FindEntityType(typeof(ImportOperationEntity))!;
+        Assert.NotNull(operation.FindProperty(nameof(ImportOperationEntity.ActorId)));
 
         Assert.Equal(
             [nameof(ImportOperationEntity.OperationId)],
@@ -4135,11 +4135,6 @@ public sealed class ImportProposalEntityConfiguration : IEntityTypeConfiguration
             .HasForeignKey(e => e.InventoryId)
             .OnDelete(DeleteBehavior.Cascade);
 
-        builder.HasOne<ParticipantEntity>()
-            .WithMany()
-            .HasForeignKey(e => e.ActorId)
-            .OnDelete(DeleteBehavior.NoAction);
-
         // The Participant is referenced without a cascade: deleting a Participant must not silently
         // take reviewed import work with it, and this is also the second path into the table, which
         // SQL Server would refuse as a second cascade.
@@ -4221,6 +4216,11 @@ public sealed class ImportOperationEntityConfiguration : IEntityTypeConfiguratio
             .WithMany()
             .HasForeignKey(e => e.InventoryId)
             .OnDelete(DeleteBehavior.Cascade);
+
+        builder.HasOne<ParticipantEntity>()
+            .WithMany()
+            .HasForeignKey(e => e.ActorId)
+            .OnDelete(DeleteBehavior.NoAction);
 
         // Deliberately no relationship to the proposal: settled proposals are swept after a day and
         // the ledger must outlive them.
@@ -6977,7 +6977,7 @@ Create `tests/MultiChannelAgent.IntegrationTests/InitialImportScenario.cs`, foll
     }
 ```
 
-Add the helpers this uses in the same file, following the shipped scenario's style: `Header` (the five column names joined by commas), `EligibilityAsync`, `ValidateAsync` (multipart), `ConfirmAsync`, `RejectAsync` (all returning a `(HttpStatusCode Status, JsonElement Body)` tuple), `Token`, `ErrorCodes`, `CountStockAsync`, `CountPendingImportsAsync`, `CountRawUploadsAsync`, `CountAuditsAsync`, `LedgerDigestAsync`, `AssertStockAsync`, plus `CompleteAsync`, `OutcomeAsync`, `TokenOf`, and `ProcessPendingAsync` copied from `ReferenceAdministrationScenario.cs` for the conversational steps that create and retire reference data.
+Add the helpers this uses in the same file, following the shipped scenario's style: `Header` (the five column names joined by commas), `EligibilityAsync`, `ValidateAsync` (multipart), `ConfirmAsync`, `RejectAsync` (all returning a `(HttpStatusCode Status, JsonElement Body)` tuple), `ProposalId`, `Token`, `ErrorCodes`, `CountStockAsync`, `CountPendingImportsAsync`, `CountRawUploadsAsync`, `CountAuditsAsync`, `LedgerDigestAsync`, `AssertStockAsync`, plus `CompleteAsync`, `OutcomeAsync`, `TokenOf`, and `ProcessPendingAsync` copied from `ReferenceAdministrationScenario.cs` for the conversational steps that create and retire reference data.
 
 - [ ] **Step 2: Write both runners**
 
