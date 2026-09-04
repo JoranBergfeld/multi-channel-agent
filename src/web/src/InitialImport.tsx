@@ -18,12 +18,28 @@ interface InitialImportProps {
   csrfToken: string;
   /** Bumped by the parent whenever Stock may have changed, to re-read whether importing is still offered. */
   refetchToken: number;
-  /** Called exactly once per import that actually created Stock Entries, so the workspace refetches. */
+  /**
+   * Called exactly once, on each path where Stock here may have changed, so the workspace refetches:
+   * when an import completes, and when a cancellation is answered with a settled proposal - because
+   * that answer cannot rule out an import that was confirmed somewhere else.
+   */
   onImported: () => void;
 }
 
 /** What one in-flight request is doing, so a button can say so and no second one can start. */
 type ImportAction = 'validating' | 'confirming' | 'cancelling';
+
+/**
+ * The one sentence on screen, and where it came from, because the two are not superseded alike. A
+ * background eligibility read's failure describes that read, so the next read that answers has
+ * replaced it. A decision's result describes Stock that was or was not created, and has to outlive
+ * the eligibility re-read that same decision deliberately asks for.
+ */
+type ImportAlert = { source: 'background' | 'action'; message: string };
+
+const actionAlert = (message: string): ImportAlert => ({ source: 'action', message });
+
+const backgroundAlert = (message: string): ImportAlert => ({ source: 'background', message });
 
 const HEADING_ID = 'initialImportHeading';
 const FILE_INPUT_ID = 'initialImportFile';
@@ -88,7 +104,7 @@ function InitialImport({ inventoryId, csrfToken, refetchToken, onImported }: Ini
   const [validation, setValidation] = useState<ImportValidation | null>(null);
   const [busy, setBusy] = useState<ImportAction | null>(null);
   const [completedEntryCount, setCompletedEntryCount] = useState<number | null>(null);
-  const [alert, setAlert] = useState<string | null>(null);
+  const [alert, setAlert] = useState<ImportAlert | null>(null);
 
   /**
    * Whether the server offers this workflow here, as a plain answer. A null eligibility is the one
@@ -138,6 +154,13 @@ function InitialImport({ inventoryId, csrfToken, refetchToken, onImported }: Ini
         // moment, that nothing on screen is about any more.
         if (!ignored) {
           applyEligibility(available);
+
+          // A read that answered is what the last failed read could not give, so its message has
+          // stopped describing anything and goes. Only a background read's own failure is cleared
+          // here, and deliberately not in applyEligibility: confirming and cancelling re-read
+          // eligibility on purpose, and clearing more than this would erase the answer they just
+          // gave - including the one that says the workspace was refetched.
+          setAlert((current) => (current?.source === 'background' ? null : current));
         }
       } catch (failure) {
         // A re-check that could not be made is not an answer, so nothing on screen moves: the offer,
@@ -145,8 +168,10 @@ function InitialImport({ inventoryId, csrfToken, refetchToken, onImported }: Ini
         // they were, and the next bump of refetchToken asks again.
         if (!ignored) {
           setAlert(
-            `Checking whether Initial Import is available failed: ${describeFailure(failure)} ` +
-              'Nothing was created, and any preview already on screen is untouched.',
+            backgroundAlert(
+              `Checking whether Initial Import is available failed: ${describeFailure(failure)} ` +
+                'Nothing was created, and any preview already on screen is untouched.',
+            ),
           );
         }
       }
@@ -187,7 +212,11 @@ function InitialImport({ inventoryId, csrfToken, refetchToken, onImported }: Ini
         await refreshEligibility();
       }
     } catch (failure) {
-      setAlert(`Reading that file failed: ${describeFailure(failure)} Nothing was created - choose the file again.`);
+      setAlert(
+        actionAlert(
+          `Reading that file failed: ${describeFailure(failure)} Nothing was created - choose the file again.`,
+        ),
+      );
     } finally {
       setBusy(null);
     }
@@ -215,35 +244,49 @@ function InitialImport({ inventoryId, csrfToken, refetchToken, onImported }: Ini
         case 'conflict':
           // The proposal is settled server-side either way, so its preview can never be confirmed.
           setValidation(null);
-          setAlert(CONFLICT_MESSAGES[result.code]);
+          setAlert(actionAlert(CONFLICT_MESSAGES[result.code]));
           await refreshEligibility();
           return;
 
         case 'settled':
+          // Confirming replays an import that already ran rather than refusing it - the server
+          // answers from its ledger before it looks for a pending proposal - so a 404 here means no
+          // confirmation of this proposal was ever recorded for this Participant. Saying nothing was
+          // created is reading that replay, not assuming anything about what a 404 leaves behind.
           setValidation(null);
-          setAlert('That import is no longer pending, and nothing was created. Choose the file again to start over.');
+          setAlert(
+            actionAlert(
+              'That import is no longer pending, and nothing was created. Choose the file again to start over.',
+            ),
+          );
           await refreshEligibility();
           return;
 
         case 'token-mismatch':
           // The proposal is deliberately left pending, so the reviewed preview is still worth having.
           setAlert(
-            'That confirmation was refused because it did not match the pending import. ' +
-              'Choose the file again to preview it afresh.',
+            actionAlert(
+              'That confirmation was refused because it did not match the pending import. ' +
+                'Choose the file again to preview it afresh.',
+            ),
           );
           return;
 
         case 'unavailable':
           // Confirming the same proposal again re-reports what it did rather than importing twice, so
           // retrying is safe even if this request did reach the server.
-          setAlert('Confirming failed. Nothing has been created unless a retry says so - try confirming again.');
+          setAlert(
+            actionAlert('Confirming failed. Nothing has been created unless a retry says so - try confirming again.'),
+          );
           return;
 
         default:
           return assertNever(result);
       }
     } catch (failure) {
-      setAlert(`Confirming failed: ${describeFailure(failure)} Try confirming again - it can never import twice.`);
+      setAlert(
+        actionAlert(`Confirming failed: ${describeFailure(failure)} Try confirming again - it can never import twice.`),
+      );
     } finally {
       setBusy(null);
     }
@@ -264,33 +307,57 @@ function InitialImport({ inventoryId, csrfToken, refetchToken, onImported }: Ini
           return;
 
         case 'settled':
+          // Cancelling, unlike confirming, does not replay anything: the server looks for a pending
+          // proposal and answers 404 when there is none. That one answer covers a cancellation in
+          // another tab, an expiry, a superseding upload - and an import that was confirmed
+          // elsewhere. Naming any of them, "nothing was created" included, would be inventing the
+          // one this reply deliberately does not distinguish. So the preview and its spent token go,
+          // the offer is re-read from the server rather than guessed, and the workspace refetches:
+          // if Stock was created somewhere else, this is where this page stops being wrong about it.
           setValidation(null);
-          setAlert('That import was no longer pending. Nothing was created.');
+          setAlert(
+            actionAlert(
+              'That import is no longer pending - it may have been cancelled, it may have expired, or it may ' +
+                'already have been confirmed. The Inventory view has been refreshed to show what is here now.',
+            ),
+          );
           await refreshEligibility();
+          onImported();
           return;
 
         case 'conflict':
           setValidation(null);
-          setAlert(CONFLICT_MESSAGES[result.code]);
+          setAlert(actionAlert(CONFLICT_MESSAGES[result.code]));
           await refreshEligibility();
           return;
 
         case 'token-mismatch':
           setAlert(
-            'That cancellation was refused because it did not match the pending import. ' +
-              'Nothing was created - choose the file again to preview it afresh.',
+            actionAlert(
+              'That cancellation was refused because it did not match the pending import. ' +
+                'Nothing was created - choose the file again to preview it afresh.',
+            ),
           );
           return;
 
         case 'unavailable':
-          setAlert('Cancelling failed, so this import is still pending. Nothing was created - try cancelling again.');
+          // What the proposal is now is exactly what this refusal does not say, and a cancellation
+          // that did settle before the answer was lost simply answers 'settled' when it is repeated.
+          setAlert(
+            actionAlert(
+              'Cancelling failed, so this import may still be pending. Cancelling never creates anything - ' +
+                'try cancelling again.',
+            ),
+          );
           return;
 
         default:
           return assertNever(result);
       }
     } catch (failure) {
-      setAlert(`Cancelling failed: ${describeFailure(failure)} Nothing was created - try cancelling again.`);
+      setAlert(
+        actionAlert(`Cancelling failed: ${describeFailure(failure)} Nothing was created - try cancelling again.`),
+      );
     } finally {
       setBusy(null);
     }
@@ -306,7 +373,7 @@ function InitialImport({ inventoryId, csrfToken, refetchToken, onImported }: Ini
     <section aria-labelledby={HEADING_ID}>
       <h2 id={HEADING_ID}>Initial Import</h2>
 
-      {alert !== null && <p role="alert">{alert}</p>}
+      {alert !== null && <p role="alert">{alert.message}</p>}
 
       {completedEntryCount !== null && (
         <p role="status">Imported {entryCountLabel(completedEntryCount)}, exactly as previewed.</p>

@@ -6842,12 +6842,28 @@ interface InitialImportProps {
   csrfToken: string;
   /** Bumped by the parent whenever Stock may have changed, to re-read whether importing is still offered. */
   refetchToken: number;
-  /** Called exactly once per import that actually created Stock Entries, so the workspace refetches. */
+  /**
+   * Called exactly once, on each path where Stock here may have changed, so the workspace refetches:
+   * when an import completes, and when a cancellation is answered with a settled proposal - because
+   * that answer cannot rule out an import that was confirmed somewhere else.
+   */
   onImported: () => void;
 }
 
 /** What one in-flight request is doing, so a button can say so and no second one can start. */
 type ImportAction = 'validating' | 'confirming' | 'cancelling';
+
+/**
+ * The one sentence on screen, and where it came from, because the two are not superseded alike. A
+ * background eligibility read's failure describes that read, so the next read that answers has
+ * replaced it. A decision's result describes Stock that was or was not created, and has to outlive
+ * the eligibility re-read that same decision deliberately asks for.
+ */
+type ImportAlert = { source: 'background' | 'action'; message: string };
+
+const actionAlert = (message: string): ImportAlert => ({ source: 'action', message });
+
+const backgroundAlert = (message: string): ImportAlert => ({ source: 'background', message });
 
 const HEADING_ID = 'initialImportHeading';
 const FILE_INPUT_ID = 'initialImportFile';
@@ -6912,7 +6928,7 @@ function InitialImport({ inventoryId, csrfToken, refetchToken, onImported }: Ini
   const [validation, setValidation] = useState<ImportValidation | null>(null);
   const [busy, setBusy] = useState<ImportAction | null>(null);
   const [completedEntryCount, setCompletedEntryCount] = useState<number | null>(null);
-  const [alert, setAlert] = useState<string | null>(null);
+  const [alert, setAlert] = useState<ImportAlert | null>(null);
 
   /**
    * Whether the server offers this workflow here, as a plain answer. A null eligibility is the one
@@ -6962,6 +6978,13 @@ function InitialImport({ inventoryId, csrfToken, refetchToken, onImported }: Ini
         // moment, that nothing on screen is about any more.
         if (!ignored) {
           applyEligibility(available);
+
+          // A read that answered is what the last failed read could not give, so its message has
+          // stopped describing anything and goes. Only a background read's own failure is cleared
+          // here, and deliberately not in applyEligibility: confirming and cancelling re-read
+          // eligibility on purpose, and clearing more than this would erase the answer they just
+          // gave - including the one that says the workspace was refetched.
+          setAlert((current) => (current?.source === 'background' ? null : current));
         }
       } catch (failure) {
         // A re-check that could not be made is not an answer, so nothing on screen moves: the offer,
@@ -6969,8 +6992,10 @@ function InitialImport({ inventoryId, csrfToken, refetchToken, onImported }: Ini
         // they were, and the next bump of refetchToken asks again.
         if (!ignored) {
           setAlert(
-            `Checking whether Initial Import is available failed: ${describeFailure(failure)} ` +
-              'Nothing was created, and any preview already on screen is untouched.',
+            backgroundAlert(
+              `Checking whether Initial Import is available failed: ${describeFailure(failure)} ` +
+                'Nothing was created, and any preview already on screen is untouched.',
+            ),
           );
         }
       }
@@ -7011,7 +7036,11 @@ function InitialImport({ inventoryId, csrfToken, refetchToken, onImported }: Ini
         await refreshEligibility();
       }
     } catch (failure) {
-      setAlert(`Reading that file failed: ${describeFailure(failure)} Nothing was created - choose the file again.`);
+      setAlert(
+        actionAlert(
+          `Reading that file failed: ${describeFailure(failure)} Nothing was created - choose the file again.`,
+        ),
+      );
     } finally {
       setBusy(null);
     }
@@ -7039,35 +7068,49 @@ function InitialImport({ inventoryId, csrfToken, refetchToken, onImported }: Ini
         case 'conflict':
           // The proposal is settled server-side either way, so its preview can never be confirmed.
           setValidation(null);
-          setAlert(CONFLICT_MESSAGES[result.code]);
+          setAlert(actionAlert(CONFLICT_MESSAGES[result.code]));
           await refreshEligibility();
           return;
 
         case 'settled':
+          // Confirming replays an import that already ran rather than refusing it - the server
+          // answers from its ledger before it looks for a pending proposal - so a 404 here means no
+          // confirmation of this proposal was ever recorded for this Participant. Saying nothing was
+          // created is reading that replay, not assuming anything about what a 404 leaves behind.
           setValidation(null);
-          setAlert('That import is no longer pending, and nothing was created. Choose the file again to start over.');
+          setAlert(
+            actionAlert(
+              'That import is no longer pending, and nothing was created. Choose the file again to start over.',
+            ),
+          );
           await refreshEligibility();
           return;
 
         case 'token-mismatch':
           // The proposal is deliberately left pending, so the reviewed preview is still worth having.
           setAlert(
-            'That confirmation was refused because it did not match the pending import. ' +
-              'Choose the file again to preview it afresh.',
+            actionAlert(
+              'That confirmation was refused because it did not match the pending import. ' +
+                'Choose the file again to preview it afresh.',
+            ),
           );
           return;
 
         case 'unavailable':
           // Confirming the same proposal again re-reports what it did rather than importing twice, so
           // retrying is safe even if this request did reach the server.
-          setAlert('Confirming failed. Nothing has been created unless a retry says so - try confirming again.');
+          setAlert(
+            actionAlert('Confirming failed. Nothing has been created unless a retry says so - try confirming again.'),
+          );
           return;
 
         default:
           return assertNever(result);
       }
     } catch (failure) {
-      setAlert(`Confirming failed: ${describeFailure(failure)} Try confirming again - it can never import twice.`);
+      setAlert(
+        actionAlert(`Confirming failed: ${describeFailure(failure)} Try confirming again - it can never import twice.`),
+      );
     } finally {
       setBusy(null);
     }
@@ -7088,33 +7131,57 @@ function InitialImport({ inventoryId, csrfToken, refetchToken, onImported }: Ini
           return;
 
         case 'settled':
+          // Cancelling, unlike confirming, does not replay anything: the server looks for a pending
+          // proposal and answers 404 when there is none. That one answer covers a cancellation in
+          // another tab, an expiry, a superseding upload - and an import that was confirmed
+          // elsewhere. Naming any of them, "nothing was created" included, would be inventing the
+          // one this reply deliberately does not distinguish. So the preview and its spent token go,
+          // the offer is re-read from the server rather than guessed, and the workspace refetches:
+          // if Stock was created somewhere else, this is where this page stops being wrong about it.
           setValidation(null);
-          setAlert('That import was no longer pending. Nothing was created.');
+          setAlert(
+            actionAlert(
+              'That import is no longer pending - it may have been cancelled, it may have expired, or it may ' +
+                'already have been confirmed. The Inventory view has been refreshed to show what is here now.',
+            ),
+          );
           await refreshEligibility();
+          onImported();
           return;
 
         case 'conflict':
           setValidation(null);
-          setAlert(CONFLICT_MESSAGES[result.code]);
+          setAlert(actionAlert(CONFLICT_MESSAGES[result.code]));
           await refreshEligibility();
           return;
 
         case 'token-mismatch':
           setAlert(
-            'That cancellation was refused because it did not match the pending import. ' +
-              'Nothing was created - choose the file again to preview it afresh.',
+            actionAlert(
+              'That cancellation was refused because it did not match the pending import. ' +
+                'Nothing was created - choose the file again to preview it afresh.',
+            ),
           );
           return;
 
         case 'unavailable':
-          setAlert('Cancelling failed, so this import is still pending. Nothing was created - try cancelling again.');
+          // What the proposal is now is exactly what this refusal does not say, and a cancellation
+          // that did settle before the answer was lost simply answers 'settled' when it is repeated.
+          setAlert(
+            actionAlert(
+              'Cancelling failed, so this import may still be pending. Cancelling never creates anything - ' +
+                'try cancelling again.',
+            ),
+          );
           return;
 
         default:
           return assertNever(result);
       }
     } catch (failure) {
-      setAlert(`Cancelling failed: ${describeFailure(failure)} Nothing was created - try cancelling again.`);
+      setAlert(
+        actionAlert(`Cancelling failed: ${describeFailure(failure)} Nothing was created - try cancelling again.`),
+      );
     } finally {
       setBusy(null);
     }
@@ -7130,7 +7197,7 @@ function InitialImport({ inventoryId, csrfToken, refetchToken, onImported }: Ini
     <section aria-labelledby={HEADING_ID}>
       <h2 id={HEADING_ID}>Initial Import</h2>
 
-      {alert !== null && <p role="alert">{alert}</p>}
+      {alert !== null && <p role="alert">{alert.message}</p>}
 
       {completedEntryCount !== null && (
         <p role="status">Imported {entryCountLabel(completedEntryCount)}, exactly as previewed.</p>
@@ -7427,19 +7494,26 @@ keyed by the Active Inventory exactly as `InventoryGovernance` already is:
 Run: `npm --prefix src/web run build && npm --prefix src/web run lint`
 Expected: both succeed.
 
-That is the whole of this task's automated evidence, and it is worth saying exactly what it is not:
-there are no runtime component tests here. Nothing renders `InitialImport`, chooses a file, clicks
-Import, or asserts what is still on screen afterwards - `src/web` has no test runner, and adding one
-is not this task's job. What the build does check is this client's own use of the payload shapes:
-every outcome union is closed with `assertNever`, and both prose maps are `Record`s keyed by a closed
-code set, so an outcome or a code without an answer for it fails the build. The shapes themselves are
-this client's assumption about the routes rather than a runtime check of what comes back, so it is
-Task 16 that proves the routes actually answer in them.
+That is the whole of this task's committed automated evidence, and it is worth saying exactly what it
+is not: there are no runtime component tests here. Nothing in this repository renders
+`InitialImport`, chooses a file, clicks Import, or asserts what is still on screen afterwards -
+`src/web` has no test runner, and adding one is not this task's job. What the build does check is this
+client's own use of the payload shapes: every outcome union is closed with `assertNever`, and both
+prose maps are `Record`s keyed by a closed code set, so an outcome or a code without an answer for it
+fails the build. The shapes themselves are this client's assumption about the routes rather than a
+runtime check of what comes back, so it is Task 16 that proves the routes actually answer in them.
 
-The status mapping in `importApi.ts` - which status is an answer and which is a failure - was
-exercised against fabricated `Response`s with a throwaway `node --experimental-strip-types` script,
-deliberately left uncommitted for the same reason the paragraph above is careful: one scratch file is
-not a test suite, and committing it would dress it up as one.
+Two throwaway scripts, both deliberately left uncommitted, checked what the build cannot. The status
+mapping in `importApi.ts` - which status is an answer and which is a failure - was exercised against
+fabricated `Response`s with a `node --experimental-strip-types` script. The component itself was then
+run the same way for the outcome work below: the repo's own TypeScript transpiled `InitialImport.tsx`
+with `h`/`Fragment` as its JSX factory, a small stand-in supplied `useState`, `useEffect`,
+`useCallback` and a render loop, and a fabricated `fetch` played each scenario - choose a file, click
+Cancel, meet a 404 - while the script asserted the sentence on screen, whether the preview and its
+token survived, how many times `onImported` was called, and whether eligibility was re-read. Deleting
+the provenance guard in the eligibility effect made two of those checks fail, which is what says the
+guard is load-bearing rather than decoration. None of that is a test suite, and committing it would
+dress one afternoon's scaffolding up as one.
 
 - [ ] **Step 5: Commit**
 
@@ -7449,10 +7523,13 @@ git add src/web/src/importApi.ts src/web/src/InitialImport.tsx src/web/src/App.t
 git commit -m "feat(web): preview and confirm the exact Initial Import for #34"
 ```
 
-This task settled over two commits: the one above, and `fix(web): preserve import preview on
+This task settled over three commits: the one above, `fix(web): preserve import preview on
 transient eligibility failures for #34`, which corrected `fetchEligibility` to answer null only for
-the 404 that means "not offered here" and to raise every other refusal. The blocks above are the
-result of both, so following them reproduces the settled client in one pass.
+the 404 that means "not offered here" and to raise every other refusal, and `fix(web): keep Initial
+Import outcomes truthful and current for #34`, which stopped a cancellation's 404 claiming nothing
+was created and made a background read that answers clear the stale error left by one that could
+not. The blocks above are the result of all three, so following them reproduces the settled client in
+one pass.
 
 ### Why the client is shaped the way it is
 
@@ -7495,6 +7572,35 @@ not quietly undo one.
   the preview *is* the pending import; a failed cancellation keeps it and its token so it can simply
   be tried again. A failed confirmation keeps them too, because confirming the same proposal twice
   re-reports what it did rather than importing twice - the retry is safe and still shows the count.
+- **A cancellation's 404 is not evidence that nothing was created, so it no longer says so.** The
+  server answers a cancellation by looking for a pending proposal and refusing with a bare 404 when
+  there is none - and "none" covers a proposal cancelled in another tab, one that expired, one a
+  newer upload superseded, *and* one that was confirmed elsewhere while this page still showed its
+  preview. Cancelling replays nothing, so this reply cannot tell those apart, and the sentence that
+  used to read "Nothing was created" was picking the reading that happened to be reassuring. It now
+  says only what is true - the import is no longer pending, and it may have been any of those - and
+  the component makes the second half true by acting: the stale preview and its spent token go, the
+  offer is re-read from the server rather than inferred, and `onImported()` fires so Stock and
+  References refetch. If an import did complete in another tab, that refetch is the moment this page
+  stops being wrong about it; if one did not, the refetch costs a read that changes nothing on screen.
+  This and a completed confirmation are the only two paths that call `onImported`, each exactly once
+  and each immediately before returning. An ordinary cancellation deliberately does not: the server
+  settled a proposal that created nothing, so there is nothing new for the workspace to fetch.
+- **A confirmation's 404 *is* evidence, because confirming replays.** `ConfirmAsync` reads the
+  execution ledger before it looks for a pending proposal, so an import that already ran is
+  re-reported rather than refused. A 404 from `confirm` therefore means no confirmation of this
+  proposal was ever recorded for this Participant - it was cancelled, expired, or superseded - and
+  "nothing was created" is that replay's answer rather than an assumption about what a 404 hides.
+  The same asymmetry is why `reject`'s 404 gets the neutral wording and `confirm`'s does not.
+- **An alert remembers where it came from.** A failed background eligibility read and a decision's
+  result are both one sentence in the same `role="alert"` paragraph, but they stop being true at
+  different moments, so `ImportAlert` tags which is which. The effect's success branch clears only a
+  `'background'` alert: a read that answered is exactly what the read that failed could not give, and
+  leaving its error up would strand the workflow on a stale failure for the rest of the session.
+  Nothing is cleared in `applyEligibility`, deliberately - confirming and cancelling re-read
+  eligibility on purpose, and cancellation's settled path also refetches the workspace, so a clear
+  that ignored provenance would erase the very message that decision had just set, including the one
+  promising the refresh that erased it.
 - **Eligibility is re-read deliberately rather than guessed.** The component re-reads it whenever
   `refetchToken` changes, and after any refusal that may have ended the workflow. An answer that
   arrives after the effect that asked for it has been replaced is dropped by the `ignored` guard,
