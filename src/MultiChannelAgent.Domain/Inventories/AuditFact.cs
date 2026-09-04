@@ -22,6 +22,15 @@ public enum AuditEventType
 
     /// <summary>Stock was set to an exact amount.</summary>
     StockSet,
+
+    /// <summary>Stock was moved between placements, possibly merging into Equivalent Stock there.</summary>
+    StockMoved,
+
+    /// <summary>A Stock Entry was renamed, possibly merging into Equivalent Stock under the new name.</summary>
+    StockRenamed,
+
+    /// <summary>A zero-quantity Stock Entry was permanently removed after explicit confirmation.</summary>
+    StockForgotten,
 }
 
 /// <summary>
