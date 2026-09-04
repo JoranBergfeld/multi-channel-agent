@@ -31,6 +31,30 @@ public enum AuditEventType
 
     /// <summary>A zero-quantity Stock Entry was permanently removed after explicit confirmation.</summary>
     StockForgotten,
+
+    /// <summary>An Inventory-owned Unit was created. The fact records that it happened, never which Unit or under what name.</summary>
+    UnitCreated,
+
+    /// <summary>A Unit's canonical name changed. Its identity, and every Stock Entry referencing it, are untouched.</summary>
+    UnitRenamed,
+
+    /// <summary>A non-reserved alias was added to a Unit's shared term namespace.</summary>
+    UnitAliasAdded,
+
+    /// <summary>A non-reserved alias was removed from a Unit's shared term namespace.</summary>
+    UnitAliasRemoved,
+
+    /// <summary>An unused Unit was withdrawn from matching and assignment after explicit Owner confirmation. Its identity remains.</summary>
+    UnitRetired,
+
+    /// <summary>An Inventory-owned Location was created.</summary>
+    LocationCreated,
+
+    /// <summary>A Location's name changed. Its identity, and every Stock Entry placed there, are untouched.</summary>
+    LocationRenamed,
+
+    /// <summary>An unused Location was withdrawn from matching and assignment after explicit Owner confirmation. Its identity remains.</summary>
+    LocationRetired,
 }
 
 /// <summary>
