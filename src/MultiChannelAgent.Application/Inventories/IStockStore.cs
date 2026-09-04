@@ -34,7 +34,26 @@ public interface IStockStore
     /// loading the matches.
     /// </summary>
     Task<StockMatchFacets> SummarizeMatchFacetsAsync(StockFindQuery query, int maxFacetValues, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// The current optimistic-concurrency version of each named Stock Entry within
+    /// <paramref name="inventoryId"/>. Entries that do not exist, or that belong to another
+    /// Inventory, are simply absent - a version can never be read across an Inventory boundary.
+    ///
+    /// This exists separately from the display projection on purpose: a concurrency stamp is a
+    /// persistence concern, and every List row and Find candidate would otherwise carry one into
+    /// views and payloads that must never expose it.
+    /// </summary>
+    Task<IReadOnlyList<StockEntryVersion>> ReadVersionsAsync(
+        InventoryId inventoryId, IReadOnlyList<StockEntryId> stockEntryIds, CancellationToken cancellationToken);
 }
+
+/// <summary>
+/// One Stock Entry's current version and Quantity. The stamp - not the Quantity - is what a proposal
+/// pins: an unrelated write that happened to restore the same amount still changes the stamp, and
+/// must still invalidate a proposal decided before it.
+/// </summary>
+public sealed record StockEntryVersion(StockEntryId StockEntryId, Guid ConcurrencyStamp, Quantity Quantity);
 
 /// <summary>
 /// What the matches of one Find differ by: the Unit canonical names and Location names they occupy

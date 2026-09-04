@@ -153,6 +153,29 @@ public sealed class SqlStockStore(MultiChannelAgentDbContext db) : IStockStore
         return new StockMatchFacets(unitNames, locationNames, hasUnlocated);
     }
 
+    public async Task<IReadOnlyList<StockEntryVersion>> ReadVersionsAsync(
+        InventoryId inventoryId, IReadOnlyList<StockEntryId> stockEntryIds, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(stockEntryIds);
+
+        if (stockEntryIds.Count == 0)
+        {
+            return [];
+        }
+
+        var ids = stockEntryIds.Select(id => id.Value).Distinct().ToList();
+
+        var rows = await db.StockEntries
+            .AsNoTracking()
+            .Where(e => e.InventoryId == inventoryId.Value && ids.Contains(e.Id))
+            .Select(e => new { e.Id, e.ConcurrencyStamp, e.Quantity })
+            .ToListAsync(cancellationToken);
+
+        return rows
+            .Select(row => new StockEntryVersion(new StockEntryId(row.Id), row.ConcurrencyStamp, Quantity.Create(row.Quantity)))
+            .ToList();
+    }
+
     private IQueryable<JoinedRow> ScopedRows(InventoryId inventoryId) =>
         from stockEntry in db.StockEntries.AsNoTracking()
         where stockEntry.InventoryId == inventoryId.Value

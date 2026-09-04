@@ -12,7 +12,19 @@ public sealed class InMemoryStockStore : IStockStore
 {
     private readonly List<(InventoryId InventoryId, StockEntrySummary Row)> _rows = [];
 
-    public void Add(InventoryId inventoryId, StockEntrySummary row) => _rows.Add((inventoryId, row));
+    // The optimistic-concurrency version of each row, regenerated on every write exactly as the real
+    // column is, so a proposal pinned to a stamp is invalidated by any write - even one that restored
+    // the same Quantity.
+    private readonly Dictionary<StockEntryId, Guid> _stamps = [];
+
+    public void Add(InventoryId inventoryId, StockEntrySummary row)
+    {
+        _rows.Add((inventoryId, row));
+        _stamps[row.Id] = Guid.NewGuid();
+    }
+
+    /// <summary>The current version of one row, or <see cref="Guid.Empty"/> when it is not there.</summary>
+    public Guid StampOf(StockEntryId id) => _stamps.TryGetValue(id, out var stamp) ? stamp : Guid.Empty;
 
     /// <summary>The row with this identity in this Inventory, or null when it is not (or no longer) there.</summary>
     public StockEntrySummary? Find(InventoryId inventoryId, StockEntryId id) =>
@@ -29,6 +41,7 @@ public sealed class InMemoryStockStore : IStockStore
 
         var updated = _rows[index].Row with { Quantity = quantity };
         _rows[index] = (inventoryId, updated);
+        _stamps[id] = Guid.NewGuid();
         return updated;
     }
 
@@ -55,7 +68,21 @@ public sealed class InMemoryStockStore : IStockStore
             quantity);
 
         _rows.Add((inventoryId, row));
+        _stamps[row.Id] = Guid.NewGuid();
         return row;
+    }
+
+    public Task<IReadOnlyList<StockEntryVersion>> ReadVersionsAsync(
+        InventoryId inventoryId, IReadOnlyList<StockEntryId> stockEntryIds, CancellationToken cancellationToken)
+    {
+        var wanted = stockEntryIds.ToHashSet();
+
+        IReadOnlyList<StockEntryVersion> versions = _rows
+            .Where(r => r.InventoryId == inventoryId && wanted.Contains(r.Row.Id))
+            .Select(r => new StockEntryVersion(r.Row.Id, StampOf(r.Row.Id), r.Row.Quantity))
+            .ToList();
+
+        return Task.FromResult(versions);
     }
 
     public Task<IReadOnlyList<StockEntrySummary>> ListPageAsync(StockListQuery query, CancellationToken cancellationToken)

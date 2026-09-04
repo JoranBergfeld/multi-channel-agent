@@ -53,4 +53,18 @@ public sealed class SqlInventoryReferenceStore(MultiChannelAgentDbContext db) : 
 
         return location is null ? null : new LocationId(location.Id);
     }
+
+    public async Task<string?> FindUnitCanonicalNameAsync(InventoryId inventoryId, UnitId unitId, CancellationToken cancellationToken) =>
+        await db.Units
+            .AsNoTracking()
+            .Where(u => u.InventoryId == inventoryId.Value && u.Id == unitId.Value)
+            .Select(u => u.CanonicalName)
+            .FirstOrDefaultAsync(cancellationToken);
+
+    public async Task<string?> FindLocationNameAsync(InventoryId inventoryId, LocationId locationId, CancellationToken cancellationToken) =>
+        await db.Locations
+            .AsNoTracking()
+            .Where(l => l.InventoryId == inventoryId.Value && l.Id == locationId.Value)
+            .Select(l => l.Name)
+            .FirstOrDefaultAsync(cancellationToken);
 }

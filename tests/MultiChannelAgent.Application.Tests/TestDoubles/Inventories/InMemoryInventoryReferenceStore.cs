@@ -14,10 +14,18 @@ public sealed class InMemoryInventoryReferenceStore : IInventoryReferenceStore
     private readonly Dictionary<(InventoryId, string), LocationId> _locationNames = [];
     private readonly HashSet<(InventoryId, UnitId)> _units = [];
     private readonly HashSet<(InventoryId, LocationId)> _locations = [];
+    private readonly Dictionary<(InventoryId, UnitId), string> _unitCanonicalNames = [];
+    private readonly Dictionary<(InventoryId, LocationId), string> _locationDisplayNames = [];
 
     public void AddUnit(InventoryId inventoryId, UnitId unitId, params string[] terms)
     {
         _units.Add((inventoryId, unitId));
+        if (terms.Length > 0)
+        {
+            // The first term is the canonical name, exactly as a Unit's own canonical name leads its terms.
+            _unitCanonicalNames[(inventoryId, unitId)] = terms[0];
+        }
+
         foreach (var term in terms)
         {
             _unitTerms[(inventoryId, NameNormalization.Normalize(term))] = unitId;
@@ -28,7 +36,14 @@ public sealed class InMemoryInventoryReferenceStore : IInventoryReferenceStore
     {
         _locations.Add((inventoryId, locationId));
         _locationNames[(inventoryId, NameNormalization.Normalize(name))] = locationId;
+        _locationDisplayNames[(inventoryId, locationId)] = name;
     }
+
+    public Task<string?> FindUnitCanonicalNameAsync(InventoryId inventoryId, UnitId unitId, CancellationToken cancellationToken) =>
+        Task.FromResult(_unitCanonicalNames.TryGetValue((inventoryId, unitId), out var name) ? name : null);
+
+    public Task<string?> FindLocationNameAsync(InventoryId inventoryId, LocationId locationId, CancellationToken cancellationToken) =>
+        Task.FromResult(_locationDisplayNames.TryGetValue((inventoryId, locationId), out var name) ? name : null);
 
     public Task<UnitId?> ResolveUnitAsync(InventoryId inventoryId, string reference, CancellationToken cancellationToken)
     {
