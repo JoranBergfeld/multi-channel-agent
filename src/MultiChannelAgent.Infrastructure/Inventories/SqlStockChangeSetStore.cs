@@ -165,7 +165,7 @@ public sealed class SqlStockChangeSetStore(MultiChannelAgentDbContext db) : ISto
         }
         catch (DbUpdateException exception)
         {
-            await AbandonAsync(transaction);
+            await db.AbandonAsync(transaction);
 
             // A competing writer may have been this very operation, applied by another replica. Its
             // ledger row is the authoritative record of what happened, so converge on re-reporting it
@@ -194,28 +194,9 @@ public sealed class SqlStockChangeSetStore(MultiChannelAgentDbContext db) : ISto
             // ChangeTracker would not - so the fault is abandoned properly here and then propagates
             // unchanged, because nothing has been established that would justify calling it a
             // conflict.
-            await AbandonAsync(transaction);
+            await db.AbandonAsync(transaction);
             throw;
         }
-    }
-
-    /// <summary>
-    /// Ends a doomed attempt so it leaves nothing behind in either the database or this process.
-    ///
-    /// Clearing the ChangeTracker is the half that is easy to forget and expensive to miss: by the
-    /// time a change set fails it may already have staged inserts (a <c>Created</c> change, or a
-    /// <c>Split</c>'s destination), and this DbContext is scoped to a whole batch of Turns. Rolling
-    /// back without clearing would leave those Added entities waiting for the next Turn's
-    /// <c>SaveChangesAsync</c> to flush Stock nobody ever confirmed.
-    ///
-    /// It is cleared first, and the rollback deliberately does not observe the caller's
-    /// CancellationToken: cleanup that is itself cancellable is not cleanup, and a cancelled rollback
-    /// here would replace the fault being reported with a less useful one.
-    /// </summary>
-    private async Task AbandonAsync(IDbContextTransaction transaction)
-    {
-        db.ChangeTracker.Clear();
-        await transaction.RollbackAsync(CancellationToken.None);
     }
 
     /// <summary>
@@ -387,7 +368,7 @@ public sealed class SqlStockChangeSetStore(MultiChannelAgentDbContext db) : ISto
 
     private async Task<StockChangeSetStoreResult> RolledBackConflictAsync(IDbContextTransaction transaction)
     {
-        await AbandonAsync(transaction);
+        await db.AbandonAsync(transaction);
 
         return new StockChangeSetStoreResult(StockChangeSetStoreOutcome.Conflict, null);
     }

@@ -38,22 +38,38 @@ public sealed class SqlConfirmationProposalStore(MultiChannelAgentDbContext db) 
     {
         await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
 
-        var superseded = await db.ConfirmationProposals
-            .Where(p => p.ParticipantId == proposal.ParticipantId.Value
-                && p.ChannelConversationId == proposal.ChannelConversationId
-                && p.Status == PendingStatus)
-            .ExecuteUpdateAsync(
-                setters => setters
-                    .SetProperty(p => p.Status, nameof(ProposalStatus.Superseded))
-                    .SetProperty(p => p.SettledAt, now)
-                    .SetProperty(p => p.SettledAtTicks, now.UtcTicks),
-                cancellationToken);
+        try
+        {
+            var superseded = await db.ConfirmationProposals
+                .Where(p => p.ParticipantId == proposal.ParticipantId.Value
+                    && p.ChannelConversationId == proposal.ChannelConversationId
+                    && p.Status == PendingStatus)
+                .ExecuteUpdateAsync(
+                    setters => setters
+                        .SetProperty(p => p.Status, nameof(ProposalStatus.Superseded))
+                        .SetProperty(p => p.SettledAt, now)
+                        .SetProperty(p => p.SettledAtTicks, now.UtcTicks),
+                    cancellationToken);
 
-        db.ConfirmationProposals.Add(ConfirmationProposalMapper.ToEntity(proposal));
-        await db.SaveChangesAsync(cancellationToken);
-        await transaction.CommitAsync(cancellationToken);
+            db.ConfirmationProposals.Add(ConfirmationProposalMapper.ToEntity(proposal));
+            await db.SaveChangesAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
 
-        return new StoredProposalReplacement(superseded > 0);
+            return new StoredProposalReplacement(superseded > 0);
+        }
+        catch
+        {
+            // The insert is staged before it is saved, and this DbContext serves a whole batch of
+            // Turns. A failed supersede, a losing race on one of this table's unique indexes, a
+            // deadlock, or a cancellation would otherwise leave an Added *pending* proposal waiting
+            // for an unrelated Turn's SaveChangesAsync to commit it - and a pending proposal is
+            // precisely the row a later "confirm" would execute.
+            //
+            // Nothing is classified here. Storing a proposal has no conflict outcome to report: it
+            // either happened or it did not, so the fault propagates exactly as it arrived.
+            await db.AbandonAsync(transaction);
+            throw;
+        }
     }
 
     public async Task<bool> SettleAsync(
