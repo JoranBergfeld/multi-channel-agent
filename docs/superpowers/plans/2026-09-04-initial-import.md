@@ -6083,7 +6083,7 @@ Create `tests/MultiChannelAgent.IntegrationTests/Inventories/ImportEndpointsHttp
     }
 
     [Fact]
-    public async Task An_upload_larger_than_the_bound_is_refused_before_it_is_buffered()
+    public async Task A_file_part_longer_than_the_bound_is_refused_on_its_length_rather_than_read()
     {
         var (jar, csrfToken) = await SignInAndBootstrapAsync("Import Owner");
         var inventoryId = await CreateInventoryAsync(jar, csrfToken, "Import Warehouse");
@@ -7165,7 +7165,7 @@ If nothing needed fixing, skip this commit rather than creating an empty one.
 | Owner and Editor can open Initial Import | Task 8 (`InitialImportService` authorizes `MembershipRole.Editor`, which Owner satisfies) | `InitialImportServiceTests.An_Editor_and_an_Owner_may_both_import`, `...A_Viewer_may_not_import_and_the_denial_is_audited`, scenario step 14 |
 | Only when the Inventory has no Stock Entries, including zero-quantity | Task 6 (`IStockEmptyStateReader`), Task 8 (gate before the file is read), Task 12 (authoritative re-assertion) | `InitialImportServiceTests.Import_is_offered_only_while_the_Inventory_holds_no_Stock_at_all`, `SqlImportProposalStoreTests.An_Inventory_holding_a_zero_quantity_entry_is_not_empty`, `SqlImportExecutionStoreTests.An_import_into_an_Inventory_that_stopped_being_empty_changes_nothing`, scenario steps 1 and 12 |
 | The specified UTF-8 RFC 4180-style five-column contract | Task 1 (`ImportContract.Headers`), Task 2 (`CsvImportDocument`) | `ImportContractTests.The_file_contract_is_exactly_five_columns_in_one_fixed_order`, the whole of `CsvImportDocumentTests` |
-| Rejects unknown, duplicate, oversized, or invalid input | Task 2 (headers, encoding, quoting, bounds), Task 3 (field bounds), Task 14 (413 before buffering) | `CsvImportDocumentTests` header/encoding/quote/bound cases, `ImportRowTests`, `ImportEndpointsHttpTests.An_upload_larger_than_the_bound_is_refused_before_it_is_buffered` |
+| Rejects unknown, duplicate, oversized, or invalid input | Task 2 (headers, encoding, quoting, bounds), Task 3 (field bounds), Task 14 (file bound and 413 before buffering) | `CsvImportDocumentTests` header/encoding/quote/bound cases, `ImportRowTests`, `ImportEndpointsHttpTests.A_file_part_longer_than_the_bound_is_refused_on_its_length_rather_than_read`, `ImportUploadLimitsHttpTests.A_body_over_the_route_bound_is_refused_by_the_server_before_the_endpoint_reads_any_of_it` |
 | Resolves active Unit names or aliases and active Location names | Task 7 (`ImportReferenceResolver` over active-only `IInventoryReferenceStore`) | `ImportReferenceResolverTests.A_Unit_resolves_by_its_canonical_name_or_by_any_active_alias`, `...A_retired_reference_is_exactly_as_unknown_as_one_that_never_existed`, scenario step 13 |
 | Without creating references | Task 7 (nothing in the resolver writes), Task 17 step 6 | `ImportReferenceResolverTests.An_unknown_Unit_is_reported_at_its_own_column_and_never_created`, scenario step 3 |
 | Equivalent rows merge by summing Quantity only when Notes are compatible | Task 4 (`ImportMergePlan`) | `ImportMergePlanTests` (every compatibility and conflict case), `InitialImportServiceTests.Conflicting_Notes_on_equivalent_rows_are_reported_as_errors`, scenario steps 4 and 5 |
