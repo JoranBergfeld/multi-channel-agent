@@ -14,6 +14,50 @@ public sealed class InMemoryStockStore : IStockStore
 
     public void Add(InventoryId inventoryId, StockEntrySummary row) => _rows.Add((inventoryId, row));
 
+    /// <summary>The row with this identity in this Inventory, or null when it is not (or no longer) there.</summary>
+    public StockEntrySummary? Find(InventoryId inventoryId, StockEntryId id) =>
+        _rows.FirstOrDefault(r => r.InventoryId == inventoryId && r.Row.Id == id).Row;
+
+    /// <summary>Replaces one row's Quantity, returning the row as it now stands, or null when it is not there.</summary>
+    public StockEntrySummary? SetQuantity(InventoryId inventoryId, StockEntryId id, Quantity quantity)
+    {
+        var index = _rows.FindIndex(r => r.InventoryId == inventoryId && r.Row.Id == id);
+        if (index < 0)
+        {
+            return null;
+        }
+
+        var updated = _rows[index].Row with { Quantity = quantity };
+        _rows[index] = (inventoryId, updated);
+        return updated;
+    }
+
+    /// <summary>Creates a row for one exact Equivalent Stock key, returning it.</summary>
+    public StockEntrySummary CreateRow(
+        InventoryId inventoryId,
+        string name,
+        UnitId unitId,
+        string unitCanonicalName,
+        LocationId? locationId,
+        string? locationName,
+        string? note,
+        Quantity quantity)
+    {
+        var row = new StockEntrySummary(
+            new StockEntryId(Guid.NewGuid()),
+            name,
+            NameNormalization.Normalize(name),
+            unitId,
+            unitCanonicalName,
+            locationId,
+            locationName,
+            note,
+            quantity);
+
+        _rows.Add((inventoryId, row));
+        return row;
+    }
+
     public Task<IReadOnlyList<StockEntrySummary>> ListPageAsync(StockListQuery query, CancellationToken cancellationToken)
     {
         var candidates = _rows

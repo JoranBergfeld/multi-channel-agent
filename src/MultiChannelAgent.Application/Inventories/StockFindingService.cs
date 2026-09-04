@@ -29,6 +29,24 @@ public sealed record StockNarrowingHints(
     public static readonly StockNarrowingHints None = new([], [], false);
 
     public bool HasAny => Units.Count > 0 || Locations.Count > 0 || IncludesUnlocated;
+
+    /// <summary>
+    /// Offers only narrowing that would actually change the answer: a Unit list when the matches
+    /// differ on it, a Location list when placement genuinely distinguishes them, and unlocated Stock
+    /// only when some match really is kept nowhere in particular alongside placed ones. Shared by
+    /// Find and by an ambiguous mutation so both offer a Participant exactly the same choices.
+    /// </summary>
+    public static StockNarrowingHints FromFacets(StockMatchFacets facets)
+    {
+        var units = facets.UnitCanonicalNames.Count > 1 ? facets.UnitCanonicalNames : [];
+        var distinguishesByPlacement = facets.LocationNames.Count > 1
+            || (facets.LocationNames.Count == 1 && facets.HasUnlocatedMatches);
+
+        return new StockNarrowingHints(
+            units,
+            distinguishesByPlacement ? facets.LocationNames : [],
+            distinguishesByPlacement && facets.HasUnlocatedMatches);
+    }
 }
 
 /// <summary>
@@ -156,22 +174,6 @@ public sealed class StockFindingService(
         };
     }
 
-    /// <summary>
-    /// Offers only narrowing that would actually change the answer: a Unit or Location list is
-    /// suggested when the matches differ on it, and unlocated Stock only when some match really is
-    /// kept nowhere in particular alongside placed ones.
-    /// </summary>
-    private async Task<StockNarrowingHints> NarrowingHintsAsync(StockFindQuery query, CancellationToken cancellationToken)
-    {
-        var facets = await stockStore.SummarizeMatchFacetsAsync(query, MaxCandidates, cancellationToken);
-
-        var units = facets.UnitCanonicalNames.Count > 1 ? facets.UnitCanonicalNames : [];
-        var distinguishesByPlacement = facets.LocationNames.Count > 1
-            || (facets.LocationNames.Count == 1 && facets.HasUnlocatedMatches);
-
-        return new StockNarrowingHints(
-            units,
-            distinguishesByPlacement ? facets.LocationNames : [],
-            distinguishesByPlacement && facets.HasUnlocatedMatches);
-    }
+    private async Task<StockNarrowingHints> NarrowingHintsAsync(StockFindQuery query, CancellationToken cancellationToken) =>
+        StockNarrowingHints.FromFacets(await stockStore.SummarizeMatchFacetsAsync(query, MaxCandidates, cancellationToken));
 }

@@ -21,6 +21,7 @@ public sealed class StockEntryEntityConfiguration : IEntityTypeConfiguration<Sto
         // Units are never auto-converted, so there is no unit-driven upper bound on the scale callers
         // might reasonably need.
         builder.Property(e => e.Quantity).HasPrecision(28, 10);
+        builder.Property(e => e.ConcurrencyStamp).IsConcurrencyToken();
 
         builder.HasOne<InventoryEntity>()
             .WithMany()

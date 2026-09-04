@@ -190,4 +190,53 @@ public class ScriptedModelBoundaryTests
 
         Assert.Equal("bin liners", proposal.ToolCall!.UntrustedArgs["reference"]);
     }
+
+    [Theory]
+    [InlineData("add stock Steel Bolts quantity 12.5", "add_stock")]
+    [InlineData("remove stock Steel Bolts quantity 2", "remove_stock")]
+    [InlineData("set stock Steel Bolts quantity 7", "set_stock")]
+    public async Task A_mutation_command_proposes_its_bounded_tool_call(string content, string expectedToolName)
+    {
+        var proposal = await new ScriptedModelBoundary().ProposeAsync(
+            Turn(content), BoundConversation, CancellationToken.None);
+
+        Assert.Equal(ModelProposalKind.ToolCall, proposal.Kind);
+        Assert.Equal(expectedToolName, proposal.ToolCall!.ToolName);
+        Assert.Equal("Steel Bolts", proposal.ToolCall.UntrustedArgs["reference"]);
+    }
+
+    [Fact]
+    public async Task A_mutation_command_carries_its_amount_unit_location_and_note_as_untrusted_text()
+    {
+        var proposal = await new ScriptedModelBoundary().ProposeAsync(
+            Turn("add stock Steel Bolts quantity 12.5 unit box in Shelf A note Blue box"),
+            BoundConversation,
+            CancellationToken.None);
+
+        var args = proposal.ToolCall!.UntrustedArgs;
+        Assert.Equal("Steel Bolts", args["reference"]);
+        Assert.Equal("12.5", args["quantity"]);
+        Assert.Equal("box", args["unit"]);
+        Assert.Equal("Shelf A", args["location"]);
+        Assert.Equal("Blue box", args["note"]);
+    }
+
+    [Fact]
+    public async Task A_mutation_command_can_ask_for_stock_kept_nowhere_in_particular()
+    {
+        var proposal = await new ScriptedModelBoundary().ProposeAsync(
+            Turn("remove stock Steel Bolts quantity 1 unlocated"), BoundConversation, CancellationToken.None);
+
+        Assert.Equal("true", proposal.ToolCall!.UntrustedArgs["unlocated"]);
+    }
+
+    [Fact]
+    public async Task A_mutation_command_naming_nothing_to_change_is_not_recognized_as_a_mutation()
+    {
+        var proposal = await new ScriptedModelBoundary().ProposeAsync(
+            Turn("add stock"), BoundConversation, CancellationToken.None);
+
+        Assert.Equal(ModelProposalKind.Direct, proposal.Kind);
+        Assert.Equal("echoed", proposal.Direct!.Code);
+    }
 }

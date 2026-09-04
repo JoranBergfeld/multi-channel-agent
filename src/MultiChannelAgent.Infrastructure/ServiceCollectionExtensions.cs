@@ -49,6 +49,7 @@ public static class ServiceCollectionExtensions
         services.AddScoped<IInventoryOwnershipStore, SqlInventoryOwnershipStore>();
         services.AddScoped<IInventoryRecoveryStore, SqlInventoryRecoveryStore>();
         services.AddScoped<IStockStore, SqlStockStore>();
+        services.AddScoped<IStockMutationStore, SqlStockMutationStore>();
         services.AddScoped<IInventoryReferenceStore, SqlInventoryReferenceStore>();
 
         // Only ever constructed (and its TokenCredential only ever built/validated) the first time
@@ -74,6 +75,7 @@ public static class ServiceCollectionExtensions
         services.AddScoped<InventoryRecoveryService>();
         services.AddScoped<StockListingService>();
         services.AddScoped<StockFindingService>();
+        services.AddScoped<StockMutationService>();
 
         return services;
     }
