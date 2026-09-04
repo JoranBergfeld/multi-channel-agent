@@ -6646,10 +6646,10 @@ const importUrl = (inventoryId: string) => `/api/inventories/${inventoryId}/impo
 /**
  * Reads whether Initial Import is offered for one Inventory.
  *
- * Only a 404 is an answer: an Inventory that does not exist, one this Participant may not edit, and
- * a session that has ended all report it with no body to read, deliberately indistinguishable, and
- * all mean the same thing here - not offered. Every other refusal says nothing about eligibility, so
- * it is raised rather than reported as one: a caller that read a 503 or an expired session as "not
+ * Only a 404 is an answer: an Inventory that does not exist and one this Participant may not edit
+ * report it with no body to read, deliberately indistinguishable, and both mean the same thing here -
+ * not offered. Every other refusal says nothing about eligibility, so it is raised rather than
+ * reported as one: a caller that read a 503 or an expired session's 401 as "not
  * offered" would discard a reviewed preview, and the one-time token that exists nowhere else, over a
  * server that was briefly unreachable. This is the same null-or-throw split every other client in
  * this directory uses; see `fetchStock` and `fetchUnits`.
@@ -6916,10 +6916,10 @@ function InitialImport({ inventoryId, csrfToken, refetchToken, onImported }: Ini
 
   /**
    * Whether the server offers this workflow here, as a plain answer. A null eligibility is the one
-   * authoritative refusal - a 404, which an Inventory that does not exist, one this Participant may
-   * not edit, and an ended session all share - so collapsing it to false is naming what it means.
-   * Every other refusal is raised by the client instead of answered, so no caller of this can read a
-   * transient failure as a decision.
+   * authoritative refusal - a 404, which an Inventory that does not exist and one this Participant
+   * may not edit share - so collapsing it to false is naming what it means. Every other refusal,
+   * including an ended session's 401, is raised by the client instead of answered, so no caller of
+   * this can read a transient failure as a decision.
    */
   const readEligibility = useCallback(
     async () => (await fetchEligibility(inventoryId))?.eligible ?? false,
@@ -7461,12 +7461,13 @@ not quietly undo one.
 
 - **`fetchEligibility` answers null only for a 404, and raises every other refusal.** A 404 is the one
   authoritative "not offered here": an Inventory that does not exist, one this Participant may not
-  edit, and an ended session are deliberately indistinguishable, and all three mean the same thing to
-  this workflow. A 401, a 429, a 5xx, or a body that will not parse mean nothing of the sort, and
-  answering null for them is what let the component read a briefly unreachable server as a decision
+  edit are deliberately indistinguishable, and both mean the same thing to this workflow. An ended
+  session's 401, a lost tenant membership's 403, a 429, or a 5xx mean nothing of the sort; answering
+  null for those refusals is what let the component read a briefly unreachable server as a decision
   and drop a reviewed preview - together with the one-time token that exists nowhere else and cannot
-  be asked for again. This is the same null-or-throw split `fetchStock` and `fetchUnits` already use,
-  so the component's existing error path - which touches no state - is what keeps the preview.
+  be asked for again. A malformed successful response already raises while parsing. This is the same
+  null-or-throw split `fetchStock` and `fetchUnits` already use, so the component's existing error
+  path - which touches no state - is what keeps the preview.
 - **Two different 400s arrive at `validate`.** The bounded error report carries `errors` as a list of
   coded problems, but the answer to a missing or empty file part is a validation problem whose
   `errors` is a *map keyed by part name* - and a rejected CSRF token is a 400 with no `errors` at all.

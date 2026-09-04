@@ -138,10 +138,10 @@ const importUrl = (inventoryId: string) => `/api/inventories/${inventoryId}/impo
 /**
  * Reads whether Initial Import is offered for one Inventory.
  *
- * Only a 404 is an answer: an Inventory that does not exist, one this Participant may not edit, and
- * a session that has ended all report it with no body to read, deliberately indistinguishable, and
- * all mean the same thing here - not offered. Every other refusal says nothing about eligibility, so
- * it is raised rather than reported as one: a caller that read a 503 or an expired session as "not
+ * Only a 404 is an answer: an Inventory that does not exist and one this Participant may not edit
+ * report it with no body to read, deliberately indistinguishable, and both mean the same thing here -
+ * not offered. Every other refusal says nothing about eligibility, so it is raised rather than
+ * reported as one: a caller that read a 503 or an expired session's 401 as "not
  * offered" would discard a reviewed preview, and the one-time token that exists nowhere else, over a
  * server that was briefly unreachable. This is the same null-or-throw split every other client in
  * this directory uses; see `fetchStock` and `fetchUnits`.

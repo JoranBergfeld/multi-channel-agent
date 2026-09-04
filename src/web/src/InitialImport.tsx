@@ -92,10 +92,10 @@ function InitialImport({ inventoryId, csrfToken, refetchToken, onImported }: Ini
 
   /**
    * Whether the server offers this workflow here, as a plain answer. A null eligibility is the one
-   * authoritative refusal - a 404, which an Inventory that does not exist, one this Participant may
-   * not edit, and an ended session all share - so collapsing it to false is naming what it means.
-   * Every other refusal is raised by the client instead of answered, so no caller of this can read a
-   * transient failure as a decision.
+   * authoritative refusal - a 404, which an Inventory that does not exist and one this Participant
+   * may not edit share - so collapsing it to false is naming what it means. Every other refusal,
+   * including an ended session's 401, is raised by the client instead of answered, so no caller of
+   * this can read a transient failure as a decision.
    */
   const readEligibility = useCallback(
     async () => (await fetchEligibility(inventoryId))?.eligible ?? false,
