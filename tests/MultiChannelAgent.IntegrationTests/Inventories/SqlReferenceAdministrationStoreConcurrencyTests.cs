@@ -1,3 +1,5 @@
+using System.Data;
+using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using MultiChannelAgent.Application.Inventories;
@@ -15,6 +17,9 @@ namespace MultiChannelAgent.IntegrationTests.Inventories;
 /// </summary>
 public sealed class SqlReferenceAdministrationStoreConcurrencyTests : SqlIntegrationTestBase
 {
+    /// <summary>SQL Server's "Transaction was deadlocked ... and has been chosen as the deadlock victim".</summary>
+    private const int DeadlockVictimErrorNumber = 1205;
+
     private MultiChannelAgentDbContext Db(IServiceScope scope) =>
         scope.ServiceProvider.GetRequiredService<MultiChannelAgentDbContext>();
 
@@ -175,9 +180,12 @@ public sealed class SqlReferenceAdministrationStoreConcurrencyTests : SqlIntegra
         IReadOnlyList<ProposedReferenceChange> changes,
         IReadOnlyList<ExpectedReferenceVersion> versions,
         IReadOnlyList<ExpectedTermAbsence> absences,
-        Guid? proposalId = null) => new()
+        Guid? proposalId = null,
+        ReferenceOperationId? operationId = null) => new()
         {
-            OperationId = ReferenceOperationId.Derive(new TurnId(turnId), "reference_tool", 0),
+            // A retry has to carry the identity its first attempt did, or the ledger could not tell a
+            // second attempt from a second operation.
+            OperationId = operationId ?? ReferenceOperationId.Derive(new TurnId(turnId), "reference_tool", 0),
             InventoryId = new InventoryId(inventoryId),
             ActorId = new ParticipantId(participantId),
             ConfirmedByTurnId = new TurnId(turnId),
@@ -265,11 +273,12 @@ public sealed class SqlReferenceAdministrationStoreConcurrencyTests : SqlIntegra
         var participantId = await ParticipantIdAsync(inventoryId);
         var boxId = await SeedUnitAsync(inventoryId, "Cardboard Box", []);
         var (stamp, _) = await UnitStateAsync(boxId);
+        var retireOperationId = new ReferenceOperationId(Guid.NewGuid());
 
         async Task RetireAsync()
         {
             using var scope = Factory!.Services.CreateScope();
-            await Store(scope).ApplyAsync(
+            var result = await Store(scope).ApplyAsync(
                 Command(
                     inventoryId,
                     participantId,
@@ -283,23 +292,88 @@ public sealed class SqlReferenceAdministrationStoreConcurrencyTests : SqlIntegra
                         },
                     ],
                     [new ExpectedReferenceVersion(ReferenceKind.Unit, boxId, stamp)],
-                    []),
+                    [],
+                    operationId: retireOperationId),
                 CancellationToken.None);
+
+            // Whichever way the race went, a Retire only ever ends as one of these two - and never as
+            // a success that left Stock behind.
+            Assert.Contains(
+                result.Outcome,
+                (ReferenceAdministrationStoreOutcome[])
+                [ReferenceAdministrationStoreOutcome.Applied, ReferenceAdministrationStoreOutcome.Conflict]);
         }
 
         async Task AddStockAsync()
         {
-            try
+            using var scope = Factory!.Services.CreateScope();
+            var db = Db(scope);
+
+            // Resolving the Unit and writing the Stock are one transaction on purpose. Resolution is
+            // active-only, so a Unit this race has already retired resolves to nothing and the
+            // mutation is reference_not_found - but only if the decision is still true when the write
+            // lands. Deciding in one transaction and writing in another would reintroduce exactly the
+            // phantom the Retire's Serializable range lock is here to prevent: the Retire could commit
+            // in between, and the write would then land on a Unit that no longer exists.
+            using var transaction = await db.Database.BeginTransactionAsync(
+                IsolationLevel.RepeatableRead, CancellationToken.None);
+
+            var resolved = await new SqlInventoryReferenceStore(db).ResolveUnitAsync(
+                new InventoryId(inventoryId), boxId.ToString(), CancellationToken.None);
+
+            if (resolved is null)
             {
-                await SeedStockAsync(inventoryId, boxId, null, "Steel Bolts");
+                await transaction.RollbackAsync(CancellationToken.None);
+                return;
             }
-            catch (DbUpdateException)
+
+            db.StockEntries.Add(new StockEntryEntity
             {
-                // Losing the race is a legitimate outcome; the invariant below is what matters.
-            }
+                Id = Guid.NewGuid(),
+                InventoryId = inventoryId,
+                UnitId = boxId,
+                LocationId = null,
+                Name = "Steel Bolts",
+                NormalizedName = "steel bolts",
+                Quantity = 1m,
+                CreatedAt = DateTimeOffset.UnixEpoch,
+            });
+
+            await db.SaveChangesAsync(CancellationToken.None);
+            await transaction.CommitAsync(CancellationToken.None);
         }
 
-        await Task.WhenAll(RetireAsync(), AddStockAsync());
+        // Both sides run for real. Serializable makes the Retire's conflict re-check take a range lock
+        // over the very Stock rows the other side is inserting into, so SQL Server may legitimately
+        // pick one of them as a deadlock victim - that is the isolation level working, not a bug.
+        var victims = await Task.WhenAll(RunToleratingOneDeadlockAsync(RetireAsync), RunToleratingOneDeadlockAsync(AddStockAsync));
+
+        Assert.True(
+            victims.Count(victim => victim is not null) <= 1,
+            "A deadlock has exactly one victim; both sides losing would mean something else went wrong.");
+
+        // The production contract for a raw deadlock: it is never laundered into a semantic answer.
+        // Nothing was applied and no ledger row exists, so the Turn reports a transient failure and the
+        // work stays retryable - which is exactly what the bounded retry below stands in for.
+        if (victims[0] is not null)
+        {
+            using var ledgerScope = Factory!.Services.CreateScope();
+            Assert.Null(await Store(ledgerScope).FindRecordedAsync(
+                new InventoryId(inventoryId), retireOperationId, CancellationToken.None));
+        }
+
+        // One bounded retry of whichever side lost, on a fresh scope, so the race converges instead of
+        // leaving the invariant decided by who happened to be picked. A retry must never deadlock
+        // again - by now the other side has committed and there is nothing left to race with.
+        if (victims[0] is not null)
+        {
+            await RetireAsync();
+        }
+
+        if (victims[1] is not null)
+        {
+            await AddStockAsync();
+        }
 
         using var scope = Factory!.Services.CreateScope();
         var db = Db(scope);
@@ -308,6 +382,34 @@ public sealed class SqlReferenceAdministrationStoreConcurrencyTests : SqlIntegra
 
         // Either the Unit is still active, or nothing references it. A retired Unit with Stock
         // referencing it is the one state that must be unreachable, whichever way the race went.
-        Assert.True(unit.RetiredAt is null || stockCount == 0);
+        Assert.True(
+            unit.RetiredAt is null || stockCount == 0,
+            $"A retired Unit was left with {stockCount} Stock Entries referencing it.");
     }
+
+    /// <summary>
+    /// Runs one side of the race, returning the deadlock it lost to or null when it finished. Only
+    /// SQL Server error 1205 - "chosen as the deadlock victim" - is tolerated; every other fault is
+    /// rethrown, so this can never quietly absorb a real failure.
+    /// </summary>
+    private static async Task<SqlException?> RunToleratingOneDeadlockAsync(Func<Task> side)
+    {
+        try
+        {
+            await side();
+            return null;
+        }
+        catch (Exception exception) when (DeadlockVictim(exception) is not null)
+        {
+            return DeadlockVictim(exception);
+        }
+    }
+
+    private static SqlException? DeadlockVictim(Exception exception) => exception switch
+    {
+        SqlException { Number: DeadlockVictimErrorNumber } deadlock => deadlock,
+        { InnerException: { } inner } => DeadlockVictim(inner),
+        _ => null,
+    };
+
 }
