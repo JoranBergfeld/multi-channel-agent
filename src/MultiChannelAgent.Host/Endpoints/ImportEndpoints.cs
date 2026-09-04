@@ -22,7 +22,10 @@ public sealed record ImportDecisionHttpRequest(Guid ProposalId, string? Token);
 /// </summary>
 public static class ImportEndpoints
 {
-    /// <summary>The bound plus a little multipart framing, so an oversized upload is refused before it is buffered.</summary>
+    /// <summary>
+    /// The file bound plus a little multipart framing: what one whole upload request may weigh, what
+    /// the server refuses beyond, and what this route is willing to hold in memory at once.
+    /// </summary>
     private const long MaxRequestBodyBytes = ImportContract.MaxUploadBytes + (4 * 1024);
 
     public static IEndpointRouteBuilder MapImportEndpoints(this IEndpointRouteBuilder endpoints)
@@ -126,7 +129,23 @@ public static class ImportEndpoints
             };
         })
         .AddEndpointFilter<AntiforgeryEndpointFilter>()
-        .WithMetadata(new ImportUploadSizeLimit(MaxRequestBodyBytes));
+        .WithMetadata(new ImportUploadSizeLimit(MaxRequestBodyBytes))
+
+        // Whatever this route accepts, it holds in memory. ASP.NET Core buffers a multipart file
+        // section through FileBufferingReadStream, which spools everything past its 64 KiB default
+        // threshold to a temp file - so left at the defaults, every import worth importing would be
+        // written to disk, when the promise is that the raw upload lives in memory for this request
+        // and in SQL while its proposal is pending, and nowhere else. Bounding one part by the same
+        // number that bounds the whole body makes that spill unreachable rather than merely unlikely:
+        // a part is either buffered whole below the threshold or refused before it grows past it.
+        //
+        // It is stated as this route's own metadata rather than configured for the Host, both because
+        // no other route accepts an upload and because every read of this form has to honor it -
+        // including the one antiforgery performs when a request carries its token in the body rather
+        // than in the header.
+        .WithFormOptions(
+            memoryBufferThreshold: (int)MaxRequestBodyBytes,
+            multipartBodyLengthLimit: MaxRequestBodyBytes);
 
         group.MapPost("/confirm", async (
             Guid inventoryId,

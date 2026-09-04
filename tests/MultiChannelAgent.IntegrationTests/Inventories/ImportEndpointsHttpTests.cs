@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -206,16 +207,22 @@ public sealed class ImportEndpointsHttpTests : IAsyncLifetime
         Assert.Equal(0, body.GetProperty("omittedErrorCount").GetInt32());
     }
 
+    // What this proves is the endpoint's own bound, not the server's: the part is small enough that
+    // the request is accepted and read, and it is the file's length - not the body's - that refuses
+    // it, before a byte of it is copied into the import. The server's own bound is the subject of
+    // ImportUploadLimitsHttpTests.
     [Fact]
-    public async Task An_upload_larger_than_the_bound_is_refused_before_it_is_buffered()
+    public async Task A_file_part_longer_than_the_bound_is_refused_on_its_length_rather_than_read()
     {
         var (jar, csrfToken, _) = await SignInAndBootstrapAsync("Import Owner");
         var inventoryId = await CreateInventoryAsync(jar, csrfToken, "Import Warehouse");
         var oversized = $"{Header}\n" + new string('a', ImportContract.MaxUploadBytes);
 
         var response = await ValidateAsync(jar, csrfToken, inventoryId, oversized);
+        var problem = await response.Content.ReadFromJsonAsync<JsonElement>();
 
         Assert.Equal(HttpStatusCode.RequestEntityTooLarge, response.StatusCode);
+        Assert.Equal("file_too_large", problem.GetProperty("code").GetString());
     }
 
     [Fact]
@@ -249,6 +256,36 @@ public sealed class ImportEndpointsHttpTests : IAsyncLifetime
         var response = await SendAsync(jar, request);
 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    // Antiforgery reads the form itself when a request carries no token header, so on this route it -
+    // not the endpoint - is the first thing to touch the body, and it has to honor the same bound. A
+    // maximum-sized upload whose token is a form field is previewed exactly as one with a header is:
+    // the read antiforgery performs holds the file in memory too, rather than failing on the denied
+    // buffering directory and reporting it as one more CSRF refusal.
+    [Fact]
+    public async Task A_maximum_sized_upload_that_carries_its_token_in_the_form_is_previewed_all_the_same()
+    {
+        var (jar, csrfToken, _) = await SignInAndBootstrapAsync("Import Owner");
+        var inventoryId = await CreateInventoryAsync(jar, csrfToken, "Import Warehouse");
+        var (csv, rowCount) = MaximumSizedValidCsv();
+        var file = new ByteArrayContent(Encoding.UTF8.GetBytes(csv));
+        file.Headers.ContentType = new MediaTypeHeaderValue("text/csv");
+
+        var response = await SendAsync(
+            jar,
+            new HttpRequestMessage(HttpMethod.Post, $"/api/inventories/{inventoryId}/import/validate")
+            {
+                Content = new MultipartFormDataContent
+                {
+                    { file, "file", "stock.csv" },
+                    { new StringContent(csrfToken), "__RequestVerificationToken" },
+                },
+            });
+        var payload = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(rowCount, JsonDocument.Parse(payload).RootElement.GetProperty("sourceRowCount").GetInt32());
     }
 
     [Fact]
@@ -369,6 +406,62 @@ public sealed class ImportEndpointsHttpTests : IAsyncLifetime
         Assert.Equal("invalid_file", body.GetProperty("code").GetString());
         var error = Assert.Single(body.GetProperty("errors").EnumerateArray().ToList());
         Assert.Equal("name_too_long", error.GetProperty("code").GetString());
+    }
+
+    // The raw upload lives in memory for the length of its request and in SQL while its proposal is
+    // pending, and nowhere else - so a two-mebibyte file must be held whole in memory rather than
+    // spooled to a temp file, which is what ASP.NET Core's 64 KiB default buffering threshold would do
+    // with all but the smallest import. UploadSpillGuard denies the buffering directory to every test
+    // in this assembly, so a maximum-sized file that previews at all is a file that never reached disk;
+    // the digest then says the bytes that were validated and stored are exactly the bytes sent.
+    [Fact]
+    public async Task A_maximum_sized_file_is_previewed_whole_without_ever_being_written_to_disk()
+    {
+        var (jar, csrfToken, _) = await SignInAndBootstrapAsync("Import Owner");
+        var inventoryId = await CreateInventoryAsync(jar, csrfToken, "Import Warehouse");
+        var (csv, rowCount) = MaximumSizedValidCsv();
+        var bytes = Encoding.UTF8.GetBytes(csv);
+        Assert.Equal(ImportContract.MaxUploadBytes, bytes.Length);
+
+        var response = await ValidateAsync(jar, csrfToken, inventoryId, csv);
+        var payload = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = JsonDocument.Parse(payload).RootElement;
+        Assert.Equal(rowCount, body.GetProperty("sourceRowCount").GetInt32());
+        Assert.Equal(rowCount, body.GetProperty("entries").GetArrayLength());
+        Assert.Equal(
+            Convert.ToHexStringLower(SHA256.HashData(bytes)),
+            body.GetProperty("fileDigest").GetString());
+    }
+
+    /// <summary>
+    /// A valid file of exactly <see cref="ImportContract.MaxUploadBytes"/> bytes and the number of rows
+    /// it carries: distinct names so nothing merges away, Notes padded to the shipped bound so the two
+    /// mebibytes are ordinary content rather than one absurd field.
+    /// </summary>
+    private static (string Csv, int RowCount) MaximumSizedValidCsv()
+    {
+        const int framing = 15; // "Item 0000,1,,," and the newline that ends the record.
+        var wholeRow = framing + StockEntry.MaxNoteLength;
+        var records = ImportContract.MaxUploadBytes - (Header.Length + 1);
+        var wholeRows = records / wholeRow;
+        var lastRow = records % wholeRow;
+
+        var builder = new StringBuilder($"{Header}\n");
+        for (var row = 0; row < wholeRows; row++)
+        {
+            builder.Append(Row(row, StockEntry.MaxNoteLength));
+        }
+
+        if (lastRow > 0)
+        {
+            builder.Append(Row(wholeRows, lastRow - framing));
+        }
+
+        return (builder.ToString(), wholeRows + (lastRow > 0 ? 1 : 0));
+
+        static string Row(int index, int noteLength) => $"Item {index:D4},1,,,{new string('n', noteLength)}\n";
     }
 
     [Fact]
