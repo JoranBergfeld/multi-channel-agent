@@ -1,3 +1,4 @@
+using System.Data;
 using Microsoft.EntityFrameworkCore;
 using MultiChannelAgent.Application.Inventories;
 using MultiChannelAgent.Domain.Inventories;
@@ -23,18 +24,13 @@ public sealed class SqlImportProposalStore(MultiChannelAgentDbContext db) : IImp
     {
         ArgumentNullException.ThrowIfNull(proposal);
 
-        await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+        await using var transaction = await db.Database.BeginTransactionAsync(
+            IsolationLevel.Serializable, cancellationToken);
 
         try
         {
             // Superseding first means the filtered unique index is free by the time the insert lands.
-            var superseded = await SettlePendingAsync(
-                db.ImportProposals.Where(p =>
-                    p.ParticipantId == proposal.ParticipantId.Value
-                    && p.InventoryId == proposal.InventoryId.Value),
-                ImportProposalStatus.Superseded,
-                now,
-                cancellationToken);
+            var superseded = await SupersedePendingAsync(proposal, now, cancellationToken);
 
             db.ImportProposals.Add(ImportProposalMapper.ToEntity(proposal));
             db.ImportUploads.Add(new ImportUploadEntity
@@ -60,6 +56,50 @@ public sealed class SqlImportProposalStore(MultiChannelAgentDbContext db) : IImp
             await db.AbandonAsync(transaction);
             throw;
         }
+    }
+
+    /// <summary>
+    /// Supersedes the current row with one guarded UPDATE before reading any identities. Under the
+    /// serializable Store transaction, that statement holds the Participant+Inventory pending-key
+    /// range through the replacement insert. Two validations therefore serialize at this point:
+    /// neither can observe an empty range, skip the update, and then race the other's insert into the
+    /// filtered unique index.
+    /// </summary>
+    private async Task<int> SupersedePendingAsync(
+        ImportProposal replacement, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        var settled = await db.ImportProposals
+            .Where(proposal =>
+                proposal.ParticipantId == replacement.ParticipantId.Value
+                && proposal.InventoryId == replacement.InventoryId.Value
+                && proposal.Status == PendingStatus)
+            .ExecuteUpdateAsync(
+                setters => setters
+                    .SetProperty(proposal => proposal.Status, nameof(ImportProposalStatus.Superseded))
+                    .SetProperty(proposal => proposal.SettledAt, now)
+                    .SetProperty(proposal => proposal.SettledAtTicks, now.UtcTicks),
+                cancellationToken);
+
+        if (settled == 0)
+        {
+            return 0;
+        }
+
+        var supersededIds = await db.ImportProposals
+            .AsNoTracking()
+            .Where(proposal =>
+                proposal.ParticipantId == replacement.ParticipantId.Value
+                && proposal.InventoryId == replacement.InventoryId.Value
+                && proposal.Status == nameof(ImportProposalStatus.Superseded)
+                && proposal.SettledAtTicks == now.UtcTicks)
+            .Select(proposal => proposal.ProposalId)
+            .ToListAsync(cancellationToken);
+
+        await db.ImportUploads
+            .Where(upload => supersededIds.Contains(upload.ProposalId))
+            .ExecuteDeleteAsync(cancellationToken);
+
+        return settled;
     }
 
     public async Task<ImportProposal?> FindPendingAsync(

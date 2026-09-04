@@ -125,6 +125,36 @@ public sealed class SqlImportProposalStoreTests : SqlIntegrationTestBase
     }
 
     [SkippableFact]
+    public async Task Two_simultaneous_validations_converge_on_one_pending_import_without_a_unique_index_failure()
+    {
+        Skip.IfNot(DockerAvailable, "Docker is not available in this environment; skipping the SQL-backed import store.");
+
+        await SeedAsync();
+        var first = Proposal(ConfirmationToken.Issue(), "Steel Bolts");
+        var second = Proposal(ConfirmationToken.Issue(), "Brass Rivets");
+
+        async Task StoreAsync(ImportProposal proposal)
+        {
+            using var db = NewContext();
+            await new SqlImportProposalStore(db).StoreAsync(
+                proposal, RawContent, Now, CancellationToken.None);
+        }
+
+        await Task.WhenAll(StoreAsync(first), StoreAsync(second));
+
+        using var reader = NewContext();
+        Assert.Equal(
+            1,
+            await reader.ImportProposals.AsNoTracking().CountAsync(
+                proposal => proposal.ParticipantId == _participant.Value
+                    && proposal.InventoryId == _inventory.Value
+                    && proposal.Status == nameof(ImportProposalStatus.Pending)));
+        Assert.Equal(
+            1,
+            await reader.ImportUploads.AsNoTracking().CountAsync());
+    }
+
+    [SkippableFact]
     public async Task A_second_pending_import_for_one_Participant_and_Inventory_cannot_exist_at_all()
     {
         Skip.IfNot(DockerAvailable, "Docker is not available in this environment; skipping the SQL-backed import store.");
