@@ -5981,6 +5981,7 @@ git commit -m "feat(inventories): sweep expired imports, their files, and audits
 - Test: `tests/MultiChannelAgent.IntegrationTests/Inventories/ImportUploadLimitsHttpTests.cs`
 - Test support: `tests/MultiChannelAgent.IntegrationTests/ServerRequestSizeLimits.cs`
 - Test support: `tests/MultiChannelAgent.IntegrationTests/UploadSpillGuard.cs`
+- Modify: `tests/MultiChannelAgent.IntegrationTests/SqliteWebApplicationFactory.cs`
 
 Why: this is the only way in. It is also where the upload is bounded before it is buffered, where CSRF is enforced, and where "not a member" and "no such Inventory" must be made indistinguishable.
 
@@ -6477,7 +6478,11 @@ Expected: PASS, 26 tests.
 ```bash
 git add src/MultiChannelAgent.Host/Endpoints/ImportEndpoints.cs \
         src/MultiChannelAgent.Host/Program.cs \
-        tests/MultiChannelAgent.IntegrationTests/Inventories/ImportEndpointsHttpTests.cs
+        tests/MultiChannelAgent.IntegrationTests/Inventories/ImportEndpointsHttpTests.cs \
+        tests/MultiChannelAgent.IntegrationTests/Inventories/ImportUploadLimitsHttpTests.cs \
+        tests/MultiChannelAgent.IntegrationTests/ServerRequestSizeLimits.cs \
+        tests/MultiChannelAgent.IntegrationTests/UploadSpillGuard.cs \
+        tests/MultiChannelAgent.IntegrationTests/SqliteWebApplicationFactory.cs
 git commit -m "feat(host): expose the signed-in Initial Import workflow for #34"
 ```
 
