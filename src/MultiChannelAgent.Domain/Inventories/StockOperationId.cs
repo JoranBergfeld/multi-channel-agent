@@ -32,5 +32,21 @@ public readonly record struct StockOperationId(Guid Value)
         return new StockOperationId(new Guid(digest.AsSpan(0, 16)));
     }
 
+    /// <summary>
+    /// The stable identity a confirmed proposal's execution is recorded under. It is derived from the
+    /// proposal rather than from the Turn that confirms it, so the ledger key is fixed the moment the
+    /// proposal is stored: the proposal is consumed by execution, and a Turn re-driven afterwards
+    /// must still be able to find what its own first attempt did.
+    ///
+    /// The material is deliberately shaped unlike <see cref="Derive"/>'s, so no Turn, tool, and
+    /// sequence triple can ever hash to a proposal's identity.
+    /// </summary>
+    public static StockOperationId DeriveForProposal(ProposalId proposalId)
+    {
+        var digest = SHA256.HashData(Encoding.UTF8.GetBytes($"proposal|{proposalId.Value:D}"));
+
+        return new StockOperationId(new Guid(digest.AsSpan(0, 16)));
+    }
+
     public override string ToString() => Value.ToString();
 }
