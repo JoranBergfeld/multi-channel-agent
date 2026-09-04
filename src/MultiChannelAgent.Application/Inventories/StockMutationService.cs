@@ -121,6 +121,18 @@ public sealed class StockMutationService(
             return new StockMutationResult(StockMutationResultKind.Forbidden, null, "forbidden");
         }
 
+        // Answered from the ledger before anything is resolved or re-planned, because a replay meets
+        // Stock its own first attempt already changed. Removing the last 10 and then replaying would
+        // otherwise plan "Remove 10 from 0", refuse as an underflow, and tell the Participant nothing
+        // happened - the exact opposite of the truth, and unrecoverable once reported. Deliberately
+        // after authorization, so a Viewer or a non-member learns nothing from a replay that they
+        // could not learn from a first attempt.
+        var alreadyRecorded = await mutationStore.FindRecordedAsync(inventoryId, operationId, cancellationToken);
+        if (alreadyRecorded is not null)
+        {
+            return Applied(alreadyRecorded);
+        }
+
         if (!Quantity.TryParseInvariant(request.QuantityText, out var amount))
         {
             return new StockMutationResult(StockMutationResultKind.Invalid, null, "invalid_quantity");
@@ -260,9 +272,16 @@ public sealed class StockMutationService(
             return new StockMutationResult(StockMutationResultKind.Conflict, null, "state_changed");
         }
 
-        var recorded = stored.Recorded!;
+        return Applied(stored.Recorded!);
+    }
 
-        return new StockMutationResult(
+    /// <summary>
+    /// The one place an applied effect becomes an answer, so a replay served from the ledger, a store
+    /// that converged on an already-applied operation, and a first attempt that has just written are
+    /// literally indistinguishable to a Participant.
+    /// </summary>
+    private static StockMutationResult Applied(RecordedStockMutation recorded) =>
+        new(
             StockMutationResultKind.Completed,
             new StockMutationView(
                 recorded.StockEntryId.ToString(),
@@ -275,7 +294,6 @@ public sealed class StockMutationService(
                 recorded.CreatedEntry,
                 recorded.NotePreserved),
             "completed");
-    }
 
     private static StockMutationResult ReferenceNotFound(StockReferenceKind reference) =>
         new(StockMutationResultKind.ReferenceNotFound, null, "reference_not_found", null, reference);

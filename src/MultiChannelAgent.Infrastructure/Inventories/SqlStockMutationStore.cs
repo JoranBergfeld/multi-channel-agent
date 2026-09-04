@@ -23,15 +23,24 @@ namespace MultiChannelAgent.Infrastructure.Inventories;
 /// </summary>
 public sealed class SqlStockMutationStore(MultiChannelAgentDbContext db) : IStockMutationStore
 {
+    public async Task<RecordedStockMutation?> FindRecordedAsync(
+        InventoryId inventoryId, StockOperationId operationId, CancellationToken cancellationToken)
+    {
+        // Scoped to the Inventory from trusted context as well as the operation identity, so a ledger
+        // row can only ever be found from the Inventory it was actually applied to.
+        var recorded = await db.StockOperations
+            .AsNoTracking()
+            .FirstOrDefaultAsync(
+                o => o.OperationId == operationId.Value && o.InventoryId == inventoryId.Value, cancellationToken);
+
+        return recorded is null ? null : ToRecorded(recorded);
+    }
+
     public async Task<StockMutationStoreResult> ApplyAsync(StockMutationCommand command, CancellationToken cancellationToken)
     {
-        var alreadyApplied = await db.StockOperations
-            .AsNoTracking()
-            .FirstOrDefaultAsync(o => o.OperationId == command.OperationId.Value, cancellationToken);
-
-        if (alreadyApplied is not null)
+        if (await FindRecordedAsync(command.InventoryId, command.OperationId, cancellationToken) is { } alreadyApplied)
         {
-            return new StockMutationStoreResult(StockMutationStoreOutcome.AlreadyApplied, ToRecorded(alreadyApplied));
+            return new StockMutationStoreResult(StockMutationStoreOutcome.AlreadyApplied, alreadyApplied);
         }
 
         return command.StockEntryId is { } targetId
@@ -77,13 +86,28 @@ public sealed class SqlStockMutationStore(MultiChannelAgentDbContext db) : IStoc
         {
             await db.SaveChangesAsync(cancellationToken);
         }
-        catch (DbUpdateConcurrencyException)
+        catch (DbUpdateException exception)
         {
-            // A competing writer committed against this same row between the read above and this
-            // save. Nothing here was persisted, so the ledger row and the audit fact staged alongside
-            // it are discarded together with the change.
+            // Nothing here was persisted, so the ledger row and the audit fact staged alongside the
+            // change are discarded together with it.
             db.ChangeTracker.Clear();
-            return new StockMutationStoreResult(StockMutationStoreOutcome.StateChanged, null);
+
+            // A competing writer may have been this very operation, applied by another replica between
+            // the lookup above and this save. Its ledger row is the authoritative record of what
+            // happened, so converge on re-reporting it rather than claiming a conflict.
+            if (await ConvergedOnAlreadyAppliedAsync(command, cancellationToken) is { } converged)
+            {
+                return converged;
+            }
+
+            // Otherwise a different writer committed against this same row first, so this decision is
+            // stale. Anything that is neither of those is a real fault and must keep propagating.
+            if (exception is DbUpdateConcurrencyException)
+            {
+                return new StockMutationStoreResult(StockMutationStoreOutcome.StateChanged, null);
+            }
+
+            throw;
         }
 
         return new StockMutationStoreResult(StockMutationStoreOutcome.Applied, recorded);
@@ -143,6 +167,14 @@ public sealed class SqlStockMutationStore(MultiChannelAgentDbContext db) : IStoc
             // keep propagating rather than being reported as a routine conflict.
             db.ChangeTracker.Clear();
 
+            // The competing writer may have been this very operation, applied by another replica
+            // between the lookup above and this save. Re-report what it recorded rather than treating
+            // this operation's own effect as somebody else's conflict.
+            if (await ConvergedOnAlreadyAppliedAsync(command, cancellationToken) is { } converged)
+            {
+                return converged;
+            }
+
             if (await EquivalentExistsAsync(command.InventoryId, entry, cancellationToken))
             {
                 return new StockMutationStoreResult(StockMutationStoreOutcome.StateChanged, null);
@@ -153,6 +185,18 @@ public sealed class SqlStockMutationStore(MultiChannelAgentDbContext db) : IStoc
 
         return new StockMutationStoreResult(StockMutationStoreOutcome.Applied, recorded);
     }
+
+    /// <summary>
+    /// Whether this operation identity turned out to be already recorded after all - the convergence a
+    /// failed save must check first, so a replica that lost the race to its own twin re-reports that
+    /// twin's effect instead of reporting a conflict against itself. Returns null when this operation
+    /// is genuinely not in the ledger, leaving the caller to classify the failure on its own terms.
+    /// </summary>
+    private async Task<StockMutationStoreResult?> ConvergedOnAlreadyAppliedAsync(
+        StockMutationCommand command, CancellationToken cancellationToken) =>
+        await FindRecordedAsync(command.InventoryId, command.OperationId, cancellationToken) is { } recorded
+            ? new StockMutationStoreResult(StockMutationStoreOutcome.AlreadyApplied, recorded)
+            : null;
 
     private void StageLedgerAndAudit(StockMutationCommand command, RecordedStockMutation recorded, bool createdEntry)
     {

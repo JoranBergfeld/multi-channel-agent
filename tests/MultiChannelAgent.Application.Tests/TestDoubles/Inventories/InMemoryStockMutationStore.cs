@@ -12,7 +12,7 @@ namespace MultiChannelAgent.Application.Tests.TestDoubles.Inventories;
 /// </summary>
 public sealed class InMemoryStockMutationStore(InMemoryStockStore stockStore) : IStockMutationStore
 {
-    private readonly Dictionary<StockOperationId, RecordedStockMutation> _ledger = [];
+    private readonly Dictionary<StockOperationId, (InventoryId InventoryId, RecordedStockMutation Recorded)> _ledger = [];
     private readonly Dictionary<UnitId, string> _unitNames = [];
     private readonly Dictionary<LocationId, string> _locationNames = [];
 
@@ -26,16 +26,34 @@ public sealed class InMemoryStockMutationStore(InMemoryStockStore stockStore) : 
 
     public void NameLocation(LocationId locationId, string name) => _locationNames[locationId] = name;
 
-    public Task<StockMutationStoreResult> ApplyAsync(StockMutationCommand command, CancellationToken cancellationToken)
+    /// <summary>
+    /// Scoped to the Inventory exactly as the SQL store's ledger lookup is, so a recorded operation is
+    /// invisible from any other Inventory even under the same operation identity.
+    /// </summary>
+    public Task<RecordedStockMutation?> FindRecordedAsync(
+        InventoryId inventoryId, StockOperationId operationId, CancellationToken cancellationToken) =>
+        Task.FromResult(
+            _ledger.TryGetValue(operationId, out var entry) && entry.InventoryId == inventoryId ? entry.Recorded : null);
+
+    public async Task<StockMutationStoreResult> ApplyAsync(StockMutationCommand command, CancellationToken cancellationToken)
     {
-        if (_ledger.TryGetValue(command.OperationId, out var alreadyRecorded))
+        if (await FindRecordedAsync(command.InventoryId, command.OperationId, cancellationToken) is { } alreadyRecorded)
         {
-            return Task.FromResult(new StockMutationStoreResult(StockMutationStoreOutcome.AlreadyApplied, alreadyRecorded));
+            return new StockMutationStoreResult(StockMutationStoreOutcome.AlreadyApplied, alreadyRecorded);
+        }
+
+        // The ledger's key is the operation identity alone, exactly as the SQL table's primary key is,
+        // so reusing one identity across Inventories fails loudly here too rather than quietly
+        // overwriting another Inventory's record.
+        if (_ledger.ContainsKey(command.OperationId))
+        {
+            throw new InvalidOperationException(
+                $"Operation {command.OperationId} is already recorded against a different Inventory.");
         }
 
         if (ForceStateChanged)
         {
-            return Task.FromResult(new StockMutationStoreResult(StockMutationStoreOutcome.StateChanged, null));
+            return new StockMutationStoreResult(StockMutationStoreOutcome.StateChanged, null);
         }
 
         StockEntrySummary row;
@@ -46,7 +64,7 @@ public sealed class InMemoryStockMutationStore(InMemoryStockStore stockStore) : 
             var current = stockStore.Find(command.InventoryId, targetId);
             if (current is null || current.Quantity != command.ExpectedQuantity)
             {
-                return Task.FromResult(new StockMutationStoreResult(StockMutationStoreOutcome.StateChanged, null));
+                return new StockMutationStoreResult(StockMutationStoreOutcome.StateChanged, null);
             }
 
             previousQuantity = current.Quantity;
@@ -78,7 +96,7 @@ public sealed class InMemoryStockMutationStore(InMemoryStockStore stockStore) : 
             CreatedEntry: command.StockEntryId is null,
             command.NotePreserved);
 
-        _ledger[command.OperationId] = recorded;
+        _ledger[command.OperationId] = (command.InventoryId, recorded);
         AuditFacts.Add(AuditFact.Create(
             StockAuditFacts.EventTypeFor(command.Kind),
             AuditActorKind.Participant,
@@ -88,6 +106,6 @@ public sealed class InMemoryStockMutationStore(InMemoryStockStore stockStore) : 
             StockAuditFacts.OutcomeCodeFor(command.Kind, command.StockEntryId is null),
             command.Now));
 
-        return Task.FromResult(new StockMutationStoreResult(StockMutationStoreOutcome.Applied, recorded));
+        return new StockMutationStoreResult(StockMutationStoreOutcome.Applied, recorded);
     }
 }

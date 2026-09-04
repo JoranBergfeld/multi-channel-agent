@@ -10,6 +10,7 @@ public class StockMutationServiceTests
     private static readonly ParticipantId Viewer = new(Guid.Parse("22222222-2222-2222-2222-222222222222"));
     private static readonly ParticipantId Stranger = new(Guid.Parse("33333333-3333-3333-3333-333333333333"));
     private static readonly InventoryId SomeInventory = new(Guid.Parse("44444444-4444-4444-4444-444444444444"));
+    private static readonly InventoryId AnotherInventory = new(Guid.Parse("bbbbbbbb-4444-4444-4444-444444444444"));
     private static readonly UnitId EachUnit = new(Guid.Parse("55555555-5555-5555-5555-555555555555"));
     private static readonly UnitId BoxUnit = new(Guid.Parse("66666666-6666-6666-6666-666666666666"));
     private static readonly LocationId ShelfA = new(Guid.Parse("77777777-7777-7777-7777-777777777777"));
@@ -26,6 +27,10 @@ public class StockMutationServiceTests
         var inventoryStore = new InMemoryInventoryStore(_ => "Owner Name");
         inventoryStore.GrantMembership(SomeInventory, Editor, MembershipRole.Editor, Now);
         inventoryStore.GrantMembership(SomeInventory, Viewer, MembershipRole.Viewer, Now);
+
+        // A second Inventory the same Editor may also mutate, so a test can prove one Inventory's
+        // recorded operation is never re-reported into another - even under the same operation identity.
+        inventoryStore.GrantMembership(AnotherInventory, Editor, MembershipRole.Editor, Now);
 
         var auditStore = new InMemoryInventoryAuthorizationAuditStore(new InMemoryActiveInventorySelectionStore());
         var authorizationService = new InventoryAuthorizationService(inventoryStore, auditStore);
@@ -63,8 +68,16 @@ public class StockMutationServiceTests
 
     private static Task<StockMutationResult> MutateAsync(
         Harness harness, ParticipantId participantId, StockMutationRequest request, StockOperationId? operationId = null) =>
+        MutateInAsync(harness, participantId, SomeInventory, request, operationId);
+
+    private static Task<StockMutationResult> MutateInAsync(
+        Harness harness,
+        ParticipantId participantId,
+        InventoryId inventoryId,
+        StockMutationRequest request,
+        StockOperationId? operationId = null) =>
         harness.Service.MutateAsync(
-            participantId, SomeInventory, operationId ?? SomeOperation, request, "conversation-1", Now, CancellationToken.None);
+            participantId, inventoryId, operationId ?? SomeOperation, request, "conversation-1", Now, CancellationToken.None);
 
     [Fact]
     public async Task Adding_to_stock_that_does_not_exist_yet_creates_it_at_the_exact_amount()
@@ -273,6 +286,159 @@ public class StockMutationServiceTests
 
         Assert.Equal("20", second.View!.Quantity);
         Assert.Equal(2, harness.MutationStore.AuditFacts.Count);
+    }
+
+    // A mutation commits in its own transaction; the terminal Outcome, Delivery, and inbox completion
+    // commit in a second one. When the process dies between the two, the Turn is reprocessed and
+    // derives the same operation identity - so a replay MUST re-report the recorded effect before any
+    // re-planning against state the first attempt itself changed. Re-planning first would look at the
+    // Stock the operation already emptied and tell the Participant that nothing happened, which is
+    // both false and unrecoverable.
+    [Fact]
+    public async Task Replaying_an_operation_that_removed_all_the_stock_re_reports_it_rather_than_calling_it_an_underflow()
+    {
+        var harness = CreateHarness();
+        var row = Row("Steel Bolts", 10m, "10000000");
+        harness.StockStore.Add(SomeInventory, row);
+        var request = new StockMutationRequest
+        {
+            Kind = StockMutationKind.Remove,
+            Reference = "Steel Bolts",
+            QuantityText = "10",
+        };
+
+        var first = await MutateAsync(harness, Editor, request);
+        Assert.Equal(StockMutationResultKind.Completed, first.Kind);
+        Assert.Equal("0", first.View!.Quantity);
+
+        var replay = await MutateAsync(harness, Editor, request);
+
+        Assert.Equal(StockMutationResultKind.Completed, replay.Kind);
+        Assert.Equal("completed", replay.Code);
+        Assert.Equal("10", replay.View!.PreviousQuantity);
+        Assert.Equal("0", replay.View.Quantity);
+        Assert.False(replay.View.Created);
+
+        // Nothing was applied a second time, and nothing was audited a second time.
+        Assert.Single(harness.MutationStore.AuditFacts);
+        Assert.Equal("0", harness.StockStore.Find(SomeInventory, row.Id)!.Quantity.ToInvariantText());
+    }
+
+    [Fact]
+    public async Task Replaying_a_partial_Remove_re_reports_it_rather_than_underflowing_against_the_lower_amount()
+    {
+        var harness = CreateHarness();
+        var row = Row("Steel Bolts", 10m, "10000000");
+        harness.StockStore.Add(SomeInventory, row);
+        var request = new StockMutationRequest
+        {
+            Kind = StockMutationKind.Remove,
+            Reference = "Steel Bolts",
+            QuantityText = "7",
+        };
+
+        await MutateAsync(harness, Editor, request);
+        var replay = await MutateAsync(harness, Editor, request);
+
+        Assert.Equal(StockMutationResultKind.Completed, replay.Kind);
+        Assert.Equal("10", replay.View!.PreviousQuantity);
+        Assert.Equal("3", replay.View.Quantity);
+        Assert.Single(harness.MutationStore.AuditFacts);
+        Assert.Equal("3", harness.StockStore.Find(SomeInventory, row.Id)!.Quantity.ToInvariantText());
+    }
+
+    // The recorded effect is the answer, so a replay never depends on the reference still resolving
+    // the way it did. Here Equivalent Stock appeared elsewhere in the meantime, which would make the
+    // very same reference ambiguous if it were resolved again.
+    [Fact]
+    public async Task Replaying_an_operation_answers_from_the_ledger_even_once_its_reference_became_ambiguous()
+    {
+        var harness = CreateHarness();
+        var request = new StockMutationRequest
+        {
+            Kind = StockMutationKind.Add,
+            Reference = "Steel Bolts",
+            QuantityText = "12.5",
+        };
+
+        var first = await MutateAsync(harness, Editor, request);
+        Assert.True(first.View!.Created);
+
+        harness.StockStore.Add(SomeInventory, Row("Steel Bolts", 3m, "20000000", locationId: ShelfA));
+
+        var replay = await MutateAsync(harness, Editor, request);
+
+        Assert.Equal(StockMutationResultKind.Completed, replay.Kind);
+        Assert.Equal(first.View.StockEntryId, replay.View!.StockEntryId);
+        Assert.True(replay.View.Created);
+        Assert.Equal("0", replay.View.PreviousQuantity);
+        Assert.Equal("12.5", replay.View.Quantity);
+        Assert.Single(harness.MutationStore.AuditFacts);
+    }
+
+    [Fact]
+    public async Task A_Viewer_replaying_an_Editors_operation_is_refused_before_the_ledger_is_ever_consulted()
+    {
+        var harness = CreateHarness();
+        harness.StockStore.Add(SomeInventory, Row("Steel Bolts", 10m, "10000000"));
+        var request = new StockMutationRequest
+        {
+            Kind = StockMutationKind.Remove,
+            Reference = "Steel Bolts",
+            QuantityText = "10",
+        };
+        await MutateAsync(harness, Editor, request);
+
+        var replay = await MutateAsync(harness, Viewer, request);
+
+        Assert.Equal(StockMutationResultKind.Forbidden, replay.Kind);
+        Assert.Equal("forbidden", replay.Code);
+        Assert.Null(replay.View);
+    }
+
+    [Fact]
+    public async Task A_non_member_replaying_an_operation_cannot_learn_that_it_ever_happened()
+    {
+        var harness = CreateHarness();
+        harness.StockStore.Add(SomeInventory, Row("Steel Bolts", 10m, "10000000"));
+        var request = new StockMutationRequest
+        {
+            Kind = StockMutationKind.Remove,
+            Reference = "Steel Bolts",
+            QuantityText = "10",
+        };
+        await MutateAsync(harness, Editor, request);
+
+        var replay = await MutateAsync(harness, Stranger, request);
+
+        Assert.Equal(StockMutationResultKind.NotFound, replay.Kind);
+        Assert.Equal("not_found", replay.Code);
+        Assert.Null(replay.View);
+    }
+
+    // An operation identity is only ever meaningful within the Inventory it was applied to. Looking
+    // one up from another Inventory must reveal nothing at all - not the Stock Entry, not the amount,
+    // not that the operation exists - even for a Participant who may mutate both.
+    [Fact]
+    public async Task A_recorded_operation_is_invisible_to_the_same_operation_identity_in_another_Inventory()
+    {
+        var harness = CreateHarness();
+        var row = Row("Steel Bolts", 10m, "10000000");
+        harness.StockStore.Add(SomeInventory, row);
+        var request = new StockMutationRequest
+        {
+            Kind = StockMutationKind.Remove,
+            Reference = "Steel Bolts",
+            QuantityText = "10",
+        };
+        await MutateAsync(harness, Editor, request);
+
+        var elsewhere = await MutateInAsync(harness, Editor, AnotherInventory, request);
+
+        Assert.Equal(StockMutationResultKind.NotFound, elsewhere.Kind);
+        Assert.Null(elsewhere.View);
+        Assert.Single(harness.MutationStore.AuditFacts);
+        Assert.Equal("0", harness.StockStore.Find(SomeInventory, row.Id)!.Quantity.ToInvariantText());
     }
 
     [Fact]

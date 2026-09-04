@@ -161,6 +161,130 @@ public sealed class SqlStockMutationStoreTests : IDisposable
             OperationId = new StockOperationId(Guid.Parse("eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee")),
         };
 
+    // The lookup a replay is answered from, before any re-planning. It must return exactly what was
+    // recorded, and it must be scoped to the Inventory the operation was applied to.
+    [Fact]
+    public async Task A_recorded_operation_can_be_looked_up_by_its_identity_without_re_planning_anything()
+    {
+        var command = CreateCommand();
+        using (var db = CreateContext())
+        {
+            await new SqlStockMutationStore(db).ApplyAsync(command, CancellationToken.None);
+        }
+
+        using var reader = CreateContext();
+        var recorded = await new SqlStockMutationStore(reader).FindRecordedAsync(
+            new InventoryId(_inventoryId), command.OperationId, CancellationToken.None);
+
+        Assert.NotNull(recorded);
+        Assert.True(recorded!.CreatedEntry);
+        Assert.Equal("Steel Bolts", recorded.Name);
+        Assert.Equal("each", recorded.UnitCanonicalName);
+        Assert.Null(recorded.LocationName);
+        Assert.Equal("0", recorded.PreviousQuantity.ToInvariantText());
+        Assert.Equal("12.5", recorded.ResultingQuantity.ToInvariantText());
+    }
+
+    [Fact]
+    public async Task An_operation_that_was_never_applied_here_is_simply_not_recorded()
+    {
+        using var db = CreateContext();
+
+        Assert.Null(await new SqlStockMutationStore(db).FindRecordedAsync(
+            new InventoryId(_inventoryId),
+            new StockOperationId(Guid.Parse("ffffffff-ffff-ffff-ffff-ffffffffffff")),
+            CancellationToken.None));
+    }
+
+    // An operation identity means nothing outside the Inventory it was applied to, so looking one up
+    // from another Inventory must reveal nothing at all - not the effect, not that it ever happened.
+    [Fact]
+    public async Task A_recorded_operation_is_invisible_from_another_Inventory()
+    {
+        var command = CreateCommand();
+        using (var db = CreateContext())
+        {
+            await new SqlStockMutationStore(db).ApplyAsync(command, CancellationToken.None);
+        }
+
+        var otherInventoryId = SeedInventory("Other Warehouse", "other warehouse", "seed-2");
+
+        using var reader = CreateContext();
+        Assert.Null(await new SqlStockMutationStore(reader).FindRecordedAsync(
+            new InventoryId(otherInventoryId), command.OperationId, CancellationToken.None));
+    }
+
+    // The window the preflight lookup cannot close: this operation was not in the ledger when it was
+    // looked up, but another replica applied that very operation before this save landed. The failing
+    // save must converge on re-reporting the twin's recorded effect - never a conflict against itself,
+    // and never a second application.
+    [Fact]
+    public async Task A_create_that_loses_the_race_to_its_own_twin_converges_on_the_recorded_effect()
+    {
+        var command = CreateCommand();
+        using var db = CreateContext();
+        ApplyOnceFromACompetingWriterDuring(db, command);
+
+        var result = await new SqlStockMutationStore(db).ApplyAsync(command, CancellationToken.None);
+
+        Assert.Equal(StockMutationStoreOutcome.AlreadyApplied, result.Outcome);
+        Assert.True(result.Recorded!.CreatedEntry);
+        Assert.Equal("12.5", result.Recorded.ResultingQuantity.ToInvariantText());
+
+        using var reader = CreateContext();
+        Assert.Equal(12.5m, Assert.Single(reader.StockEntries.AsNoTracking()).Quantity);
+        Assert.Single(reader.StockOperations.AsNoTracking());
+        Assert.Single(reader.InventoryAudits.AsNoTracking().Where(a => a.EventType == "StockAdded"));
+    }
+
+    [Fact]
+    public async Task A_change_that_loses_the_race_to_its_own_twin_converges_on_the_recorded_effect()
+    {
+        var entryId = SeedStock("Steel Bolts", 10m);
+        var command = UpdateCommand(entryId, expected: 10m, resulting: 15m);
+
+        using var db = CreateContext();
+
+        // Loaded before the competitor commits, so this context holds the now-stale concurrency stamp.
+        _ = await db.StockEntries.FirstAsync(e => e.Id == entryId);
+        ApplyOnceFromACompetingWriterDuring(db, command);
+
+        var result = await new SqlStockMutationStore(db).ApplyAsync(command, CancellationToken.None);
+
+        Assert.Equal(StockMutationStoreOutcome.AlreadyApplied, result.Outcome);
+        Assert.Equal("10", result.Recorded!.PreviousQuantity.ToInvariantText());
+        Assert.Equal("15", result.Recorded.ResultingQuantity.ToInvariantText());
+
+        using var reader = CreateContext();
+        Assert.Equal(15m, reader.StockEntries.AsNoTracking().Single(e => e.Id == entryId).Quantity);
+        Assert.Single(reader.StockOperations.AsNoTracking());
+        Assert.Single(reader.InventoryAudits.AsNoTracking().Where(a => a.EventType == "StockAdded"));
+    }
+
+    /// <summary>
+    /// Applies <paramref name="command"/> from a separate connection at the exact moment
+    /// <paramref name="db"/> is about to save - after its own ledger lookup has already found nothing.
+    /// That is the only window in which a competing replica running the same operation can be missed,
+    /// and it is deterministic here rather than a race a test would have to hope for.
+    /// </summary>
+    private void ApplyOnceFromACompetingWriterDuring(MultiChannelAgentDbContext db, StockMutationCommand command)
+    {
+        var applied = false;
+
+        db.SavingChanges += (_, _) =>
+        {
+            if (applied)
+            {
+                return;
+            }
+
+            applied = true;
+
+            using var competitor = CreateContext();
+            new SqlStockMutationStore(competitor).ApplyAsync(command, CancellationToken.None).GetAwaiter().GetResult();
+        };
+    }
+
     private StockMutationCommand CreateCommand(StockOperationId? operationId = null) => new()    {
         OperationId = operationId ?? new StockOperationId(Guid.Parse("cccccccc-cccc-cccc-cccc-cccccccccccc")),
         InventoryId = new InventoryId(_inventoryId),
@@ -237,6 +361,26 @@ public sealed class SqlStockMutationStoreTests : IDisposable
             CreatedAt = Now,
         });
         db.SaveChanges();
+    }
+
+    /// <summary>A second Inventory, so a lookup can be attempted from one the operation never touched.</summary>
+    private Guid SeedInventory(string name, string normalizedName, string clientRequestId)
+    {
+        var inventoryId = Guid.NewGuid();
+
+        using var db = CreateContext();
+        db.Inventories.Add(new InventoryEntity
+        {
+            Id = inventoryId,
+            Name = name,
+            NormalizedName = normalizedName,
+            CreatedByParticipantId = _actorId.Value,
+            ClientRequestId = clientRequestId,
+            CreatedAt = Now,
+        });
+        db.SaveChanges();
+
+        return inventoryId;
     }
 
     private MultiChannelAgentDbContext CreateContext() =>

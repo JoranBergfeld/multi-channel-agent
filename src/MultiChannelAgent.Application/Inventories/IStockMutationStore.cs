@@ -98,5 +98,22 @@ public sealed record StockMutationCommand
 /// </summary>
 public interface IStockMutationStore
 {
+    /// <summary>
+    /// The effect this operation identity already had in this Inventory, or null when it has never
+    /// been applied there.
+    ///
+    /// This exists so a caller can answer a replay from the ledger <em>before</em> it re-plans against
+    /// current state. A mutation commits in its own transaction and the Turn's Outcome commits in a
+    /// second one, so a Turn replayed after a crash between them meets Stock its own first attempt
+    /// already changed: re-planning first would see the amount it removed as missing and report an
+    /// underflow, telling the Participant nothing happened when in fact everything did.
+    ///
+    /// The lookup is scoped to <paramref name="inventoryId"/> - the Inventory from trusted context,
+    /// never one an operation identity could name for itself - so a recorded operation can never be
+    /// re-reported into, or disclosed through, a different Inventory.
+    /// </summary>
+    Task<RecordedStockMutation?> FindRecordedAsync(
+        InventoryId inventoryId, StockOperationId operationId, CancellationToken cancellationToken);
+
     Task<StockMutationStoreResult> ApplyAsync(StockMutationCommand command, CancellationToken cancellationToken);
 }

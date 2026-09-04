@@ -3,8 +3,10 @@ using System.Text.Json;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using MultiChannelAgent.Application.Inventories;
 using MultiChannelAgent.Application.Turns;
 using MultiChannelAgent.Domain.Inventories;
+using MultiChannelAgent.Domain.Turns;
 using MultiChannelAgent.Infrastructure.Persistence;
 using MultiChannelAgent.Infrastructure.Persistence.Entities;
 
@@ -122,6 +124,40 @@ internal static class StockMutationScenario
         var narrowedEntry = MutationEntry(narrowed, "add");
         Assert.Equal("Shelf A", narrowedEntry.GetProperty("location").GetString());
         Assert.Equal("4", narrowedEntry.GetProperty("quantity").GetString());
+
+        // Removing everything on hand leaves a zero-quantity Stock Entry, and - critically - the
+        // operation that emptied it is recorded under the identity that Turn derives. That ledger row
+        // is what a reprocessed Turn is answered from: without it, a replay would re-plan "Remove 7.125
+        // from 0", refuse as an underflow, and report that nothing happened after everything had.
+        var emptiedTurnId = await owner.SubmitAcceptedTurnAsync("native-empty-1", "remove stock Steel Bolts quantity 7.125 unlocated");
+        Assert.Equal(1, await ProcessPendingAsync(factory));
+        var emptied = await owner.GetOutcomeAsync(emptiedTurnId);
+        Assert.Equal("0", MutationEntry(emptied!.Value, "remove").GetProperty("quantity").GetString());
+        await AssertProjectionAsync(owner, inventoryId, "Steel Bolts", "0", includeZero: true);
+
+        await AssertRecordedOperationIsScopedToItsInventoryAsync(
+            factory, inventoryId, StockOperationId.Derive(new TurnId(emptiedTurnId), "remove_stock", sequence: 0));
+    }
+
+    /// <summary>
+    /// Asserts the production ledger seam holds for an operation a real Turn just applied: the effect
+    /// is findable under the identity that Turn derives, within the Inventory it touched - and is
+    /// invisible from any other Inventory, so an operation identity can never re-report an effect
+    /// across an Inventory boundary.
+    /// </summary>
+    private static async Task AssertRecordedOperationIsScopedToItsInventoryAsync(
+        WebApplicationFactory<Program> factory, Guid inventoryId, StockOperationId operationId)
+    {
+        using var scope = factory.Services.CreateScope();
+        var store = scope.ServiceProvider.GetRequiredService<IStockMutationStore>();
+
+        var recorded = await store.FindRecordedAsync(new InventoryId(inventoryId), operationId, CancellationToken.None);
+        Assert.NotNull(recorded);
+        Assert.Equal("7.125", recorded!.PreviousQuantity.ToInvariantText());
+        Assert.Equal("0", recorded.ResultingQuantity.ToInvariantText());
+        Assert.False(recorded.CreatedEntry);
+
+        Assert.Null(await store.FindRecordedAsync(new InventoryId(Guid.NewGuid()), operationId, CancellationToken.None));
     }
 
     /// <summary>Submits one Turn, drives processing deterministically, and returns its recorded terminal Outcome.</summary>
@@ -159,9 +195,11 @@ internal static class StockMutationScenario
     /// once a terminal Outcome arrives - already reports what the conversation just changed.
     /// </summary>
     private static async Task AssertProjectionAsync(
-        ConversationTestClient client, Guid inventoryId, string name, string expectedQuantity)
+        ConversationTestClient client, Guid inventoryId, string name, string expectedQuantity, bool includeZero = false)
     {
-        var response = await client.SendAsync(new HttpRequestMessage(HttpMethod.Get, $"/api/inventories/{inventoryId}/stock"));
+        var query = includeZero ? "?includeZero=true" : string.Empty;
+        var response = await client.SendAsync(
+            new HttpRequestMessage(HttpMethod.Get, $"/api/inventories/{inventoryId}/stock{query}"));
         var projection = await response.Content.ReadFromJsonAsync<JsonElement>();
 
         var row = projection.GetProperty("rows").EnumerateArray()
