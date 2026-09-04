@@ -49,15 +49,22 @@ public class TurnStreamEventTests
     }
 
     [Fact]
-    public void Machine_text_is_stable_for_event_and_part_kinds()
+    public void Every_stream_vocabulary_member_exposes_distinct_non_empty_machine_text()
     {
-        Assert.Equal("accepted", TurnEventKind.Accepted.ToMachineText());
-        Assert.Equal("processing", TurnEventKind.Processing.ToMachineText());
-        Assert.Equal("part", TurnEventKind.Part.ToMachineText());
-        Assert.Equal("outcome", TurnEventKind.Outcome.ToMachineText());
+        AssertDistinctMachineText(Enum.GetValues<TurnEventKind>(), kind => kind.ToMachineText());
+        AssertDistinctMachineText(Enum.GetValues<TurnResponsePartKind>(), kind => kind.ToMachineText());
+    }
 
-        Assert.Equal("text", TurnResponsePartKind.Text.ToMachineText());
-        Assert.Equal("data", TurnResponsePartKind.Data.ToMachineText());
+    [Fact]
+    public void Stream_vocabulary_ordinals_are_fixed_for_persistence()
+    {
+        Assert.Equal(0, (int)TurnEventKind.Accepted);
+        Assert.Equal(1, (int)TurnEventKind.Processing);
+        Assert.Equal(2, (int)TurnEventKind.Part);
+        Assert.Equal(3, (int)TurnEventKind.Outcome);
+
+        Assert.Equal(0, (int)TurnResponsePartKind.Text);
+        Assert.Equal(1, (int)TurnResponsePartKind.Data);
     }
 
     [Fact]
@@ -78,5 +85,14 @@ public class TurnStreamEventTests
     public void Progress_event_retention_matches_outcome_payload_retention()
     {
         Assert.Equal(Outcome.PayloadRetention, TurnProgressEvent.Retention);
+    }
+
+    private static void AssertDistinctMachineText<TEnum>(TEnum[] values, Func<TEnum, string> toMachineText)
+        where TEnum : struct, Enum
+    {
+        var texts = values.Select(toMachineText).ToArray();
+
+        Assert.All(texts, text => Assert.False(string.IsNullOrWhiteSpace(text)));
+        Assert.Equal(texts.Length, texts.Distinct(StringComparer.Ordinal).Count());
     }
 }

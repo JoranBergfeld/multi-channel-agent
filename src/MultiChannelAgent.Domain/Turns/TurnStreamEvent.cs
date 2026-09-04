@@ -1,30 +1,28 @@
 namespace MultiChannelAgent.Domain.Turns;
 
 /// <summary>
-/// The stable vocabulary of event kinds written into a Turn stream. The values are fixed so every
-/// reader can recognize the same progression markers without depending on transport details or
-/// renumbering already-persisted records.
+/// The stable event-kind vocabulary written into a Turn stream. These ordinals are fixed for
+/// persistence and serialization; machine text and fixed sequence IDs are separate stream values.
 /// </summary>
 public enum TurnEventKind
 {
-    Accepted,
-    Processing,
-    Part,
-    Outcome,
+    Accepted = 0,
+    Processing = 1,
+    Part = 2,
+    Outcome = 3,
 }
 
 /// <summary>
-/// The stable vocabulary for the response pieces carried by a Turn. The text/data split is fixed so
-/// a consumer can distinguish human-facing content from structured payloads without guessing from
-/// shape alone.
+/// The stable response-part vocabulary carried by a Turn. These ordinals are fixed for
+/// persistence and serialization; the machine text is a separate boundary form.
 /// </summary>
 public enum TurnResponsePartKind
 {
-    Text,
-    Data,
+    Text = 0,
+    Data = 1,
 }
 
-/// <summary>The stable machine text exposed for <see cref="TurnEventKind"/>.</summary>
+/// <summary>The stable machine text exposed for the Turn stream event and response-part vocabularies.</summary>
 public static class TurnEventKindExtensions
 {
     public static string ToMachineText(this TurnEventKind kind) => kind switch
@@ -62,7 +60,7 @@ public static class TurnEventSequence
     {
         if (order < 1 || order > MaxParts)
         {
-            throw new ArgumentOutOfRangeException(nameof(order), order, "Part order must be between 1 and 64.");
+            throw new ArgumentOutOfRangeException(nameof(order), order, $"A response part order must be between 1 and {MaxParts}.");
         }
 
         return FirstPart + order - 1L;
