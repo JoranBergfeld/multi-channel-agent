@@ -1,5 +1,6 @@
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using MultiChannelAgent.Domain.Inventories;
 using MultiChannelAgent.Domain.Turns;
 using MultiChannelAgent.Infrastructure.Persistence;
@@ -10,6 +11,30 @@ namespace MultiChannelAgent.IntegrationTests;
 
 public sealed class SqlTurnProgressEventStoreTests : IDisposable
 {
+    private sealed class FailFirstProgressSaveInterceptor : SaveChangesInterceptor
+    {
+        public const string Marker = "provoked-progress-insert-failure";
+
+        private bool _failed;
+
+        public override ValueTask<InterceptionResult<int>> SavingChangesAsync(
+            DbContextEventData eventData,
+            InterceptionResult<int> result,
+            CancellationToken cancellationToken = default)
+        {
+            if (_failed
+                || eventData.Context is not { } db
+                || !db.ChangeTracker.Entries<TurnProgressEventEntity>()
+                    .Any(entry => entry.State == EntityState.Added))
+            {
+                return base.SavingChangesAsync(eventData, result, cancellationToken);
+            }
+
+            _failed = true;
+            throw new InvalidOperationException(Marker);
+        }
+    }
+
     private static readonly ParticipantId SomeParticipant = new(Guid.Parse("11111111-1111-1111-1111-111111111111"));
     private readonly SqliteConnection _keepAliveConnection;
     private readonly string _connectionString;
@@ -96,6 +121,25 @@ public sealed class SqlTurnProgressEventStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task A_non_DbUpdate_append_failure_does_not_leak_into_a_later_append_on_the_same_context()
+    {
+        var turnId = SeedTurn("failed-write-isolation");
+        var now = new DateTimeOffset(2026, 9, 5, 11, 30, 0, TimeSpan.Zero);
+        var failed = Marker(turnId, 44, TurnEventKind.Processing, now, now.AddMinutes(10));
+        var later = Marker(turnId, 45, TurnEventKind.Part, now.AddSeconds(1), now.AddMinutes(10));
+
+        using var db = CreateContext(new FailFirstProgressSaveInterceptor());
+        var store = new SqlTurnProgressEventStore(db);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => store.AppendAsync(failed, CancellationToken.None));
+        Assert.Equal(FailFirstProgressSaveInterceptor.Marker, exception.Message);
+
+        Assert.True(await store.AppendAsync(later, CancellationToken.None));
+        Assert.Equal([later], await store.ReadAsync(turnId, CancellationToken.None));
+    }
+
+    [Fact]
     public async Task Delete_expired_removes_only_expired_markers_and_keeps_the_inbox_turn()
     {
         var turnId = SeedTurn("retention");
@@ -158,12 +202,12 @@ public sealed class SqlTurnProgressEventStoreTests : IDisposable
         Assert.Equal([retainedSecondPair], await store.ReadAsync(secondTurnId, CancellationToken.None));
     }
 
-    private MultiChannelAgentDbContext CreateContext()
+    private MultiChannelAgentDbContext CreateContext(IInterceptor? interceptor = null)
     {
-        var options = new DbContextOptionsBuilder<MultiChannelAgentDbContext>()
-            .UseSqlite(_connectionString)
-            .Options;
-        return new MultiChannelAgentDbContext(options);
+        var options = new DbContextOptionsBuilder<MultiChannelAgentDbContext>().UseSqlite(_connectionString);
+
+        return new MultiChannelAgentDbContext(
+            (interceptor is null ? options : options.AddInterceptors(interceptor)).Options);
     }
 
     private TurnId SeedTurn(string suffix)

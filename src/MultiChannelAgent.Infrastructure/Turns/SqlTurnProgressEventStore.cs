@@ -43,6 +43,15 @@ public sealed class SqlTurnProgressEventStore(MultiChannelAgentDbContext db) : I
 
             throw;
         }
+        catch
+        {
+            // SaveChangesAsync does not undo the Added state when a raw provider fault, interceptor
+            // failure, or cancellation escapes outside DbUpdateException. This scoped DbContext serves
+            // the rest of the coordinator batch, so abandon the courtesy insert before propagating the
+            // original fault or a later terminal save could commit it.
+            db.ChangeTracker.Clear();
+            throw;
+        }
     }
 
     public async Task<IReadOnlyList<TurnProgressEvent>> ReadAsync(
@@ -71,6 +80,10 @@ public sealed class SqlTurnProgressEventStore(MultiChannelAgentDbContext db) : I
         CancellationToken cancellationToken)
     {
         var nowTicks = now.UtcTicks;
+
+        // The bounded set is selected first so one pass can never turn into an unbounded delete:
+        // ordering and bounding inside ExecuteDelete is not translatable on every provider this model
+        // runs on.
         var expired = await db.TurnProgressEvents
             .AsNoTracking()
             .Where(e => e.ExpiresAtTicks <= nowTicks)
@@ -81,6 +94,12 @@ public sealed class SqlTurnProgressEventStore(MultiChannelAgentDbContext db) : I
             .Select(e => new { e.TurnId, e.Sequence })
             .ToListAsync(cancellationToken);
 
+        // Deleted by the identities that were actually selected, one set-based statement per distinct
+        // sequence in the batch. The obvious single statement - "any selected TurnId AND any selected
+        // Sequence" - would delete the CROSS PRODUCT of those two sets, which is both wrong and
+        // unbounded in exactly the way maxCount exists to prevent. Grouping keeps every statement
+        // exact, and the number of statements is bounded by how many distinct progress identities one
+        // batch can contain, which is a small constant.
         var deleted = 0;
         foreach (var sequenceGroup in expired.GroupBy(e => e.Sequence))
         {
