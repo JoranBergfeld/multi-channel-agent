@@ -678,4 +678,118 @@ public class StockToolDispatcherTests
         using var payload = System.Text.Json.JsonDocument.Parse(decision.Payload!);
         return payload.RootElement.GetProperty("token").GetString()!;
     }
+    [Fact]
+    public async Task A_confirmation_summary_never_repeats_the_token_the_payload_already_carries()
+    {
+        var harness = CreateFullDispatcher(Editor, MembershipRole.Editor);
+        SeedStock(harness, "Bolts", 0m);
+
+        var decision = await harness.Dispatcher.DispatchAsync(
+            new ToolCallProposal("forget_stock", new Dictionary<string, string> { ["reference"] = "Bolts" }),
+            Context(Editor, SomeInventory),
+            Now,
+            CancellationToken.None);
+
+        using var payload = System.Text.Json.JsonDocument.Parse(decision.Payload!);
+        var token = payload.RootElement.GetProperty("token").GetString()!;
+
+        // The summary is the human sentence; the token belongs to the payload the client renders.
+        // Repeating it here would copy a bearer secret into a second durable column for no gain.
+        Assert.DoesNotContain(token, decision.Summary, StringComparison.Ordinal);
+        Assert.Contains("confirm", decision.Summary, StringComparison.OrdinalIgnoreCase);
+
+        // Exactly one copy of it reaches a client, and the delivered answer is that same payload.
+        Assert.Equal(1, CountOccurrences(decision.Payload!, token));
+        var delivery = Assert.Single(decision.Deliveries);
+        Assert.Equal(1, CountOccurrences(delivery.Payload, token));
+        Assert.DoesNotContain(token, decision.Code, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task A_confirmation_payload_is_retained_only_while_its_proposal_could_still_be_confirmed()
+    {
+        var harness = CreateFullDispatcher(Editor, MembershipRole.Editor);
+        SeedStock(harness, "Bolts", 0m);
+
+        var decision = await harness.Dispatcher.DispatchAsync(
+            new ToolCallProposal("forget_stock", new Dictionary<string, string> { ["reference"] = "Bolts" }),
+            Context(Editor, SomeInventory),
+            Now,
+            CancellationToken.None);
+
+        // The payload carries the token, so it is retained for exactly the window in which the token
+        // means anything - not the ordinary payload retention.
+        Assert.Equal(TimeSpan.FromMinutes(ConfirmationProposal.LifetimeMinutes), decision.PayloadRetention);
+    }
+
+    [Fact]
+    public async Task An_ordinary_answer_keeps_the_ordinary_payload_retention()
+    {
+        var harness = CreateFullDispatcher(Editor, MembershipRole.Editor);
+        SeedStock(harness, "Bolts", 10m);
+
+        var decision = await harness.Dispatcher.DispatchAsync(
+            new ToolCallProposal("move_stock", new Dictionary<string, string> { ["reference"] = "Bolts", ["all"] = "true", ["to"] = "Shelf A" }),
+            Context(Editor, SomeInventory),
+            Now,
+            CancellationToken.None);
+
+        Assert.Equal(OutcomeCategory.Completed, decision.Category);
+        Assert.Null(decision.PayloadRetention);
+    }
+
+    private static int CountOccurrences(string text, string value)
+    {
+        var count = 0;
+        for (var index = text.IndexOf(value, StringComparison.Ordinal); index >= 0;
+             index = text.IndexOf(value, index + value.Length, StringComparison.Ordinal))
+        {
+            count++;
+        }
+
+        return count;
+    }
+    [Fact]
+    public async Task A_token_recovered_from_a_retained_answer_can_no_longer_confirm_once_it_has_been_used()
+    {
+        var harness = CreateFullDispatcher(Editor, MembershipRole.Editor);
+        var token = await ProposeForgetAsync(harness);
+
+        var first = await harness.Dispatcher.DispatchAsync(
+            new ToolCallProposal("confirm_inventory_operation", new Dictionary<string, string> { ["token"] = token }),
+            ConfirmingContext(Editor, DirectConfirmationEvidence.Confirmed),
+            Now,
+            CancellationToken.None);
+
+        // The answer that carried this token is durable, so it can be read again after the fact. That
+        // is the whole residual exposure, and single use is what bounds it: the same token, presented
+        // with genuine direct confirmation, from the same Participant and conversation, does nothing.
+        var replayed = await harness.Dispatcher.DispatchAsync(
+            new ToolCallProposal("confirm_inventory_operation", new Dictionary<string, string> { ["token"] = token }),
+            ConfirmingContext(Editor, DirectConfirmationEvidence.Confirmed),
+            Now,
+            CancellationToken.None);
+
+        Assert.Equal(OutcomeCategory.Completed, first.Category);
+        Assert.Equal(OutcomeCategory.NotFound, replayed.Category);
+        Assert.Equal("proposal_not_found", replayed.Code);
+        Assert.Single(harness.ChangeSetStore.AuditFacts);
+    }
+
+    [Fact]
+    public async Task A_token_recovered_from_a_retained_answer_can_no_longer_confirm_once_its_proposal_has_expired()
+    {
+        var harness = CreateFullDispatcher(Editor, MembershipRole.Editor);
+        var token = await ProposeForgetAsync(harness);
+
+        var expired = await harness.Dispatcher.DispatchAsync(
+            new ToolCallProposal("confirm_inventory_operation", new Dictionary<string, string> { ["token"] = token }),
+            ConfirmingContext(Editor, DirectConfirmationEvidence.Confirmed),
+            Now.AddMinutes(ConfirmationProposal.LifetimeMinutes),
+            CancellationToken.None);
+
+        Assert.Equal(OutcomeCategory.Conflict, expired.Category);
+        Assert.Equal("proposal_expired", expired.Code);
+        Assert.Empty(harness.ChangeSetStore.AuditFacts);
+    }
 }

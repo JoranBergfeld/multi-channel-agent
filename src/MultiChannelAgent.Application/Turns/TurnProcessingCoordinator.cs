@@ -129,7 +129,8 @@ public sealed class TurnProcessingCoordinator(
             ? proposal.Direct!
             : await toolDispatcher.DispatchAsync(proposal.ToolCall!, executionContext, now, cancellationToken);
 
-        var outcome = Outcome.Record(turn.TurnId, decision.Category, decision.Code, decision.Summary, now, decision.Payload);
+        var outcome = Outcome.Record(
+            turn.TurnId, decision.Category, decision.Code, decision.Summary, now, decision.Payload, decision.PayloadRetention);
 
         var deliveries = decision.Deliveries
             .Select(requested => Delivery.Request(turn.TurnId, requested.Channel, requested.Payload, now))

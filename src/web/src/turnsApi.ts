@@ -127,9 +127,13 @@ export interface StockChangeView {
 }
 
 /**
- * An exact set of changes awaiting explicit confirmation. `token` is single-use and expires; it is
- * the only time the plaintext exists outside the server's own memory, and the server stores only its
- * hash.
+ * An exact set of changes awaiting explicit confirmation.
+ *
+ * `token` is the single-use confirmation code. The server's proposal record keeps only its hash, but
+ * this payload carries the plaintext, because the Participant has to quote it back and has to be able
+ * to reconnect to the answer that gave it to them. It stops meaning anything once used or once the
+ * proposal expires, and the server discards this payload at that same ten-minute mark - so treat it
+ * as a short-lived secret: render it, do not log it, and do not persist it separately.
  */
 export interface StockProposalPayload {
   version: number;

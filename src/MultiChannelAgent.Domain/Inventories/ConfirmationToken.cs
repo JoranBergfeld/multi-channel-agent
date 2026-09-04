@@ -6,8 +6,12 @@ namespace MultiChannelAgent.Domain.Inventories;
 
 /// <summary>
 /// The stored form of a confirmation token: 64 lowercase hexadecimal characters of SHA-256. This -
-/// and never the token itself - is what a pending proposal carries, so someone who can read the
-/// database can see that a proposal exists but can never confirm it.
+/// and never the token itself - is what the <c>ConfirmationProposals</c> row carries, so the
+/// authoritative record of a pending proposal reveals that one exists and nothing that could approve
+/// it.
+///
+/// That protection is scoped to that table, and deliberately so: see <see cref="ConfirmationToken"/>
+/// for where the plaintext does still live, and for how long.
 /// </summary>
 public readonly record struct ConfirmationTokenHash(string Value)
 {
@@ -17,11 +21,22 @@ public readonly record struct ConfirmationTokenHash(string Value)
 /// <summary>
 /// The opaque, single-use secret that binds an explicit confirmation to one exact stored proposal.
 ///
-/// The plaintext is generated from 32 cryptographically random bytes, handed to the Participant
-/// exactly once in the answer that asks them to confirm, and then forgotten by this process. Only
-/// <see cref="HashOf"/> is ever persisted. Guessing one means guessing 256 bits, so a wrong token can
-/// safely be answered without invalidating the pending proposal - there is no brute-force attack to
-/// defend against by burning the Participant's own proposal.
+/// The plaintext is generated from 32 cryptographically random bytes and only ever hashed into the
+/// proposal itself: the <c>ConfirmationProposals</c> row holds <see cref="HashOf"/> and nothing more.
+///
+/// It is not, however, secret-free everywhere. The plaintext has to reach the Participant, and this
+/// application guarantees that a Participant can recover a terminal answer after a disconnect, so the
+/// answer that asks them to confirm keeps it: once in that Outcome's typed payload, and once in the
+/// Delivery of that same payload. Both are durable by design. The residual exposure is bounded rather
+/// than absent, and bounded three ways - the token is single use, it is refused once its proposal is
+/// past ten minutes, and the Outcome payload carrying it is retained for exactly that window and then
+/// discarded, leaving only the semantic answer behind. A Delivery of an already-dispatched answer may
+/// outlive that window; what it then carries is a token that can no longer confirm anything. Nothing
+/// logs either surface.
+///
+/// Guessing one means guessing 256 bits, so a wrong token can safely be answered without invalidating
+/// the pending proposal - there is no brute-force attack to defend against by burning the
+/// Participant's own proposal.
 ///
 /// The token alone never authorizes anything: the application also requires that the current Turn's
 /// direct content explicitly confirmed, and that the proposal is bound to this Participant,

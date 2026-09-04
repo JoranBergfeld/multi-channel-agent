@@ -204,7 +204,8 @@ public sealed class StockChangeSetServiceTests
         Assert.Equal(ConfirmationToken.TextLength, token.Length);
         Assert.True(ConfirmationToken.IsWellFormed(token));
 
-        // Only the hash is stored, so the plaintext exists in this answer and nowhere else.
+        // The proposal keeps only the hash, so nothing in the authoritative record of it could approve
+        // it; the plaintext lives in the answer, which is where the Participant reads it.
         var stored = (await harness.ProposalStore.FindPendingAsync(Editor, Conversation, CancellationToken.None))!;
         Assert.True(ConfirmationToken.Matches(stored.TokenHash, token));
         Assert.DoesNotContain(token, stored.TokenHash.Value, StringComparison.Ordinal);

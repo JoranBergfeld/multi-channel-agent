@@ -2,7 +2,8 @@ namespace MultiChannelAgent.Infrastructure.Persistence.Entities;
 
 /// <summary>
 /// The durable row for one confirmation proposal. It carries the hash of its single-use token - never
-/// the token - its binding, its exact serialized contents, and its lifetime.
+/// the token - its binding, its exact serialized contents, and its lifetime. The plaintext lives only
+/// in the answer that asks for confirmation; see <c>ConfirmationToken</c>.
 ///
 /// Only <see cref="Status"/> ever changes after insert, and only ever from <c>Pending</c> to a
 /// terminal value, which is what makes single use enforceable by a guarded update rather than by

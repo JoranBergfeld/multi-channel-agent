@@ -593,13 +593,25 @@ public sealed class StockToolDispatcher(
             Summary = SummarizeProposal(proposal),
             Payload = payload,
 
+            // The token is a bearer secret with a ten-minute life. It has to reach the Participant, and
+            // the answer they can reconnect to has to still carry it, so it is retained for exactly
+            // that window rather than the ordinary payload retention: once the proposal expires the
+            // token means nothing, and keeping it readable for a day would buy nothing.
+            PayloadRetention = TimeSpan.FromMinutes(Domain.Inventories.ConfirmationProposal.LifetimeMinutes),
+
             // The proposal is the answer's channel-neutral content: the summary alone would lose the
-            // exact effects the Participant is being asked to approve.
+            // exact effects the Participant is being asked to approve. This is the same payload the
+            // Outcome records, so the token reaches a client exactly once rather than twice.
             Deliveries = [new RequestedDelivery(ResponseChannel, payload)],
         };
     }
 
-    /// <summary>States exactly what will happen and what it costs in identity, then asks. It names no Inventory and no other Participant.</summary>
+    /// <summary>
+    /// States exactly what will happen and what it costs in identity, then asks. It names no
+    /// Inventory and no other Participant - and deliberately no token: the payload beside it carries
+    /// the code, and repeating a bearer secret into the Outcome's permanent summary column would keep
+    /// it long after the payload it belongs to has been discarded.
+    /// </summary>
     private static string SummarizeProposal(StockProposalView proposal)
     {
         var lines = proposal.Changes.Select(DescribeChange).ToList();
@@ -607,7 +619,8 @@ public sealed class StockToolDispatcher(
             ? $"This needs your confirmation: {lines[0]}"
             : $"These {lines.Count} changes apply together, or not at all: {string.Join(" ", lines)}";
 
-        return $"{opening} Reply with \"confirm {proposal.Token}\" to apply it, or \"reject\" to leave everything as it is.";
+        return $"{opening} Reply with \"confirm\" followed by the confirmation code shown with this "
+            + "answer to apply it, or \"reject\" to leave everything as it is.";
     }
 
     private static string SummarizeChanges(StockChangeSetView applied) =>

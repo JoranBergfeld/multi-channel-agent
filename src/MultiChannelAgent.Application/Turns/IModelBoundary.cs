@@ -22,6 +22,12 @@ public sealed record ModelDecision
 
     public string? Payload { get; init; }
 
+    /// <summary>
+    /// How long the recorded Outcome should retain <see cref="Payload"/>, when the ordinary window is
+    /// too generous for what it carries. Null takes <see cref="Outcome.PayloadRetention"/>.
+    /// </summary>
+    public TimeSpan? PayloadRetention { get; init; }
+
     public IReadOnlyList<RequestedDelivery> Deliveries { get; init; } = [];
 }
 

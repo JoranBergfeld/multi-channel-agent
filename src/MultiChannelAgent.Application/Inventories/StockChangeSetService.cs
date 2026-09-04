@@ -54,8 +54,10 @@ public sealed record StockChangeView(
 public sealed record StockChangeSetView(IReadOnlyList<StockChangeView> Changes);
 
 /// <summary>
-/// An exact stored proposal, as shown to the Participant. <see cref="Token"/> is the only time the
-/// plaintext token exists outside the Participant's own screen - the store keeps only its hash.
+/// An exact stored proposal, as shown to the Participant. <see cref="Token"/> is the plaintext
+/// confirmation code: the proposal itself keeps only its hash, while this view - and the Outcome
+/// payload and Delivery built from it - carry the code the Participant has to quote back. See
+/// <see cref="ConfirmationToken"/> for exactly where it lives and for how long.
 /// </summary>
 public sealed record StockProposalView(string Token, string ExpiresAt, IReadOnlyList<StockChangeView> Changes);
 
@@ -208,8 +210,9 @@ public sealed class StockChangeSetService(
         DateTimeOffset now,
         CancellationToken cancellationToken)
     {
-        // The plaintext exists here and nowhere else: it goes into the answer, and only its hash is
-        // stored, so nothing that can be read later can be used to confirm.
+        // Issued here, hashed into the proposal, and returned in the answer. The proposal row itself
+        // never holds anything that could approve it; the answer necessarily does, because the
+        // Participant has to be told the code and has to be able to reconnect to it.
         var token = ConfirmationToken.Issue();
 
         var proposal = ConfirmationProposal.Create(
