@@ -24,12 +24,13 @@ public class TurnStreamEventTests
         Assert.Equal(expectedSequence, TurnEventSequence.ForPart(order));
     }
 
-    [Fact]
-    public void For_part_rejects_orders_outside_the_fixed_range()
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    [InlineData(65)]
+    public void For_part_rejects_orders_outside_the_fixed_range(int order)
     {
-        Assert.Throws<ArgumentOutOfRangeException>(() => TurnEventSequence.ForPart(0));
-        Assert.Throws<ArgumentOutOfRangeException>(() => TurnEventSequence.ForPart(-1));
-        Assert.Throws<ArgumentOutOfRangeException>(() => TurnEventSequence.ForPart(65));
+        Assert.Throws<ArgumentOutOfRangeException>(() => TurnEventSequence.ForPart(order));
     }
 
     [Fact]

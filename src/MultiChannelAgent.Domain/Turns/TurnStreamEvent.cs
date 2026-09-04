@@ -35,11 +35,7 @@ public static class TurnEventKindExtensions
         TurnEventKind.Outcome => "outcome",
         _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, "Unhandled turn event kind."),
     };
-}
 
-/// <summary>The stable machine text exposed for <see cref="TurnResponsePartKind"/>.</summary>
-public static class TurnResponsePartKindExtensions
-{
     public static string ToMachineText(this TurnResponsePartKind kind) => kind switch
     {
         TurnResponsePartKind.Text => "text",
@@ -60,7 +56,7 @@ public static class TurnEventSequence
     public const int MaxParts = 64;
     public const long Outcome = 1_000_000L;
 
-    private const long LastPart = 163L;
+    private const long LastPart = FirstPart + MaxParts - 1L;
 
     public static long ForPart(int order)
     {
