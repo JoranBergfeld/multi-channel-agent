@@ -55,6 +55,20 @@ public class TurnStreamEventTests
         AssertDistinctMachineText(Enum.GetValues<TurnResponsePartKind>(), kind => kind.ToMachineText());
     }
 
+    [Theory]
+    [InlineData(TurnEventKind.Accepted, "accepted")]
+    [InlineData(TurnEventKind.Processing, "processing")]
+    [InlineData(TurnEventKind.Part, "part")]
+    [InlineData(TurnEventKind.Outcome, "outcome")]
+    public void Stream_event_kinds_expose_the_exact_wire_text(TurnEventKind kind, string expected) =>
+        Assert.Equal(expected, kind.ToMachineText());
+
+    [Theory]
+    [InlineData(TurnResponsePartKind.Text, "text")]
+    [InlineData(TurnResponsePartKind.Data, "data")]
+    public void Response_part_kinds_expose_the_exact_wire_text(TurnResponsePartKind kind, string expected) =>
+        Assert.Equal(expected, kind.ToMachineText());
+
     [Fact]
     public void Stream_vocabulary_ordinals_are_fixed_for_persistence()
     {
