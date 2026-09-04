@@ -71,6 +71,7 @@ public sealed class InMemoryImportExecutionStoreTests
 
         Assert.Equal(ImportExecutionOutcome.Applied, result.Outcome);
         Assert.Equal(1, result.Recorded!.CreatedEntryCount);
+        Assert.Equal(Actor, result.Recorded.ActorId);
         Assert.Equal(Entries, store.CreatedEntries);
         Assert.Single(store.Audits);
         Assert.Equal(AuditEventType.StockImported, store.Audits[0].EventType);

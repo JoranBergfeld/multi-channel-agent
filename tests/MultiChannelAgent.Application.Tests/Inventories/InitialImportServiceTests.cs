@@ -141,6 +141,7 @@ public class InitialImportServiceTests
         Assert.Equal(EmptyStateVersion.Empty, stored.EmptyStateVersion);
         Assert.Equal(Now.AddMinutes(ImportProposal.LifetimeMinutes), stored.ExpiresAt);
         Assert.Equal(stored.FileDigest.Value, result.View!.FileDigest);
+        Assert.Equal(stored.Id.ToString(), result.View.ProposalId);
 
         // The plaintext token exists only in this answer; the row carries its hash.
         Assert.True(ConfirmationToken.IsWellFormed(result.View.Token));

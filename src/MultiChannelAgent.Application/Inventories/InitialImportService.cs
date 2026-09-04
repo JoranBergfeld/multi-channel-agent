@@ -40,6 +40,7 @@ public sealed record ImportPreviewRowView(
 /// </summary>
 public sealed record ImportPreviewView(
     string Token,
+    string ProposalId,
     string FileDigest,
     int SourceRowCount,
     IReadOnlyList<ImportPreviewRowView> Entries,
@@ -191,6 +192,7 @@ public sealed class InitialImportService(
             ImportResultKind.Completed,
             new ImportPreviewView(
                 token,
+                proposal.Id.ToString(),
                 digest.Value,
                 read.Document.Records.Count,
                 [.. merged.Entries.Select(ToPreviewRow)],

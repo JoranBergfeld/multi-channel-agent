@@ -60,7 +60,11 @@ public sealed class InMemoryImportExecutionStore(
             command.Now));
 
         var recorded = new RecordedImport(
-            command.OperationId, command.ConsumesProposalId, command.FileDigest, command.Entries.Count);
+            command.OperationId,
+            command.ConsumesProposalId,
+            command.ActorId,
+            command.FileDigest,
+            command.Entries.Count);
         _recorded[(command.InventoryId, command.OperationId)] = recorded;
 
         return new ImportExecutionResult(ImportExecutionOutcome.Applied, recorded);

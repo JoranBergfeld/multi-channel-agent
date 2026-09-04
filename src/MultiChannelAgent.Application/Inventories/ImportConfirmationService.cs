@@ -23,8 +23,8 @@ public enum ImportConfirmationResultKind
     Invalid,
 }
 
-/// <summary>What a completed import did: a count and the digest of the file it came from.</summary>
-public sealed record ImportConfirmationView(int CreatedEntryCount, string FileDigest);
+/// <summary>What a completed import did: its stable handle, count, and source-file digest.</summary>
+public sealed record ImportConfirmationView(string ProposalId, int CreatedEntryCount, string FileDigest);
 
 public sealed record ImportConfirmationResult(
     ImportConfirmationResultKind Kind, string Code, ImportConfirmationView? View = null);
@@ -41,6 +41,7 @@ public sealed class ImportConfirmationService(
     public async Task<ImportConfirmationResult> ConfirmAsync(
         ParticipantId participantId,
         InventoryId inventoryId,
+        ImportProposalId proposalId,
         string? presentedToken,
         DateTimeOffset now,
         CancellationToken cancellationToken)
@@ -50,8 +51,15 @@ public sealed class ImportConfirmationService(
             return refusal;
         }
 
+        var recorded = await executionStore.FindRecordedAsync(
+            inventoryId, ImportOperationId.DeriveForProposal(proposalId), cancellationToken);
+        if (recorded is not null)
+        {
+            return recorded.ActorId == participantId ? Completed(recorded) : NotFound();
+        }
+
         var pending = await proposalStore.FindPendingAsync(participantId, inventoryId, cancellationToken);
-        if (pending is null || !pending.BelongsTo(participantId, inventoryId))
+        if (pending is null || pending.Id != proposalId || !pending.BelongsTo(participantId, inventoryId))
         {
             return NotFound();
         }
@@ -88,12 +96,13 @@ public sealed class ImportConfirmationService(
         var recorded = await executionStore.FindRecordedAsync(
             inventoryId, ImportOperationId.DeriveForProposal(proposalId), cancellationToken);
 
-        return recorded is null ? NotFound() : Completed(recorded);
+        return recorded is null || recorded.ActorId != participantId ? NotFound() : Completed(recorded);
     }
 
     public async Task<ImportConfirmationResult> RejectAsync(
         ParticipantId participantId,
         InventoryId inventoryId,
+        ImportProposalId proposalId,
         string? presentedToken,
         DateTimeOffset now,
         CancellationToken cancellationToken)
@@ -104,7 +113,7 @@ public sealed class ImportConfirmationService(
         }
 
         var pending = await proposalStore.FindPendingAsync(participantId, inventoryId, cancellationToken);
-        if (pending is null || !pending.BelongsTo(participantId, inventoryId))
+        if (pending is null || pending.Id != proposalId || !pending.BelongsTo(participantId, inventoryId))
         {
             return NotFound();
         }
@@ -173,7 +182,8 @@ public sealed class ImportConfirmationService(
     private static ImportConfirmationResult Completed(RecordedImport recorded) => new(
         ImportConfirmationResultKind.Completed,
         "completed",
-        new ImportConfirmationView(recorded.CreatedEntryCount, recorded.FileDigest.Value));
+        new ImportConfirmationView(
+            recorded.ProposalId.ToString(), recorded.CreatedEntryCount, recorded.FileDigest.Value));
 
     private static ImportConfirmationResult NotFound() =>
         new(ImportConfirmationResultKind.NotFound, "proposal_not_found");
