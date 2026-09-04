@@ -1,3 +1,4 @@
+using MultiChannelAgent.Application.Inventories;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using MultiChannelAgent.Domain.Inventories;

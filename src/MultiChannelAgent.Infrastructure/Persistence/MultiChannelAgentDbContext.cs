@@ -44,6 +44,12 @@ public sealed class MultiChannelAgentDbContext(DbContextOptions<MultiChannelAgen
 
     public DbSet<ConfirmationProposalEntity> ConfirmationProposals => Set<ConfirmationProposalEntity>();
 
+    public DbSet<ConfirmationProposalReferenceEntity> ConfirmationProposalReferences => Set<ConfirmationProposalReferenceEntity>();
+
+    public DbSet<ReferenceOperationEntity> ReferenceOperations => Set<ReferenceOperationEntity>();
+
+    public DbSet<ReferenceEffectEntity> ReferenceEffects => Set<ReferenceEffectEntity>();
+
     public DbSet<StockChangeSetOperationEntity> StockChangeSetOperations => Set<StockChangeSetOperationEntity>();
 
     public DbSet<StockChangeSetEffectEntity> StockChangeSetEffects => Set<StockChangeSetEffectEntity>();

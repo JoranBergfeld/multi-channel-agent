@@ -64,6 +64,7 @@ internal static class ConfirmationProposalMapper
         InventoryId = proposal.InventoryId.Value,
         ProposedInTurnId = proposal.ProposedInTurnId.Value,
         Status = nameof(ProposalStatus.Pending),
+        Kind = proposal.Kind.ToString(),
         ChangesJson = JsonSerializer.Serialize(
             new ChangesEnvelope(SchemaVersion, proposal.Changes.Select(ToDto).ToList()), Options),
         ExpectedVersionsJson = JsonSerializer.Serialize(

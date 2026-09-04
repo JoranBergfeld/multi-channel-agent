@@ -289,6 +289,7 @@ public sealed class SqlConfirmationProposalStoreChangeTrackerIsolationTests : ID
             InventoryId = _inventoryId,
             ProposedInTurnId = Guid.NewGuid(),
             Status = nameof(ProposalStatus.Rejected),
+            Kind = nameof(ProposalKind.Stock),
             ChangesJson = "{}",
             ExpectedVersionsJson = "[]",
             ExpectedAbsencesJson = "[]",

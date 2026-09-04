@@ -14,5 +14,11 @@ public sealed class LocationEntity
 
     public required string NormalizedName { get; set; }
 
+    /// <summary>Regenerated on every administrative write; what an <c>ExpectedReferenceVersion</c> pins. See <c>UnitEntity.ConcurrencyStamp</c>.</summary>
+    public Guid ConcurrencyStamp { get; set; }
+
+    /// <summary>When this Location was withdrawn from matching and assignment, or null while it is active.</summary>
+    public DateTimeOffset? RetiredAt { get; set; }
+
     public DateTimeOffset CreatedAt { get; set; }
 }

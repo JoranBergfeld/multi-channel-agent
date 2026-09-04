@@ -53,31 +53,26 @@ public sealed class SqlInventoryStore(MultiChannelAgentDbContext db) : IInventor
             CanonicalName = reservedEachUnit.CanonicalName,
             NormalizedCanonicalName = NameNormalization.Normalize(reservedEachUnit.CanonicalName),
             IsReserved = reservedEachUnit.IsReserved,
+            ConcurrencyStamp = Guid.NewGuid(),
             CreatedAt = reservedEachUnit.CreatedAt,
+            RetiredAt = null,
         });
 
-        db.UnitTerms.Add(new UnitTermEntity
-        {
-            Id = Guid.NewGuid(),
-            InventoryId = reservedEachUnit.InventoryId.Value,
-            UnitId = reservedEachUnit.Id.Value,
-            Term = reservedEachUnit.CanonicalName,
-            NormalizedTerm = NameNormalization.Normalize(reservedEachUnit.CanonicalName),
-            IsCanonical = true,
-            CreatedAt = reservedEachUnit.CreatedAt,
-        });
-
-        foreach (var alias in reservedEachUnit.Aliases)
+        // The Unit's own term set, canonical first: exactly the five terms every Inventory starts
+        // with, each marked reserved so none of them can ever be removed or reassigned.
+        foreach (var term in reservedEachUnit.Terms())
         {
             db.UnitTerms.Add(new UnitTermEntity
             {
                 Id = Guid.NewGuid(),
                 InventoryId = reservedEachUnit.InventoryId.Value,
                 UnitId = reservedEachUnit.Id.Value,
-                Term = alias,
-                NormalizedTerm = NameNormalization.Normalize(alias),
-                IsCanonical = false,
+                Term = term.Term,
+                NormalizedTerm = term.NormalizedTerm,
+                IsCanonical = term.IsCanonical,
+                IsReserved = true,
                 CreatedAt = reservedEachUnit.CreatedAt,
+                RetiredAt = null,
             });
         }
 
