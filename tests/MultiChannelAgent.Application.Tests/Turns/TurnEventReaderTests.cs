@@ -4,7 +4,7 @@ using MultiChannelAgent.Application.Turns;
 using MultiChannelAgent.Domain.Inventories;
 using MultiChannelAgent.Domain.Turns;
 
-namespace MultiChannelAgent.Application.Tests;
+namespace MultiChannelAgent.Application.Tests.Turns;
 
 public sealed class TurnEventReaderTests
 {
@@ -13,6 +13,17 @@ public sealed class TurnEventReaderTests
     private static readonly DateTimeOffset CompletedAt = new(2026, 1, 1, 0, 0, 2, TimeSpan.Zero);
     private static readonly ParticipantId Owner = new(Guid.Parse("11111111-1111-1111-1111-111111111111"));
     private static readonly ParticipantId Stranger = new(Guid.Parse("22222222-2222-2222-2222-222222222222"));
+
+    [Fact]
+    public void Read_after_uses_the_sequence_specific_public_parameter_name()
+    {
+        var method = typeof(TurnEventReader).GetMethod(nameof(TurnEventReader.ReadAfterAsync));
+
+        Assert.NotNull(method);
+        Assert.Equal(
+            ["turnId", "requestingParticipantId", "afterSequence", "cancellationToken"],
+            method.GetParameters().Select(parameter => parameter.Name));
+    }
 
     [Fact]
     public async Task Unknown_and_another_participants_turn_are_both_not_disclosed()
@@ -41,9 +52,10 @@ public sealed class TurnEventReaderTests
         var accepted = Assert.Single(page.Events);
         Assert.Equal(1, accepted.Sequence);
         Assert.Equal("accepted", accepted.Name);
-        Assert.Equal(
-            $"{{\"turnId\":\"{turn.TurnId.Value}\",\"receivedAt\":\"2026-01-01T00:00:00+00:00\"}}",
-            accepted.Data);
+        using var acceptedDocument = JsonDocument.Parse(accepted.Data);
+        var acceptedData = acceptedDocument.RootElement;
+        Assert.Equal(turn.TurnId.Value, acceptedData.GetProperty("turnId").GetGuid());
+        Assert.Equal(ReceivedAt, acceptedData.GetProperty("receivedAt").GetDateTimeOffset());
         Assert.False(page.ReachedTerminal);
     }
 
@@ -60,14 +72,15 @@ public sealed class TurnEventReaderTests
         Assert.NotNull(page);
         Assert.Equal([1L, 2L], page.Events.Select(streamEvent => streamEvent.Sequence));
         Assert.Equal(["accepted", "processing"], page.Events.Select(streamEvent => streamEvent.Name));
-        Assert.Equal(
-            $"{{\"turnId\":\"{turn.TurnId.Value}\",\"startedAt\":\"2026-01-01T00:00:01+00:00\"}}",
-            page.Events[1].Data);
+        using var processingDocument = JsonDocument.Parse(page.Events[1].Data);
+        var processingData = processingDocument.RootElement;
+        Assert.Equal(turn.TurnId.Value, processingData.GetProperty("turnId").GetGuid());
+        Assert.Equal(StartedAt, processingData.GetProperty("startedAt").GetDateTimeOffset());
         Assert.False(page.ReachedTerminal);
     }
 
     [Fact]
-    public async Task Completed_turn_projects_text_data_and_terminal_events_with_exact_content()
+    public async Task Completed_turn_projects_text_data_and_terminal_events_with_semantic_content()
     {
         var (reader, inbox, progress, outcomes, deliveries) = CreateReader();
         var turn = CreateTurn("native-4");
@@ -90,15 +103,38 @@ public sealed class TurnEventReaderTests
         Assert.True(page.ReachedTerminal);
         Assert.Equal([1L, 2L, 100L, 101L, 1_000_000L], page.Events.Select(streamEvent => streamEvent.Sequence));
         Assert.Equal(["accepted", "processing", "part", "part", "outcome"], page.Events.Select(streamEvent => streamEvent.Name));
-        Assert.Equal(
-            $"{{\"turnId\":\"{turn.TurnId.Value}\",\"order\":1,\"kind\":\"text\",\"text\":\"One stock entry.\",\"payload\":null}}",
-            page.Events[2].Data);
-        Assert.Equal(
-            $"{{\"turnId\":\"{turn.TurnId.Value}\",\"order\":2,\"kind\":\"data\",\"text\":null,\"payload\":{{\"version\":1,\"kind\":\"stock_list\"}}}}",
-            page.Events[3].Data);
-        Assert.Equal(
-            $"{{\"turnId\":\"{turn.TurnId.Value}\",\"status\":\"completed\",\"category\":\"completed\",\"code\":\"stock_listed\",\"summary\":\"One stock entry.\",\"deliveries\":[{{\"deliveryId\":\"{delivery.DeliveryId}\",\"channel\":\"web\",\"status\":\"pending\",\"attempts\":0}}]}}",
-            page.Events[4].Data);
+
+        using var textPartDocument = JsonDocument.Parse(page.Events[2].Data);
+        var textPart = textPartDocument.RootElement;
+        Assert.Equal(turn.TurnId.Value, textPart.GetProperty("turnId").GetGuid());
+        Assert.Equal(1, textPart.GetProperty("order").GetInt32());
+        Assert.Equal("text", textPart.GetProperty("kind").GetString());
+        Assert.Equal("One stock entry.", textPart.GetProperty("text").GetString());
+        Assert.Equal(JsonValueKind.Null, textPart.GetProperty("payload").ValueKind);
+
+        using var dataPartDocument = JsonDocument.Parse(page.Events[3].Data);
+        var dataPart = dataPartDocument.RootElement;
+        Assert.Equal(turn.TurnId.Value, dataPart.GetProperty("turnId").GetGuid());
+        Assert.Equal(2, dataPart.GetProperty("order").GetInt32());
+        Assert.Equal("data", dataPart.GetProperty("kind").GetString());
+        Assert.Equal(JsonValueKind.Null, dataPart.GetProperty("text").ValueKind);
+        Assert.Equal(1, dataPart.GetProperty("payload").GetProperty("version").GetInt32());
+        Assert.Equal("stock_list", dataPart.GetProperty("payload").GetProperty("kind").GetString());
+
+        using var terminalDocument = JsonDocument.Parse(page.Events[4].Data);
+        var terminal = terminalDocument.RootElement;
+        Assert.Equal(turn.TurnId.Value, terminal.GetProperty("turnId").GetGuid());
+        Assert.Equal("completed", terminal.GetProperty("status").GetString());
+        Assert.Equal("completed", terminal.GetProperty("category").GetString());
+        Assert.Equal("stock_listed", terminal.GetProperty("code").GetString());
+        Assert.Equal("One stock entry.", terminal.GetProperty("summary").GetString());
+        Assert.False(terminal.TryGetProperty("payload", out _));
+
+        var projectedDelivery = Assert.Single(terminal.GetProperty("deliveries").EnumerateArray());
+        Assert.Equal(delivery.DeliveryId, projectedDelivery.GetProperty("deliveryId").GetGuid());
+        Assert.Equal("web", projectedDelivery.GetProperty("channel").GetString());
+        Assert.Equal("pending", projectedDelivery.GetProperty("status").GetString());
+        Assert.Equal(0, projectedDelivery.GetProperty("attempts").GetInt32());
     }
 
     [Fact]
