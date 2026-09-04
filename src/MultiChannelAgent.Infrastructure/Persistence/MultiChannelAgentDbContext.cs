@@ -18,6 +18,8 @@ public sealed class MultiChannelAgentDbContext(DbContextOptions<MultiChannelAgen
 
     public DbSet<DeliveryEntity> Deliveries => Set<DeliveryEntity>();
 
+    public DbSet<TurnProgressEventEntity> TurnProgressEvents => Set<TurnProgressEventEntity>();
+
     public DbSet<LeaseEntity> Leases => Set<LeaseEntity>();
 
     public DbSet<ParticipantEntity> Participants => Set<ParticipantEntity>();

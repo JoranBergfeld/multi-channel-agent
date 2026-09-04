@@ -28,6 +28,7 @@ public static class ServiceCollectionExtensions
         services.AddScoped<IOutcomeStore, SqlOutcomeStore>();
         services.AddScoped<IDeliveryStore, SqlDeliveryStore>();
         services.AddScoped<ITurnResultStore, SqlTurnResultStore>();
+        services.AddScoped<ITurnProgressEventStore, SqlTurnProgressEventStore>();
         services.AddScoped<ILeaseCoordinator, SqlLeaseCoordinator>();
         services.AddScoped<IDeliverySender, LoggingDeliverySender>();
         services.AddSingleton(TimeProvider.System);
@@ -43,6 +44,7 @@ public static class ServiceCollectionExtensions
         services.AddScoped<DeliveryDispatchCoordinator>();
         services.AddScoped<OutcomePayloadCleanupCoordinator>();
         services.AddScoped<TurnOutcomeReader>();
+        services.AddScoped<TurnEventReader>();
         services.AddScoped<IFoundryConversationBindingStore, SqlFoundryConversationBindingStore>();
         services.AddScoped<TurnExecutionContextFactory>();
 
