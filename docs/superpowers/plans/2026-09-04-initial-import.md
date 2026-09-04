@@ -153,7 +153,7 @@ What *is* reused is everything where the contract genuinely aligns: `Confirmatio
 
 | Limit | Value | Enforced |
 | --- | --- | --- |
-| Upload bytes | 2 MiB (`2 * 1024 * 1024`) | At the HTTP boundary by a per-endpoint body-size limit, **and** re-checked in `CsvImportDocument.Read` so the Domain rule holds regardless of transport |
+| Upload bytes | 2 MiB (`2 * 1024 * 1024`) | At the HTTP boundary by the file part's own length, under a per-endpoint body-size limit of the file bound plus 64 KiB of transport framing, **and** re-checked in `CsvImportDocument.Read` so the Domain rule holds regardless of transport |
 | Source rows | 5,000 data records, header excluded | `CsvImportDocument.Read` |
 | Normalized Stock Entries | 5,000 after merge | `ImportMergePlan.Create` |
 | Reported errors | 500, with an exact `omittedErrorCount` | `ImportValidationResult` |
@@ -259,7 +259,11 @@ Denials reuse the shipped `AccessDenied` with `Denied:NotAMember` or `Denied:Ins
 
 ### 13. Upload transport
 
-`POST /api/inventories/{id}/import/validate` accepts `multipart/form-data` with exactly one part named `file`. The endpoint sets a per-route request body limit of 2 MiB + 4 KiB of multipart framing slack, so an oversized upload is refused by the server before it is buffered, and `CsvImportDocument.Read` re-checks the decoded byte count so the Domain rule stands on its own. The part is read into a pooled buffer of at most that size; nothing is written to disk.
+`POST /api/inventories/{id}/import/validate` accepts `multipart/form-data` with exactly one part named `file`. The endpoint sets a per-route request body limit of 2 MiB + 64 KiB, so an oversized upload is refused by the server before it is buffered, and `CsvImportDocument.Read` re-checks the decoded byte count so the Domain rule stands on its own. The part is read into a pooled buffer of at most that size; nothing is written to disk.
+
+The 64 KiB is transport framing margin, not import capacity. Multipart part headers and boundaries cost a few hundred bytes, but a body forwarded through an intermediary that re-chunks it arrives framed in ways this route never sees the shape of, and a margin measured in single kibibytes would turn a perfectly valid maximum-sized import into a 413 somewhere in the middle. What may be imported stays exactly 2 MiB, checked independently against the file part's own length, so raising the framing allowance never raises the file bound.
+
+A body the route cannot read as multipart at all - no boundary, or a declared boundary the body ends before reaching, which is what a connection cut mid-upload leaves behind - is malformed input rather than a server fault, and is answered exactly like a request with no file part: 400 naming `file`. ASP.NET Core reports truncation as an `IOException` rather than an `InvalidDataException`, so both are caught; the server's own refusal is not, because `BadHttpRequestException` is an `IOException` too and a body over the route's bound has to stay the 413 the server made it.
 
 CSRF is the shipped `AntiforgeryEndpointFilter` on all three mutating routes, exactly as `InventoryEndpoints` and `TurnEndpoints` use it. All four routes require `AuthorizationPolicies.ActiveTenantMember`.
 
@@ -6113,6 +6117,38 @@ Create `tests/MultiChannelAgent.IntegrationTests/Inventories/ImportEndpointsHttp
     }
 
     [Fact]
+    public async Task A_multipart_body_that_stops_before_its_terminating_boundary_names_the_part_it_wanted()
+    {
+        var (jar, csrfToken) = await SignInAndBootstrapAsync("Import Owner");
+        var inventoryId = await CreateInventoryAsync(jar, csrfToken, "Import Warehouse");
+        const string boundary = "ImportBoundaryThatNeverCloses";
+
+        // A well-formed part header and the beginning of a file, and then nothing: no closing boundary
+        // and no terminator, which is what a connection cut mid-upload leaves behind.
+        var truncated = new ByteArrayContent(Encoding.UTF8.GetBytes(
+            $"--{boundary}\r\n"
+            + "Content-Disposition: form-data; name=\"file\"; filename=\"stock.csv\"\r\n"
+            + "Content-Type: text/csv\r\n"
+            + "\r\n"
+            + $"{Header}\r\nSteel Bolts,4,,,\r\n"));
+        truncated.Headers.ContentType = new MediaTypeHeaderValue("multipart/form-data")
+        {
+            Parameters = { new NameValueHeaderValue("boundary", boundary) },
+        };
+
+        var response = await SendAsync(
+            jar,
+            new HttpRequestMessage(HttpMethod.Post, $"/api/inventories/{inventoryId}/import/validate")
+            {
+                Content = truncated,
+            },
+            csrfToken);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Contains("file", await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task A_mutating_request_without_the_CSRF_token_is_refused()
     {
         var (jar, csrfToken) = await SignInAndBootstrapAsync("Import Owner");
@@ -6222,8 +6258,12 @@ namespace MultiChannelAgent.Host.Endpoints;
 /// </summary>
 public static class ImportEndpoints
 {
-    /// <summary>The bound plus a little multipart framing, so an oversized upload is refused before it is buffered.</summary>
-    private const long MaxRequestBodyBytes = ImportContract.MaxUploadBytes + (4 * 1024);
+    /// <summary>
+    /// The file bound plus 64 KiB of transport framing, so an oversized upload is refused before it is
+    /// buffered while an intermediary that re-frames a maximum-sized body still gets through. What may
+    /// be imported is the file bound, checked separately against the file part's own length.
+    /// </summary>
+    private const long MaxRequestBodyBytes = ImportContract.MaxUploadBytes + (64 * 1024);
 
     private sealed record ImportTokenRequest(Guid ProposalId, string? Token);
 
@@ -6259,7 +6299,23 @@ public static class ImportEndpoints
                 return MissingFile();
             }
 
-            var form = await request.ReadFormAsync(cancellationToken);
+            IFormCollection form;
+            try
+            {
+                form = await request.ReadFormAsync(cancellationToken);
+            }
+
+            // Not readable multipart - no boundary, or a body that ends before the boundary it
+            // declared - is malformed input, answered exactly like no file at all. Truncation arrives
+            // as an IOException rather than an InvalidDataException, so both are caught; the server's
+            // own refusal is not, because BadHttpRequestException is an IOException too and a body
+            // over this route's bound has to stay the 413 the server made it.
+            catch (Exception exception) when (
+                exception is InvalidDataException || (exception is IOException and not BadHttpRequestException))
+            {
+                return MissingFile();
+            }
+
             var file = form.Files.GetFile("file");
 
             if (file is null || file.Length == 0)
@@ -6408,7 +6464,7 @@ app.MapImportEndpoints();
 - [ ] **Step 4: Run the test to verify it passes**
 
 Run: `dotnet test tests/MultiChannelAgent.IntegrationTests/MultiChannelAgent.IntegrationTests.csproj --filter "FullyQualifiedName~ImportEndpointsHttpTests"`
-Expected: PASS, 10 tests.
+Expected: PASS, 11 tests.
 
 - [ ] **Step 5: Commit**
 
@@ -7165,7 +7221,7 @@ If nothing needed fixing, skip this commit rather than creating an empty one.
 | Owner and Editor can open Initial Import | Task 8 (`InitialImportService` authorizes `MembershipRole.Editor`, which Owner satisfies) | `InitialImportServiceTests.An_Editor_and_an_Owner_may_both_import`, `...A_Viewer_may_not_import_and_the_denial_is_audited`, scenario step 14 |
 | Only when the Inventory has no Stock Entries, including zero-quantity | Task 6 (`IStockEmptyStateReader`), Task 8 (gate before the file is read), Task 12 (authoritative re-assertion) | `InitialImportServiceTests.Import_is_offered_only_while_the_Inventory_holds_no_Stock_at_all`, `SqlImportProposalStoreTests.An_Inventory_holding_a_zero_quantity_entry_is_not_empty`, `SqlImportExecutionStoreTests.An_import_into_an_Inventory_that_stopped_being_empty_changes_nothing`, scenario steps 1 and 12 |
 | The specified UTF-8 RFC 4180-style five-column contract | Task 1 (`ImportContract.Headers`), Task 2 (`CsvImportDocument`) | `ImportContractTests.The_file_contract_is_exactly_five_columns_in_one_fixed_order`, the whole of `CsvImportDocumentTests` |
-| Rejects unknown, duplicate, oversized, or invalid input | Task 2 (headers, encoding, quoting, bounds), Task 3 (field bounds), Task 14 (file bound and 413 before buffering) | `CsvImportDocumentTests` header/encoding/quote/bound cases, `ImportRowTests`, `ImportEndpointsHttpTests.A_file_part_longer_than_the_bound_is_refused_on_its_length_rather_than_read`, `ImportUploadLimitsHttpTests.A_body_over_the_route_bound_is_refused_by_the_server_before_the_endpoint_reads_any_of_it` |
+| Rejects unknown, duplicate, oversized, or invalid input | Task 2 (headers, encoding, quoting, bounds), Task 3 (field bounds), Task 14 (file bound, an unreadable body, and 413 before buffering) | `CsvImportDocumentTests` header/encoding/quote/bound cases, `ImportRowTests`, `ImportEndpointsHttpTests.A_file_part_longer_than_the_bound_is_refused_on_its_length_rather_than_read`, `...A_multipart_body_that_stops_before_its_terminating_boundary_names_the_part_it_wanted`, `ImportUploadLimitsHttpTests.A_body_over_the_route_bound_is_refused_by_the_server_before_the_endpoint_reads_any_of_it`, `...A_file_part_past_the_file_bound_is_refused_at_the_file_bound_however_much_framing_the_body_is_allowed` |
 | Resolves active Unit names or aliases and active Location names | Task 7 (`ImportReferenceResolver` over active-only `IInventoryReferenceStore`) | `ImportReferenceResolverTests.A_Unit_resolves_by_its_canonical_name_or_by_any_active_alias`, `...A_retired_reference_is_exactly_as_unknown_as_one_that_never_existed`, scenario step 13 |
 | Without creating references | Task 7 (nothing in the resolver writes), Task 17 step 6 | `ImportReferenceResolverTests.An_unknown_Unit_is_reported_at_its_own_column_and_never_created`, scenario step 3 |
 | Equivalent rows merge by summing Quantity only when Notes are compatible | Task 4 (`ImportMergePlan`) | `ImportMergePlanTests` (every compatibility and conflict case), `InitialImportServiceTests.Conflicting_Notes_on_equivalent_rows_are_reported_as_errors`, scenario steps 4 and 5 |

@@ -27,8 +27,17 @@ public sealed class ImportUploadLimitsHttpTests : IAsyncLifetime
     private const string Header = "Name,Quantity,Unit,Location,Note";
     private const string ImportRoutePrefix = "/api/inventories/{inventoryId:guid}/import";
 
-    /// <summary>The bound the route declares: the file bound plus a little multipart framing.</summary>
-    private const long MaxRequestBodyBytes = ImportContract.MaxUploadBytes + (4 * 1024);
+    /// <summary>
+    /// What the route allows for transport framing beyond the file itself: multipart part headers and
+    /// boundaries, and the slack an intermediary needs when it re-frames the body it forwards - a
+    /// proxy that re-chunks a maximum-sized upload must not turn a valid import into a 413. It is
+    /// deliberately generous, because it buys margin rather than capacity: what may be imported is the
+    /// file bound, which this number does not move.
+    /// </summary>
+    private const int MultipartFramingBytes = 64 * 1024;
+
+    /// <summary>The bound the route declares: the file bound plus that framing allowance.</summary>
+    private const long MaxRequestBodyBytes = ImportContract.MaxUploadBytes + MultipartFramingBytes;
 
     private readonly ServerRequestSizeLimitLog _requestSizeLimits = new();
 
@@ -196,5 +205,41 @@ public sealed class ImportUploadLimitsHttpTests : IAsyncLifetime
         using var scope = _factory.Services.CreateScope();
         var database = scope.ServiceProvider.GetRequiredService<MultiChannelAgentDbContext>();
         Assert.False(await database.ImportProposals.AnyAsync());
+    }
+
+    // The framing allowance is transport slack, not room for a larger import. A file part past the file
+    // bound but inside the body bound is delivered whole - the server has no objection to it - and the
+    // endpoint refuses it on its own exact length, with the file bound's own typed answer rather than
+    // the body bound's. That is what keeps the two numbers independent: raising the framing allowance
+    // for intermediaries can never raise what may be imported.
+    [Fact]
+    public async Task A_file_part_past_the_file_bound_is_refused_at_the_file_bound_however_much_framing_the_body_is_allowed()
+    {
+        var (jar, csrfToken) = await SignInAndBootstrapAsync("Import Owner");
+        var inventoryId = await CreateInventoryAsync(jar, csrfToken, "Import Warehouse");
+
+        var overTheFileBound = Encoding.UTF8.GetBytes(
+            $"{Header}\n" + new string('a', ImportContract.MaxUploadBytes + (MultipartFramingBytes / 2) - Header.Length - 1));
+        Assert.Equal(ImportContract.MaxUploadBytes + (MultipartFramingBytes / 2), overTheFileBound.Length);
+
+        var file = new ByteArrayContent(overTheFileBound);
+        file.Headers.ContentType = new MediaTypeHeaderValue("text/csv");
+        var body = new MultipartFormDataContent { { file, "file", "stock.csv" } };
+        var contentLength = body.Headers.ContentLength!.Value;
+        Assert.True(contentLength < MaxRequestBodyBytes);
+
+        var response = await SendAsync(
+            jar,
+            new HttpRequestMessage(HttpMethod.Post, $"/api/inventories/{inventoryId}/import/validate") { Content = body },
+            csrfToken);
+        var payload = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.RequestEntityTooLarge, response.StatusCode);
+        Assert.Equal("file_too_large", JsonDocument.Parse(payload).RootElement.GetProperty("code").GetString());
+
+        var limit = Assert.Single(_requestSizeLimits.Records, record => record.AppliedLimit is not null);
+        Assert.Equal(MaxRequestBodyBytes, limit.AppliedLimit);
+        Assert.False(limit.RefusedByTheServer);
+        Assert.InRange(limit.BytesDelivered, overTheFileBound.Length, contentLength);
     }
 }

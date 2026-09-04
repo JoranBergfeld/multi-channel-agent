@@ -482,6 +482,43 @@ public sealed class ImportEndpointsHttpTests : IAsyncLifetime
         Assert.Contains("file", (await ValidationErrorsAsync(response)).Keys);
     }
 
+    // A body that declares a boundary and then stops before reaching it is a malformed upload, not a
+    // server fault - a connection cut mid-flight arrives exactly like this. ASP.NET Core's
+    // MultipartReader reports the truncation as a plain IOException rather than an InvalidDataException,
+    // so the endpoint has to recognize it as one more unreadable body and answer as it does for a
+    // request with no file part at all: naming the part it wanted, never a 500.
+    [Fact]
+    public async Task A_multipart_body_that_stops_before_its_terminating_boundary_names_the_part_it_wanted()
+    {
+        var (jar, csrfToken, _) = await SignInAndBootstrapAsync("Import Owner");
+        var inventoryId = await CreateInventoryAsync(jar, csrfToken, "Import Warehouse");
+        const string boundary = "ImportBoundaryThatNeverCloses";
+
+        // A well-formed part header and the beginning of a file, and then nothing: no closing boundary
+        // and no terminator.
+        var truncated = new ByteArrayContent(Encoding.UTF8.GetBytes(
+            $"--{boundary}\r\n"
+            + "Content-Disposition: form-data; name=\"file\"; filename=\"stock.csv\"\r\n"
+            + "Content-Type: text/csv\r\n"
+            + "\r\n"
+            + $"{Header}\r\nSteel Bolts,4,,,\r\n"));
+        truncated.Headers.ContentType = new MediaTypeHeaderValue("multipart/form-data")
+        {
+            Parameters = { new NameValueHeaderValue("boundary", boundary) },
+        };
+
+        var response = await SendAsync(
+            jar,
+            new HttpRequestMessage(HttpMethod.Post, $"/api/inventories/{inventoryId}/import/validate")
+            {
+                Content = truncated,
+            },
+            csrfToken);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Contains("file", (await ValidationErrorsAsync(response)).Keys);
+    }
+
     [Fact]
     public async Task A_part_under_another_name_is_not_the_file_part()
     {

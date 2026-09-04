@@ -23,10 +23,21 @@ public sealed record ImportDecisionHttpRequest(Guid ProposalId, string? Token);
 public static class ImportEndpoints
 {
     /// <summary>
-    /// The file bound plus a little multipart framing: what one whole upload request may weigh, what
-    /// the server refuses beyond, and what this route is willing to hold in memory at once.
+    /// What one whole upload request may weigh beyond the file itself: multipart part headers and
+    /// boundaries, and the slack an intermediary needs when it re-frames the body it forwards. A proxy
+    /// that re-chunks a maximum-sized upload adds framing this route never sees the shape of, and a
+    /// margin measured in a few kibibytes would turn a perfectly valid import into a 413 somewhere in
+    /// the middle. It buys margin, not capacity: what may be imported is
+    /// <see cref="ImportContract.MaxUploadBytes"/>, checked separately against the file part's own
+    /// length, and this number does not move it.
     /// </summary>
-    private const long MaxRequestBodyBytes = ImportContract.MaxUploadBytes + (4 * 1024);
+    private const int MultipartFramingBytes = 64 * 1024;
+
+    /// <summary>
+    /// The file bound plus that framing: what one whole upload request may weigh, what the server
+    /// refuses beyond, and what this route is willing to hold in memory at once.
+    /// </summary>
+    private const long MaxRequestBodyBytes = ImportContract.MaxUploadBytes + MultipartFramingBytes;
 
     public static IEndpointRouteBuilder MapImportEndpoints(this IEndpointRouteBuilder endpoints)
     {
@@ -72,10 +83,17 @@ public static class ImportEndpoints
             {
                 form = await request.ReadFormAsync(cancellationToken);
             }
-            catch (InvalidDataException)
+
+            // A body that is not readable multipart is a malformed upload rather than a server fault,
+            // and it is answered exactly like no file at all: naming the part expected. Truncation is
+            // reported as an IOException rather than an InvalidDataException - a declared boundary the
+            // body ends before reaching is what a connection cut mid-upload leaves behind - so both
+            // are caught. What is not caught is the server's own refusal: BadHttpRequestException is
+            // an IOException too, and a body over this route's bound has to stay the 413 the server
+            // made it, never be rewritten into a complaint about the file part.
+            catch (Exception exception) when (
+                exception is InvalidDataException || (exception is IOException and not BadHttpRequestException))
             {
-                // A body that is not readable multipart is a malformed upload rather than a server
-                // fault, and it is answered exactly like no file at all: naming the part expected.
                 return MissingFile();
             }
 
