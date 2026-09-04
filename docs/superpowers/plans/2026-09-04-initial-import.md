@@ -6497,11 +6497,29 @@ git commit -m "feat(host): expose the signed-in Initial Import workflow for #34"
 
 Why: an import that cannot be previewed is not the workflow the ticket describes. The preview is the whole safety story - #26 asks for "a normalized preview and explicit confirmation before import, so that the exact initial state is visible".
 
+The blocks below are the code that shipped, not a sketch of it. `src/web` has no test runner and this
+task does not add one, so the compiler and this plan are the only places the client's completeness is
+written down - and a block here that disagrees with the file it names is a claim nobody can check.
+
 - [ ] **Step 1: Write the typed client**
 
 Create `src/web/src/importApi.ts`:
 
 ```ts
+/**
+ * The typed client for the signed-in Initial Import workflow: whether it is offered here, what a
+ * chosen CSV file would create, and the two decisions that end it.
+ *
+ * Every call names its own outcomes instead of collapsing to worked-or-failed, because "it failed"
+ * is not something this workflow can act on. An expired proposal, a token that is no longer the
+ * pending one, an Inventory that stopped being empty, and a server that is briefly unreachable each
+ * ask for a different next step - and only some of them are safe to retry with the same preview.
+ *
+ * The payload shapes below are this client's assumption about the routes it calls, checked at
+ * compile time against every use here and nowhere else: nothing validates a response body at
+ * runtime, so a shape that drifts from the server's is a bug these types cannot catch.
+ */
+
 /** Whether Initial Import is available here, and when it is not, the one machine code saying why. */
 export interface ImportEligibility {
   eligible: boolean;
@@ -6515,10 +6533,12 @@ export interface ImportPreviewRow {
   unitCanonicalName: string;
   locationName: string | null;
   note: string | null;
+  /** The 1-based source lines that merged into this entry - the header is line 1. */
   sourceLineNumbers: number[];
 }
 
 export interface ImportPreview {
+  /** The one-time plaintext token. It exists only here and in the confirmation that spends it. */
   token: string;
   proposalId: string;
   fileDigest: string;
@@ -6531,7 +6551,9 @@ export interface ImportPreview {
 /** One reported problem: its machine code, where it is, and any bounded suggestions. */
 export interface ImportError {
   code: string;
+  /** The 1-based source line, or 0 for a whole-file problem that belongs to no line. */
   lineNumber: number;
+  /** The server's own zero-based column index, or null when the problem is about the whole record. */
   columnIndex: number | null;
   suggestions: string[];
 }
@@ -6547,25 +6569,109 @@ export interface ImportCompleted {
   fileDigest: string;
 }
 
+/**
+ * Every error the import contract can report, as the closed <c>ImportErrorCode</c> set the domain
+ * defines. Naming them here is what makes the workflow's prose exhaustive at compile time: a code
+ * listed without a sentence to render for it fails the build. An unrecognized code still renders -
+ * see {@link isKnownImportErrorCode} - because the server, not this list, decides what it sends.
+ */
+export const IMPORT_ERROR_CODES = [
+  'unknown_column',
+  'duplicate_column',
+  'wrong_column_count',
+  'invalid_encoding',
+  'unterminated_quote',
+  'malformed_quote',
+  'too_few_fields',
+  'too_many_fields',
+  'missing_name',
+  'missing_quantity',
+  'invalid_quantity',
+  'quantity_overflow',
+  'name_too_long',
+  'note_too_long',
+  'unit_too_long',
+  'location_too_long',
+  'unknown_unit',
+  'unknown_location',
+  'conflicting_notes',
+  'file_too_large',
+  'too_many_rows',
+  'too_many_entries',
+  'empty_file',
+] as const;
+
+export type ImportErrorCode = (typeof IMPORT_ERROR_CODES)[number];
+
+export function isKnownImportErrorCode(code: string): code is ImportErrorCode {
+  return (IMPORT_ERROR_CODES as readonly string[]).includes(code);
+}
+
+/**
+ * Why a decision could not be applied. Both are final for the preview that met them - the proposal
+ * is settled server-side either way - and they differ in what is true afterwards: an expired import
+ * leaves an Inventory that is still empty, a changed state does not.
+ */
+export type ImportConflictCode = 'proposal_expired' | 'state_changed' | 'unknown';
+
 /** Exactly one of these is present, so a caller cannot forget to handle a case. */
 export type ImportValidation =
   | { kind: 'preview'; preview: ImportPreview }
   | { kind: 'errors'; report: ImportErrorReport }
+  /** The upload itself could not be read as a CSV file part - no file, an empty one, or no token. */
+  | { kind: 'unreadable-upload' }
   | { kind: 'not-empty' }
   | { kind: 'too-large' }
   | { kind: 'unavailable' };
 
-const jsonHeaders = (csrfToken: string) => ({
-  'Content-Type': 'application/json',
-  'X-CSRF-TOKEN': csrfToken,
-});
+/**
+ * What a confirmation or a cancellation ran into. 'settled' means there is no pending import to act
+ * on any more, so the preview showing it is stale; 'token-mismatch' deliberately leaves the proposal
+ * pending, so the preview it belongs to is still worth keeping.
+ */
+type ImportDecisionRefusal =
+  | { kind: 'settled' }
+  | { kind: 'conflict'; code: ImportConflictCode }
+  | { kind: 'token-mismatch' }
+  | { kind: 'unavailable' };
 
+export type ImportConfirmation = { kind: 'completed'; completed: ImportCompleted } | ImportDecisionRefusal;
+
+export type ImportRejection = { kind: 'rejected' } | ImportDecisionRefusal;
+
+const TOKEN_MISMATCH_CODE = 'proposal_token_mismatch';
+
+const importUrl = (inventoryId: string) => `/api/inventories/${inventoryId}/import`;
+
+/**
+ * Reads whether Initial Import is offered for one Inventory.
+ *
+ * Only a 404 is an answer: an Inventory that does not exist, one this Participant may not edit, and
+ * a session that has ended all report it with no body to read, deliberately indistinguishable, and
+ * all mean the same thing here - not offered. Every other refusal says nothing about eligibility, so
+ * it is raised rather than reported as one: a caller that read a 503 or an expired session as "not
+ * offered" would discard a reviewed preview, and the one-time token that exists nowhere else, over a
+ * server that was briefly unreachable. This is the same null-or-throw split every other client in
+ * this directory uses; see `fetchStock` and `fetchUnits`.
+ */
 export async function fetchEligibility(inventoryId: string): Promise<ImportEligibility | null> {
-  const response = await fetch(`/api/inventories/${inventoryId}/import`, { credentials: 'same-origin' });
+  const response = await fetch(importUrl(inventoryId), { credentials: 'include' });
 
-  return response.ok ? ((await response.json()) as ImportEligibility) : null;
+  if (response.status === 404) {
+    return null;
+  }
+
+  if (!response.ok) {
+    throw new Error(`Reading whether Initial Import is offered failed with status ${response.status}.`);
+  }
+
+  return (await response.json()) as ImportEligibility;
 }
 
+/**
+ * Uploads one chosen file and answers with either the exact entries it would create - held as a
+ * pending proposal for ten minutes - or every actionable problem it has. Nothing is created here.
+ */
 export async function validateImport(
   inventoryId: string,
   csrfToken: string,
@@ -6574,9 +6680,9 @@ export async function validateImport(
   const body = new FormData();
   body.append('file', file, file.name);
 
-  const response = await fetch(`/api/inventories/${inventoryId}/import/validate`, {
+  const response = await fetch(`${importUrl(inventoryId)}/validate`, {
     method: 'POST',
-    credentials: 'same-origin',
+    credentials: 'include',
     headers: { 'X-CSRF-TOKEN': csrfToken },
     body,
   });
@@ -6594,47 +6700,120 @@ export async function validateImport(
   }
 
   if (response.status === 400) {
-    const problem = (await response.json()) as Partial<ImportErrorReport>;
+    const problem = await readProblem(response);
 
-    return {
-      kind: 'errors',
-      report: { errors: problem.errors ?? [], omittedErrorCount: problem.omittedErrorCount ?? 0 },
-    };
+    // Two different 400s arrive here: the bounded error report, whose 'errors' is a list of coded
+    // problems, and a validation problem about the upload itself, whose 'errors' is a map keyed by
+    // part name. Only the first is a report about the file's contents, and only a list can be one.
+    return Array.isArray(problem.errors)
+      ? {
+          kind: 'errors',
+          report: {
+            errors: problem.errors as ImportError[],
+            omittedErrorCount: typeof problem.omittedErrorCount === 'number' ? problem.omittedErrorCount : 0,
+          },
+        }
+      : { kind: 'unreadable-upload' };
   }
 
   return { kind: 'unavailable' };
 }
 
+/**
+ * Spends the preview's one-time token to create exactly the previewed Stock Entries, atomically.
+ *
+ * The proposal id and the token are carried exactly as the preview issued them: the server matches
+ * the token against a stored hash and the id against the one pending proposal, so a trimmed,
+ * re-cased, or otherwise adjusted value is simply a different value. Confirming the same proposal
+ * again re-reports what it did rather than importing twice, which is what makes retrying a request
+ * that may or may not have reached the server safe.
+ */
 export async function confirmImport(
   inventoryId: string,
   csrfToken: string,
   proposalId: string,
   token: string,
-): Promise<ImportCompleted | null> {
-  const response = await fetch(`/api/inventories/${inventoryId}/import/confirm`, {
-    method: 'POST',
-    credentials: 'same-origin',
-    headers: jsonHeaders(csrfToken),
-    body: JSON.stringify({ proposalId, token }),
-  });
+): Promise<ImportConfirmation> {
+  const response = await postDecision(`${importUrl(inventoryId)}/confirm`, csrfToken, proposalId, token);
 
-  return response.ok ? ((await response.json()) as ImportCompleted) : null;
+  return response.ok
+    ? { kind: 'completed', completed: (await response.json()) as ImportCompleted }
+    : await refusalFor(response);
 }
 
+/**
+ * Cancels the pending import, discarding its stored rows and its raw file. Nothing is created and
+ * nothing existing is touched, so a cancellation that fails can always simply be repeated.
+ */
 export async function rejectImport(
   inventoryId: string,
   csrfToken: string,
   proposalId: string,
   token: string | null,
-): Promise<boolean> {
-  const response = await fetch(`/api/inventories/${inventoryId}/import/reject`, {
+): Promise<ImportRejection> {
+  const response = await postDecision(`${importUrl(inventoryId)}/reject`, csrfToken, proposalId, token);
+
+  return response.ok ? { kind: 'rejected' } : await refusalFor(response);
+}
+
+function postDecision(
+  url: string,
+  csrfToken: string,
+  proposalId: string,
+  token: string | null,
+): Promise<Response> {
+  return fetch(url, {
     method: 'POST',
-    credentials: 'same-origin',
-    headers: jsonHeaders(csrfToken),
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': csrfToken },
     body: JSON.stringify({ proposalId, token }),
   });
+}
 
-  return response.ok;
+async function refusalFor(response: Response): Promise<ImportDecisionRefusal> {
+  // An import that is not pending for this Participant and an Inventory they may not touch are one
+  // answer on purpose, and it carries no body to read.
+  if (response.status === 404) {
+    return { kind: 'settled' };
+  }
+
+  if (response.status === 409 || response.status === 400) {
+    const code = readCode(await readProblem(response));
+
+    if (response.status === 409) {
+      return { kind: 'conflict', code: toConflictCode(code) };
+    }
+
+    // A mismatched token leaves the proposal pending by design, so reviewed work survives a typo or
+    // a superseding upload. Any other 400 - a rejected CSRF token, an unreadable body - says nothing
+    // about the proposal, so it is reported as what it is rather than blamed on the token.
+    return code === TOKEN_MISMATCH_CODE ? { kind: 'token-mismatch' } : { kind: 'unavailable' };
+  }
+
+  return { kind: 'unavailable' };
+}
+
+function toConflictCode(code: string | null): ImportConflictCode {
+  return code === 'proposal_expired' || code === 'state_changed' ? code : 'unknown';
+}
+
+/**
+ * Reads a refusal's problem document, tolerating one that has none. A refusal is allowed to answer
+ * with an empty body, and an intermediary is allowed to answer with HTML; neither says anything the
+ * status code has not already said, and neither may become an exception a caller did not ask for.
+ */
+async function readProblem(response: Response): Promise<Record<string, unknown>> {
+  try {
+    const body: unknown = await response.json();
+
+    return typeof body === 'object' && body !== null ? (body as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function readCode(problem: Record<string, unknown>): string | null {
+  return typeof problem.code === 'string' ? problem.code : null;
 }
 ```
 
@@ -6647,9 +6826,13 @@ import { useCallback, useEffect, useState } from 'react';
 import {
   confirmImport,
   fetchEligibility,
+  isKnownImportErrorCode,
   rejectImport,
   validateImport,
+  type ImportConflictCode,
   type ImportError,
+  type ImportErrorCode,
+  type ImportErrorReport,
   type ImportPreview,
   type ImportValidation,
 } from './importApi';
@@ -6657,15 +6840,27 @@ import {
 interface InitialImportProps {
   inventoryId: string;
   csrfToken: string;
+  /** Bumped by the parent whenever Stock may have changed, to re-read whether importing is still offered. */
   refetchToken: number;
+  /** Called exactly once per import that actually created Stock Entries, so the workspace refetches. */
   onImported: () => void;
 }
 
-/** The five columns, so an error naming a column index can name the column a person sees. */
+/** What one in-flight request is doing, so a button can say so and no second one can start. */
+type ImportAction = 'validating' | 'confirming' | 'cancelling';
+
+const HEADING_ID = 'initialImportHeading';
+const FILE_INPUT_ID = 'initialImportFile';
+
+/** The five columns, in order, so an error naming a column index can name the column a person sees. */
 const COLUMNS = ['Name', 'Quantity', 'Unit', 'Location', 'Note'];
 
-/** One readable sentence per machine code. The server sends codes; prose belongs here. */
-const MESSAGES: Record<string, string> = {
+/**
+ * One readable sentence per machine code. The server sends codes and never prose, so this is the one
+ * place an import failure is worded - and being keyed by the closed set of codes, a code the client
+ * knows about without a sentence to render for it cannot compile.
+ */
+const ERROR_MESSAGES: Record<ImportErrorCode, string> = {
   unknown_column: 'That column is not one of the five this import accepts.',
   duplicate_column: 'That column appears more than once.',
   wrong_column_count: 'The file must have exactly five columns: Name, Quantity, Unit, Location, Note.',
@@ -6679,195 +6874,521 @@ const MESSAGES: Record<string, string> = {
   invalid_quantity: 'Quantity must be a plain non-negative number, for example 10 or 2.5.',
   quantity_overflow: 'The quantities on these equivalent lines add up to more than can be stored.',
   name_too_long: 'That name is too long.',
-  note_too_long: 'That note is too long.',
-  unit_too_long: 'That unit is too long.',
-  location_too_long: 'That location is too long.',
-  unknown_unit: 'No active Unit here answers to that name.',
-  unknown_location: 'No active Location here carries that name.',
-  conflicting_notes: 'Equivalent lines carry different notes, so they cannot be merged.',
+  note_too_long: 'That Note is too long.',
+  unit_too_long: 'That Unit name is too long.',
+  location_too_long: 'That Location name is too long.',
+  unknown_unit: 'No active Unit here answers to that name. Create it first; an import never creates one.',
+  unknown_location: 'No active Location here carries that name. Create it first; an import never creates one.',
+  conflicting_notes: 'Equivalent lines carry different Notes, so they cannot be merged into one Stock Entry.',
   file_too_large: 'That file is larger than 2 MiB.',
   too_many_rows: 'That file has more than 5,000 rows.',
-  too_many_entries: 'That file would create more than 5,000 stock entries.',
+  too_many_entries: 'That file would create more than 5,000 Stock Entries.',
   empty_file: 'That file has no rows to import.',
 };
 
-function ErrorRows({ errors }: { errors: ImportError[] }) {
-  return (
-    <table>
-      <thead>
-        <tr>
-          <th>Line</th>
-          <th>Column</th>
-          <th>Problem</th>
-        </tr>
-      </thead>
-      <tbody>
-        {errors.map((error, index) => (
-          <tr key={`${error.lineNumber}-${error.code}-${index}`}>
-            <td>{error.lineNumber === 0 ? '—' : error.lineNumber}</td>
-            <td>{error.columnIndex === null ? '—' : COLUMNS[error.columnIndex]}</td>
-            <td>
-              {MESSAGES[error.code] ?? error.code}
-              {error.suggestions.length > 0 && ` Did you mean: ${error.suggestions.join(', ')}?`}
-            </td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
-  );
-}
-
-function PreviewRows({ preview }: { preview: ImportPreview }) {
-  return (
-    <table>
-      <thead>
-        <tr>
-          <th>Name</th>
-          <th>Quantity</th>
-          <th>Unit</th>
-          <th>Location</th>
-          <th>Note</th>
-          <th>From lines</th>
-        </tr>
-      </thead>
-      <tbody>
-        {preview.entries.map((entry) => (
-          <tr key={`${entry.name}-${entry.unitCanonicalName}-${entry.locationName ?? ''}`}>
-            <td>{entry.name}</td>
-            <td>{entry.quantity}</td>
-            <td>{entry.unitCanonicalName}</td>
-            <td>{entry.locationName ?? 'Unlocated'}</td>
-            <td>{entry.note ?? '—'}</td>
-            <td>{entry.sourceLineNumbers.join(', ')}</td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
-  );
-}
+/** Why a decision could not be applied, in the same one-sentence-per-code shape. */
+const CONFLICT_MESSAGES: Record<ImportConflictCode, string> = {
+  proposal_expired:
+    'That preview expired before it was confirmed, so nothing was created. Choose the file again to preview it afresh.',
+  state_changed:
+    'This Inventory stopped being empty while that preview was open, so nothing was created. ' +
+    'Initial Import is offered only while an Inventory has no Stock Entries.',
+  unknown: 'That import can no longer be applied, and nothing was created.',
+};
 
 /**
- * The signed-in Initial Import workflow: offered only while the Inventory is empty, it validates a
- * chosen file, shows either every actionable error or the exact normalized entries it would create,
- * and creates them only on an explicit confirmation.
+ * The signed-in Initial Import workflow: offered only while this Inventory has no Stock Entries, it
+ * validates a chosen CSV file, shows either every actionable problem or the exact normalized Stock
+ * Entries it would create, and creates them only on an explicit confirmation.
+ *
+ * Nothing here is the authorization boundary or the empty-Inventory rule - both are re-decided by
+ * the server on every call, including inside the transaction that creates the entries. What this
+ * component owns is that a Participant is never shown a preview they cannot act on, never left with
+ * a control that stays disabled because a request failed, and never told an import happened, or did
+ * not, without the server having said so.
  */
 function InitialImport({ inventoryId, csrfToken, refetchToken, onImported }: InitialImportProps) {
   const [eligible, setEligible] = useState<boolean | null>(null);
   const [validation, setValidation] = useState<ImportValidation | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [completed, setCompleted] = useState<number | null>(null);
+  const [busy, setBusy] = useState<ImportAction | null>(null);
+  const [completedEntryCount, setCompletedEntryCount] = useState<number | null>(null);
+  const [alert, setAlert] = useState<string | null>(null);
 
-  const loadEligibility = useCallback(async () => {
-    const result = await fetchEligibility(inventoryId);
-    setEligible(result?.eligible ?? false);
-  }, [inventoryId]);
+  /**
+   * Whether the server offers this workflow here, as a plain answer. A null eligibility is the one
+   * authoritative refusal - a 404, which an Inventory that does not exist, one this Participant may
+   * not edit, and an ended session all share - so collapsing it to false is naming what it means.
+   * Every other refusal is raised by the client instead of answered, so no caller of this can read a
+   * transient failure as a decision.
+   */
+  const readEligibility = useCallback(
+    async () => (await fetchEligibility(inventoryId))?.eligible ?? false,
+    [inventoryId],
+  );
+
+  const applyEligibility = useCallback((available: boolean) => {
+    setEligible(available);
+
+    if (!available) {
+      // A preview the server will no longer accept can never be confirmed, so it stops being offered
+      // the moment the server says so - whether this Inventory stopped being empty or stopped being
+      // this Participant's to change. Only an answer reaches here: a failed read raises instead, and
+      // is caught below with the preview, its token, and the current offer left exactly as they are.
+      // Anything else being shown is a report about a file rather than an offer, and stays readable.
+      setValidation((current) => (current?.kind === 'preview' ? null : current));
+    }
+  }, []);
+
+  /** Asks the server what is true now. Used after anything that may have ended this workflow. */
+  const refreshEligibility = useCallback(async () => {
+    try {
+      applyEligibility(await readEligibility());
+    } catch {
+      // Whatever prompted this re-check has already said what failed, and a stale eligibility is
+      // safe here: every route re-decides it anyway, and this one is only about what to offer.
+    }
+  }, [applyEligibility, readEligibility]);
 
   useEffect(() => {
-    void loadEligibility();
-  }, [loadEligibility, refetchToken]);
+    let ignored = false;
+
+    // oxlint(react/set-state-in-effect) only recognizes an inline async IIFE's await boundary, so the
+    // work stays inline here; see StockWorkspace.tsx for the same pattern.
+    void (async () => {
+      try {
+        const available = await readEligibility();
+
+        // An answer that arrives after this effect has been replaced describes an Inventory, or a
+        // moment, that nothing on screen is about any more.
+        if (!ignored) {
+          applyEligibility(available);
+        }
+      } catch (failure) {
+        // A re-check that could not be made is not an answer, so nothing on screen moves: the offer,
+        // any reviewed preview, and the one-time token that only exists in it all stay exactly as
+        // they were, and the next bump of refetchToken asks again.
+        if (!ignored) {
+          setAlert(
+            `Checking whether Initial Import is available failed: ${describeFailure(failure)} ` +
+              'Nothing was created, and any preview already on screen is untouched.',
+          );
+        }
+      }
+    })();
+
+    return () => {
+      ignored = true;
+    };
+    // refetchToken deliberately participates in this effect's dependency list purely to trigger the
+    // re-read when it changes - its value itself is never read.
+  }, [applyEligibility, readEligibility, refetchToken]);
 
   async function handleFile(event: React.ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
+    const input = event.target;
+    const file = input.files?.[0];
+
+    // Clearing the control's own value lets the same file be chosen again after it is fixed on disk,
+    // and means the control never claims a file that is no longer what is being previewed.
+    input.value = '';
+
     if (!file) {
       return;
     }
 
-    setBusy(true);
-    setCompleted(null);
-    setValidation(await validateImport(inventoryId, csrfToken, file));
-    setBusy(false);
-  }
+    setBusy('validating');
+    setAlert(null);
 
-  async function handleConfirm(proposalId: string, token: string) {
-    setBusy(true);
-    const result = await confirmImport(inventoryId, csrfToken, proposalId, token);
-    setBusy(false);
+    // Choosing a file starts over. Whatever the previous answer was, this upload supersedes the
+    // proposal behind it, so it must not be left on screen next to a newer one.
+    setValidation(null);
+    setCompletedEntryCount(null);
 
-    if (result) {
-      setValidation(null);
-      setCompleted(result.createdEntryCount);
-      onImported();
-      return;
+    try {
+      const result = await validateImport(inventoryId, csrfToken, file);
+      setValidation(result);
+
+      if (result.kind === 'not-empty') {
+        await refreshEligibility();
+      }
+    } catch (failure) {
+      setAlert(`Reading that file failed: ${describeFailure(failure)} Nothing was created - choose the file again.`);
+    } finally {
+      setBusy(null);
     }
-
-    // The import could not be applied - most often because the Inventory stopped being empty. Ask
-    // the server what is true now rather than guessing here.
-    setValidation(null);
-    await loadEligibility();
   }
 
-  async function handleCancel(proposalId: string, token: string) {
-    setBusy(true);
-    await rejectImport(inventoryId, csrfToken, proposalId, token);
-    setBusy(false);
-    setValidation(null);
+  async function handleConfirm(preview: ImportPreview) {
+    setBusy('confirming');
+    setAlert(null);
+
+    try {
+      const result = await confirmImport(inventoryId, csrfToken, preview.proposalId, preview.token);
+
+      switch (result.kind) {
+        case 'completed':
+          setValidation(null);
+          setCompletedEntryCount(result.completed.createdEntryCount);
+
+          // This Inventory holds Stock now, so the workflow is over here. Saying so immediately keeps
+          // the file control from being offered for the moment it takes the parent's refetch - which
+          // onImported triggers, and which re-reads this from the server - to come back and agree.
+          setEligible(false);
+          onImported();
+          return;
+
+        case 'conflict':
+          // The proposal is settled server-side either way, so its preview can never be confirmed.
+          setValidation(null);
+          setAlert(CONFLICT_MESSAGES[result.code]);
+          await refreshEligibility();
+          return;
+
+        case 'settled':
+          setValidation(null);
+          setAlert('That import is no longer pending, and nothing was created. Choose the file again to start over.');
+          await refreshEligibility();
+          return;
+
+        case 'token-mismatch':
+          // The proposal is deliberately left pending, so the reviewed preview is still worth having.
+          setAlert(
+            'That confirmation was refused because it did not match the pending import. ' +
+              'Choose the file again to preview it afresh.',
+          );
+          return;
+
+        case 'unavailable':
+          // Confirming the same proposal again re-reports what it did rather than importing twice, so
+          // retrying is safe even if this request did reach the server.
+          setAlert('Confirming failed. Nothing has been created unless a retry says so - try confirming again.');
+          return;
+
+        default:
+          return assertNever(result);
+      }
+    } catch (failure) {
+      setAlert(`Confirming failed: ${describeFailure(failure)} Try confirming again - it can never import twice.`);
+    } finally {
+      setBusy(null);
+    }
   }
 
-  if (eligible === null) {
+  async function handleCancel(preview: ImportPreview) {
+    setBusy('cancelling');
+    setAlert(null);
+
+    try {
+      const result = await rejectImport(inventoryId, csrfToken, preview.proposalId, preview.token);
+
+      switch (result.kind) {
+        case 'rejected':
+          // Only now: until the server has settled the proposal and discarded its file, this preview
+          // is still the pending import, and hiding it would be claiming otherwise.
+          setValidation(null);
+          return;
+
+        case 'settled':
+          setValidation(null);
+          setAlert('That import was no longer pending. Nothing was created.');
+          await refreshEligibility();
+          return;
+
+        case 'conflict':
+          setValidation(null);
+          setAlert(CONFLICT_MESSAGES[result.code]);
+          await refreshEligibility();
+          return;
+
+        case 'token-mismatch':
+          setAlert(
+            'That cancellation was refused because it did not match the pending import. ' +
+              'Nothing was created - choose the file again to preview it afresh.',
+          );
+          return;
+
+        case 'unavailable':
+          setAlert('Cancelling failed, so this import is still pending. Nothing was created - try cancelling again.');
+          return;
+
+        default:
+          return assertNever(result);
+      }
+    } catch (failure) {
+      setAlert(`Cancelling failed: ${describeFailure(failure)} Nothing was created - try cancelling again.`);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  // Before the first eligibility answer there is nothing to offer and nothing to report, and this
+  // workflow is not what a Participant came to the page for.
+  if (eligible === null && alert === null && completedEntryCount === null) {
     return null;
   }
 
   return (
-    <section aria-label="Initial import">
-      <h2>Initial import</h2>
+    <section aria-labelledby={HEADING_ID}>
+      <h2 id={HEADING_ID}>Initial Import</h2>
 
-      {completed !== null && <p>Imported {completed} stock entries.</p>}
+      {alert !== null && <p role="alert">{alert}</p>}
 
-      {!eligible && (
+      {completedEntryCount !== null && (
+        <p role="status">Imported {entryCountLabel(completedEntryCount)}, exactly as previewed.</p>
+      )}
+
+      {eligible === false && completedEntryCount === null && (
         <p>
-          Initial import is available only while an inventory has no stock entries. Use the conversation to add
-          stock instead.
+          Initial Import is offered only while an Inventory has no Stock Entries and you may change it. Add Stock
+          through the conversation instead.
         </p>
       )}
 
-      {eligible && (
+      {/*
+        An import that has already run here is final for this workspace: a file is offered only while
+        the server says this Inventory is empty and nothing has been imported into it from this page.
+        The second half is what an eligibility read still in flight when the import completed cannot
+        undo, so a completed import can never be followed by an offer to import again.
+      */}
+      {eligible === true && completedEntryCount === null && (
         <>
           <p>
-            Upload a UTF-8 CSV with exactly the columns {COLUMNS.join(', ')}. Blank Unit means each, blank Location
-            means unlocated. Up to 2 MiB and 5,000 rows.
+            Choose a UTF-8 CSV file with exactly the columns {COLUMNS.join(', ')}, in that order. A blank Unit
+            means <code>each</code>, a blank Location means unlocated, and a blank Note means no Note. Up to 2 MiB,
+            5,000 rows, and 5,000 Stock Entries. Every Unit and Location it names must already exist here.
           </p>
-          <input type="file" accept=".csv,text/csv" onChange={handleFile} disabled={busy} />
+          <label htmlFor={FILE_INPUT_ID}>CSV file to preview</label>
+          <input
+            id={FILE_INPUT_ID}
+            type="file"
+            accept=".csv,text/csv"
+            onChange={(event) => void handleFile(event)}
+            disabled={busy !== null}
+            aria-busy={busy === 'validating'}
+          />
+          {busy === 'validating' && <p role="status">Checking that file…</p>}
         </>
       )}
 
-      {validation?.kind === 'too-large' && <p>That file is larger than 2 MiB.</p>}
-      {validation?.kind === 'not-empty' && <p>This inventory already holds stock, so there is nothing to import.</p>}
-      {validation?.kind === 'unavailable' && <p>Import is not available right now. Try again in a moment.</p>}
-
-      {validation?.kind === 'errors' && (
-        <>
-          <h3>Fix these, then upload the file again</h3>
-          <ErrorRows errors={validation.report.errors} />
-          {validation.report.omittedErrorCount > 0 && (
-            <p>And {validation.report.omittedErrorCount} more problems not shown.</p>
-          )}
-        </>
-      )}
-
-      {validation?.kind === 'preview' && (
-        <>
-          <h3>
-            {validation.preview.entries.length} stock entries from {validation.preview.sourceRowCount} rows
-          </h3>
-          <PreviewRows preview={validation.preview} />
-          <button
-            type="button"
-            onClick={() => handleConfirm(validation.preview.proposalId, validation.preview.token)}
-            disabled={busy}
-          >
-            Import these entries
-          </button>
-          <button
-            type="button"
-            onClick={() => handleCancel(validation.preview.proposalId, validation.preview.token)}
-            disabled={busy}
-          >
-            Cancel
-          </button>
-        </>
+      {validation !== null && (
+        <ValidationOutcome
+          validation={validation}
+          busy={busy}
+          onConfirm={(preview) => void handleConfirm(preview)}
+          onCancel={(preview) => void handleCancel(preview)}
+        />
       )}
     </section>
   );
+}
+
+interface OutcomeProps {
+  validation: ImportValidation;
+  busy: ImportAction | null;
+  onConfirm: (preview: ImportPreview) => void;
+  onCancel: (preview: ImportPreview) => void;
+}
+
+/** One answer per validation outcome. A new outcome without an answer here cannot compile. */
+function ValidationOutcome({ validation, busy, onConfirm, onCancel }: OutcomeProps) {
+  switch (validation.kind) {
+    case 'preview':
+      return (
+        <PreviewOutcome preview={validation.preview} busy={busy} onConfirm={onConfirm} onCancel={onCancel} />
+      );
+
+    case 'errors':
+      return <ErrorOutcome report={validation.report} />;
+
+    case 'not-empty':
+      return <p role="alert">This Inventory already holds Stock, so there is nothing initial to import.</p>;
+
+    case 'too-large':
+      return <p role="alert">That file is larger than 2 MiB, so it was not read at all.</p>;
+
+    case 'unreadable-upload':
+      return (
+        <p role="alert">
+          That upload could not be read. Choose a single, non-empty CSV file and try again.
+        </p>
+      );
+
+    case 'unavailable':
+      return <p role="alert">Initial Import is not available right now. Try again in a moment.</p>;
+
+    default:
+      return assertNever(validation);
+  }
+}
+
+/** The exact Stock Entries the import would create, and the only two ways to leave this screen. */
+function PreviewOutcome({
+  preview,
+  busy,
+  onConfirm,
+  onCancel,
+}: {
+  preview: ImportPreview;
+  busy: ImportAction | null;
+  onConfirm: (preview: ImportPreview) => void;
+  onCancel: (preview: ImportPreview) => void;
+}) {
+  const entryCount = preview.entries.length;
+
+  return (
+    <>
+      <h3>
+        {entryCountLabel(entryCount)} from {preview.sourceRowCount}{' '}
+        {preview.sourceRowCount === 1 ? 'row' : 'rows'}
+      </h3>
+      <p>
+        This is exactly what would be created, with equivalent rows already merged. Nothing exists yet, and nothing
+        will until you confirm.
+      </p>
+
+      {preview.supersededPrevious && (
+        <p>This preview replaced your previous pending Initial Import here. Only this one can still be confirmed.</p>
+      )}
+
+      <ExpiryNotice expiresAt={preview.expiresAt} />
+
+      <table>
+        <caption>The exact Stock Entries this import would create</caption>
+        <thead>
+          <tr>
+            <th scope="col">Name</th>
+            <th scope="col">Quantity</th>
+            <th scope="col">Unit</th>
+            <th scope="col">Location</th>
+            <th scope="col">Note</th>
+            <th scope="col">From lines</th>
+          </tr>
+        </thead>
+        <tbody>
+          {preview.entries.map((entry, index) => (
+            <tr key={`${index}-${entry.name}-${entry.unitCanonicalName}-${entry.locationName ?? ''}`}>
+              <td>{entry.name}</td>
+              <td>{entry.quantity}</td>
+              <td>{entry.unitCanonicalName}</td>
+              <td>{entry.locationName ?? 'Unlocated'}</td>
+              <td>{entry.note ?? '—'}</td>
+              <td>{entry.sourceLineNumbers.join(', ')}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+
+      <button
+        type="button"
+        onClick={() => onConfirm(preview)}
+        disabled={busy !== null}
+        aria-busy={busy === 'confirming'}
+      >
+        {busy === 'confirming' ? 'Importing…' : `Import ${entryCountLabel(entryCount)}`}
+      </button>
+      <button
+        type="button"
+        onClick={() => onCancel(preview)}
+        disabled={busy !== null}
+        aria-busy={busy === 'cancelling'}
+      >
+        {busy === 'cancelling' ? 'Cancelling…' : 'Cancel this import'}
+      </button>
+    </>
+  );
+}
+
+/** Every actionable problem at once, plus the exact number the bounded report left out. */
+function ErrorOutcome({ report }: { report: ImportErrorReport }) {
+  return (
+    <>
+      <h3>That file was not imported</h3>
+
+      {report.errors.length === 0 ? (
+        <p role="alert">That file could not be imported, and no report of why arrived. Nothing was created.</p>
+      ) : (
+        <>
+          <p role="alert">Fix every problem below, then choose the file again. Nothing was created.</p>
+          <table>
+            <caption>Everything wrong with that file</caption>
+            <thead>
+              <tr>
+                <th scope="col">Line</th>
+                <th scope="col">Column</th>
+                <th scope="col">Problem</th>
+              </tr>
+            </thead>
+            <tbody>
+              {report.errors.map((error, index) => (
+                <tr key={`${index}-${error.lineNumber}-${error.code}`}>
+                  <td>{error.lineNumber > 0 ? error.lineNumber : '—'}</td>
+                  <td>{columnLabel(error.columnIndex)}</td>
+                  <td>{describeError(error)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
+      )}
+
+      {report.omittedErrorCount > 0 && (
+        <p>
+          And {report.omittedErrorCount} more{' '}
+          {report.omittedErrorCount === 1 ? 'problem' : 'problems'} this report left out.
+        </p>
+      )}
+    </>
+  );
+}
+
+/** When the preview stops being confirmable, so a long review is not spent on a dead proposal. */
+function ExpiryNotice({ expiresAt }: { expiresAt: string }) {
+  const expiry = new Date(expiresAt);
+
+  if (Number.isNaN(expiry.getTime())) {
+    return null;
+  }
+
+  return (
+    <p>
+      Confirm by <time dateTime={expiresAt}>{expiry.toLocaleTimeString()}</time>. After that this preview expires,
+      the file is discarded, and nothing is created.
+    </p>
+  );
+}
+
+function describeError(error: ImportError): string {
+  const message = isKnownImportErrorCode(error.code)
+    ? ERROR_MESSAGES[error.code]
+    : `That line was refused (${error.code}).`;
+
+  return error.suggestions.length > 0 ? `${message} Did you mean: ${error.suggestions.join(', ')}?` : message;
+}
+
+/**
+ * Names the column an error is about. The index is the server's own zero-based column position, so
+ * one outside the five columns is reported as the number it is rather than rendered as nothing.
+ */
+function columnLabel(columnIndex: number | null): string {
+  if (columnIndex === null || columnIndex < 0) {
+    return '—';
+  }
+
+  return columnIndex < COLUMNS.length ? COLUMNS[columnIndex] : `Column ${columnIndex + 1}`;
+}
+
+function entryCountLabel(count: number): string {
+  return `${count} Stock ${count === 1 ? 'Entry' : 'Entries'}`;
+}
+
+function describeFailure(failure: unknown): string {
+  const message = failure instanceof Error ? failure.message : String(failure);
+
+  return message.endsWith('.') ? message : `${message}.`;
+}
+
+/** Fails to compile the day an outcome is added without an answer for it above. */
+function assertNever(value: never): never {
+  throw new Error(`Unhandled Initial Import outcome: ${JSON.stringify(value)}.`);
 }
 
 export default InitialImport;
@@ -6881,11 +7402,18 @@ In `src/web/src/App.tsx`, import it beside the other workspaces:
 import InitialImport from './InitialImport';
 ```
 
-and mount it inside the existing `bootstrap.activeInventoryId` block, after `ReferenceWorkspace`:
+and mount it inside the existing `bootstrap.activeInventoryId` block, after `ReferenceWorkspace`,
+keyed by the Active Inventory exactly as `InventoryGovernance` already is:
 
 ```tsx
+      {/*
+        Keyed by the Active Inventory so switching Inventories starts the workflow over rather than
+        carrying a preview of one Inventory's file into another: an import proposal is bound to the
+        Inventory that issued it, so none of this component's state means anything anywhere else.
+      */}
       {bootstrap.activeInventoryId && (
         <InitialImport
+          key={bootstrap.activeInventoryId}
           inventoryId={bootstrap.activeInventoryId}
           csrfToken={session.csrfToken}
           refetchToken={stockRefetchToken}
@@ -6897,28 +7425,55 @@ and mount it inside the existing `bootstrap.activeInventoryId` block, after `Ref
 - [ ] **Step 4: Verify**
 
 Run: `npm --prefix src/web run build && npm --prefix src/web run lint`
-Expected: both succeed. The build type-checks this client's own use of the payload shapes - the
-declarations in `importApi.ts` are an assumption about the routes, not a runtime check of what comes
-back, so it is Task 16 that proves the routes actually answer in those shapes.
+Expected: both succeed.
+
+That is the whole of this task's automated evidence, and it is worth saying exactly what it is not:
+there are no runtime component tests here. Nothing renders `InitialImport`, chooses a file, clicks
+Import, or asserts what is still on screen afterwards - `src/web` has no test runner, and adding one
+is not this task's job. What the build does check is this client's own use of the payload shapes:
+every outcome union is closed with `assertNever`, and both prose maps are `Record`s keyed by a closed
+code set, so an outcome or a code without an answer for it fails the build. The shapes themselves are
+this client's assumption about the routes rather than a runtime check of what comes back, so it is
+Task 16 that proves the routes actually answer in them.
+
+The status mapping in `importApi.ts` - which status is an answer and which is a failure - was
+exercised against fabricated `Response`s with a throwaway `node --experimental-strip-types` script,
+deliberately left uncommitted for the same reason the paragraph above is careful: one scratch file is
+not a test suite, and committing it would dress it up as one.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/web/src/importApi.ts src/web/src/InitialImport.tsx src/web/src/App.tsx
+git add src/web/src/importApi.ts src/web/src/InitialImport.tsx src/web/src/App.tsx \
+        docs/superpowers/plans/2026-09-04-initial-import.md
 git commit -m "feat(web): preview and confirm the exact Initial Import for #34"
 ```
 
-### What the implementation changed, and why
+This task settled over two commits: the one above, and `fix(web): preserve import preview on
+transient eligibility failures for #34`, which corrected `fetchEligibility` to answer null only for
+the 404 that means "not offered here" and to raise every other refusal. The blocks above are the
+result of both, so following them reproduces the settled client in one pass.
 
-The shape above is what shipped; these are the places writing it against the routes Task 14 actually
-serves forced a different answer, recorded so the plan and the code do not disagree.
+### Why the client is shaped the way it is
 
+The decisions inside the code above that reading it will not explain, recorded so a later change does
+not quietly undo one.
+
+- **`fetchEligibility` answers null only for a 404, and raises every other refusal.** A 404 is the one
+  authoritative "not offered here": an Inventory that does not exist, one this Participant may not
+  edit, and an ended session are deliberately indistinguishable, and all three mean the same thing to
+  this workflow. A 401, a 429, a 5xx, or a body that will not parse mean nothing of the sort, and
+  answering null for them is what let the component read a briefly unreachable server as a decision
+  and drop a reviewed preview - together with the one-time token that exists nowhere else and cannot
+  be asked for again. This is the same null-or-throw split `fetchStock` and `fetchUnits` already use,
+  so the component's existing error path - which touches no state - is what keeps the preview.
 - **Two different 400s arrive at `validate`.** The bounded error report carries `errors` as a list of
   coded problems, but the answer to a missing or empty file part is a validation problem whose
   `errors` is a *map keyed by part name* - and a rejected CSRF token is a 400 with no `errors` at all.
   Rendering `problem.errors ?? []` into the error table would have thrown on a zero-byte file, which a
   file picker will happily hand over. `validateImport` therefore only reports a list as a report, and
-  answers `'unreadable-upload'` otherwise.
+  answers `'unreadable-upload'` otherwise. `readProblem` tolerates an empty or non-JSON body for the
+  same reason: an intermediary's HTML must not become an exception a caller never asked for.
 - **`confirm` and `reject` return a discriminated result, not `ImportCompleted | null` and `boolean`.**
   The four refusals mean four different things to a Participant: a `404` says the import is settled
   and its preview is stale, a `409` says the proposal was expired or overtaken and names which, a
@@ -6929,17 +7484,22 @@ serves forced a different answer, recorded so the plan and the code do not disag
   and `ImportConflictCode` key `Record`-typed prose maps, so a code the client knows about without a
   sentence to render for it fails the build, and every outcome union is closed with an `assertNever`.
   With no test runner in `src/web`, that compiler check is the only executable statement this task can
-  make about its own completeness.
+  make about its own completeness. An *unrecognized* code still renders, because the server decides
+  what it sends: `isKnownImportErrorCode` narrows, and an unknown one is shown as the code it is.
+- **A column index never indexes the column list unchecked.** `columnIndex` is the server's own
+  zero-based position, and nothing in the contract promises it is one of the five: `COLUMNS[index]`
+  would render `undefined` as an empty cell. `columnLabel` answers with the column name when the index
+  names one, with `Column N` when it does not, and with an em dash for a whole-record problem.
 - **Cancelling clears only after the server settles the proposal.** Until the rejection is answered,
   the preview *is* the pending import; a failed cancellation keeps it and its token so it can simply
   be tried again. A failed confirmation keeps them too, because confirming the same proposal twice
   re-reports what it did rather than importing twice - the retry is safe and still shows the count.
 - **Eligibility is re-read deliberately rather than guessed.** The component re-reads it whenever
-  `refetchToken` changes, and after any refusal that may have ended the workflow; a read that answers
-  after the effect was replaced is ignored, and a preview that is no longer confirmable is dropped as
-  soon as the server says the Inventory holds Stock - whatever put it there. The component is mounted
-  keyed by the Active Inventory, as `InventoryGovernance` already is, so switching Inventories starts
-  the workflow over instead of carrying one Inventory's preview into another.
+  `refetchToken` changes, and after any refusal that may have ended the workflow. An answer that
+  arrives after the effect that asked for it has been replaced is dropped by the `ignored` guard,
+  because it describes an Inventory, or a moment, that nothing on screen is about any more. Only an
+  answer clears a preview that can no longer be confirmed; a failed read leaves the offer, the
+  preview, and the token exactly as they were, and says so.
 - **`credentials: 'include'`, matching every other client in `src/web`,** rather than `same-origin`:
   identical behavior for these same-origin relative URLs, and one convention in the directory.
 - **Every async handler is `try`/`finally`.** A network failure or an unreadable body must not leave

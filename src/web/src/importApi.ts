@@ -136,14 +136,28 @@ const TOKEN_MISMATCH_CODE = 'proposal_token_mismatch';
 const importUrl = (inventoryId: string) => `/api/inventories/${inventoryId}/import`;
 
 /**
- * Reads whether Initial Import is offered for one Inventory. Every refusal answers the same way -
- * null - because they are meant to be indistinguishable: an Inventory that does not exist, one this
- * Participant may not edit, and a session that has ended all return a 404 with no body to read.
+ * Reads whether Initial Import is offered for one Inventory.
+ *
+ * Only a 404 is an answer: an Inventory that does not exist, one this Participant may not edit, and
+ * a session that has ended all report it with no body to read, deliberately indistinguishable, and
+ * all mean the same thing here - not offered. Every other refusal says nothing about eligibility, so
+ * it is raised rather than reported as one: a caller that read a 503 or an expired session as "not
+ * offered" would discard a reviewed preview, and the one-time token that exists nowhere else, over a
+ * server that was briefly unreachable. This is the same null-or-throw split every other client in
+ * this directory uses; see `fetchStock` and `fetchUnits`.
  */
 export async function fetchEligibility(inventoryId: string): Promise<ImportEligibility | null> {
   const response = await fetch(importUrl(inventoryId), { credentials: 'include' });
 
-  return response.ok ? ((await response.json()) as ImportEligibility) : null;
+  if (response.status === 404) {
+    return null;
+  }
+
+  if (!response.ok) {
+    throw new Error(`Reading whether Initial Import is offered failed with status ${response.status}.`);
+  }
+
+  return (await response.json()) as ImportEligibility;
 }
 
 /**

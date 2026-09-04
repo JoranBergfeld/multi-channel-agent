@@ -90,6 +90,13 @@ function InitialImport({ inventoryId, csrfToken, refetchToken, onImported }: Ini
   const [completedEntryCount, setCompletedEntryCount] = useState<number | null>(null);
   const [alert, setAlert] = useState<string | null>(null);
 
+  /**
+   * Whether the server offers this workflow here, as a plain answer. A null eligibility is the one
+   * authoritative refusal - a 404, which an Inventory that does not exist, one this Participant may
+   * not edit, and an ended session all share - so collapsing it to false is naming what it means.
+   * Every other refusal is raised by the client instead of answered, so no caller of this can read a
+   * transient failure as a decision.
+   */
   const readEligibility = useCallback(
     async () => (await fetchEligibility(inventoryId))?.eligible ?? false,
     [inventoryId],
@@ -99,9 +106,11 @@ function InitialImport({ inventoryId, csrfToken, refetchToken, onImported }: Ini
     setEligible(available);
 
     if (!available) {
-      // A preview of an Inventory that is no longer empty can never be confirmed, so it stops being
-      // offered the moment the server says so - whatever it was that added the Stock. Anything else
-      // being shown is a report about a file rather than an offer, and stays readable.
+      // A preview the server will no longer accept can never be confirmed, so it stops being offered
+      // the moment the server says so - whether this Inventory stopped being empty or stopped being
+      // this Participant's to change. Only an answer reaches here: a failed read raises instead, and
+      // is caught below with the preview, its token, and the current offer left exactly as they are.
+      // Anything else being shown is a report about a file rather than an offer, and stays readable.
       setValidation((current) => (current?.kind === 'preview' ? null : current));
     }
   }, []);
@@ -131,8 +140,14 @@ function InitialImport({ inventoryId, csrfToken, refetchToken, onImported }: Ini
           applyEligibility(available);
         }
       } catch (failure) {
+        // A re-check that could not be made is not an answer, so nothing on screen moves: the offer,
+        // any reviewed preview, and the one-time token that only exists in it all stay exactly as
+        // they were, and the next bump of refetchToken asks again.
         if (!ignored) {
-          setAlert(`Checking whether Initial Import is available failed: ${describeFailure(failure)}`);
+          setAlert(
+            `Checking whether Initial Import is available failed: ${describeFailure(failure)} ` +
+              'Nothing was created, and any preview already on screen is untouched.',
+          );
         }
       }
     })();
