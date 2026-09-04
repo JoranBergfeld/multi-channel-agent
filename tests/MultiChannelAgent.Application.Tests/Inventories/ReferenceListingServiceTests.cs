@@ -106,4 +106,46 @@ public class ReferenceListingServiceTests
         Assert.Equal(ReferenceListResultKind.Invalid, result.Kind);
         Assert.Equal("invalid_cursor", result.Code);
     }
+
+    /// <summary>
+    /// A Unit's terms reach this record in whatever order a store happened to read them - and on SQL
+    /// Server a nested collection has no guaranteed order at all. The record imposes one, so the same
+    /// Unit reads identically whichever provider produced it and whichever order it was built in.
+    /// </summary>
+    [Fact]
+    public async Task A_Units_aliases_read_the_same_however_they_reached_the_catalog()
+    {
+        _inventories.GrantMembership(_inventoryId, _participantId, MembershipRole.Viewer, DateTimeOffset.UnixEpoch);
+        _catalog.AddUnit(_inventoryId, "Cardboard Box", ["boxes", "bx"]);
+        _catalog.AddUnit(_inventoryId, "Crate", ["bx crate", "boxes crate"]);
+
+        var result = await ListUnitsAsync();
+
+        Assert.Equal(ReferenceListResultKind.Completed, result.Kind);
+        Assert.Equal(["boxes", "bx"], result.View!.Units[0].Aliases);
+
+        // The second Unit's aliases were added in the opposite order, and still read the same way.
+        Assert.Equal(["boxes crate", "bx crate"], result.View.Units[1].Aliases);
+    }
+
+    /// <summary>The canonical name always leads, whatever it sorts as against the Unit's own aliases.</summary>
+    [Fact]
+    public void A_catalog_record_always_leads_with_the_canonical_term()
+    {
+        var record = new UnitCatalogRecord(
+            new UnitId(Guid.NewGuid()),
+            "Zebra",
+            "zebra",
+            [
+                UnitTerm.Create("bx", isCanonical: false, isReserved: false),
+                UnitTerm.Create("Zebra", isCanonical: true, isReserved: false),
+                UnitTerm.Create("boxes", isCanonical: false, isReserved: false),
+            ],
+            IsReserved: false,
+            Guid.NewGuid());
+
+        Assert.True(record.Terms[0].IsCanonical);
+        Assert.Equal(["Zebra", "boxes", "bx"], record.Terms.Select(term => term.Term));
+        Assert.Equal(["boxes", "bx"], record.Aliases);
+    }
 }

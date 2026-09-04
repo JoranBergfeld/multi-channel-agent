@@ -11,7 +11,25 @@ public sealed record UnitCatalogRecord(
     bool IsReserved,
     Guid ConcurrencyStamp)
 {
-    /// <summary>The Unit's aliases, in the order they were added - its canonical name is not one of them.</summary>
+    /// <summary>
+    /// The Unit's whole term set in the one deterministic display order: its canonical name first,
+    /// then its aliases ordered ordinally by normalized form - the same ordinal order
+    /// <see cref="ReferenceOrderKey"/> puts the Units themselves in.
+    ///
+    /// The ordering is imposed here rather than left to whichever store built the record, because a
+    /// nested collection read alongside a parent row has no guaranteed order on SQL Server at all, and
+    /// terms created together share a creation instant, so no store can honestly claim to return them
+    /// "in the order they were added". Deciding it once, here, is what makes one Unit read identically
+    /// whichever provider answered.
+    /// </summary>
+    public IReadOnlyList<UnitTerm> Terms { get; init; } =
+    [
+        .. Terms
+            .OrderByDescending(term => term.IsCanonical)
+            .ThenBy(term => term.NormalizedTerm, StringComparer.Ordinal),
+    ];
+
+    /// <summary>The Unit's aliases in that same order - its canonical name is not one of them.</summary>
     public IReadOnlyList<string> Aliases => [.. Terms.Where(term => !term.IsCanonical).Select(term => term.Term)];
 }
 

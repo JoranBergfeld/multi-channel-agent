@@ -172,7 +172,10 @@ public sealed class SqlReferenceCatalogStoreTests : SqlIntegrationTestBase
         Skip.IfNot(DockerAvailable, "Docker is not available in this environment; skipping the SQL-backed catalog read.");
 
         var (inventoryId, _) = await SeedInventoryAsync();
-        await SeedUnitAsync(inventoryId, "Cardboard Box", ["boxes", "bx"]);
+
+        // Deliberately stored in the opposite order to the one that must come back, so this asserts
+        // the catalog's own ordering rather than whatever order the rows happened to be written in.
+        await SeedUnitAsync(inventoryId, "Cardboard Box", ["bx", "boxes"]);
         await SeedUnitAsync(inventoryId, "Pallet", [], retired: true);
 
         using var scope = Factory!.Services.CreateScope();
@@ -184,7 +187,8 @@ public sealed class SqlReferenceCatalogStoreTests : SqlIntegrationTestBase
 
         Assert.Equal(["Cardboard Box", "each"], page.Select(row => row.CanonicalName));
         Assert.Equal(["boxes", "bx"], page[0].Aliases);
-        Assert.Equal(["pc", "pcs", "piece", "pieces"], page[1].Aliases.OrderBy(alias => alias, StringComparer.Ordinal));
+        Assert.True(page[0].Terms[0].IsCanonical);
+        Assert.Equal(["pc", "pcs", "piece", "pieces"], page[1].Aliases);
     }
 
     [SkippableFact]
@@ -241,7 +245,7 @@ public sealed class SqlReferenceCatalogStoreTests : SqlIntegrationTestBase
         Skip.IfNot(DockerAvailable, "Docker is not available in this environment; skipping the SQL-backed catalog read.");
 
         var (inventoryId, eachUnitId) = await SeedInventoryAsync();
-        var boxId = await SeedUnitAsync(inventoryId, "Cardboard Box", ["boxes"]);
+        var boxId = await SeedUnitAsync(inventoryId, "Cardboard Box", ["bx", "boxes"]);
 
         using var scope = Factory!.Services.CreateScope();
         var store = new SqlReferenceCatalogStore(Db(scope));
@@ -252,7 +256,7 @@ public sealed class SqlReferenceCatalogStoreTests : SqlIntegrationTestBase
         Assert.NotNull(box);
         Assert.False(box!.IsReserved);
         Assert.NotEqual(Guid.Empty, box.ConcurrencyStamp);
-        Assert.Equal(["Cardboard Box", "boxes"], box.Terms.Select(term => term.Term));
+        Assert.Equal(["Cardboard Box", "boxes", "bx"], box.Terms.Select(term => term.Term));
         Assert.True(box.Terms[0].IsCanonical);
 
         Assert.NotNull(each);

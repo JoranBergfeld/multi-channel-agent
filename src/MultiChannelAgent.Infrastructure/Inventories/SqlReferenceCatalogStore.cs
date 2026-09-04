@@ -46,19 +46,14 @@ public sealed class SqlReferenceCatalogStore(MultiChannelAgentDbContext db) : IR
 
         var unitIds = page.Select(row => row.Id).ToList();
 
-        // Ordered after materializing rather than in SQL: a Unit's terms are ordered canonical-first
-        // and then by when they were added, and SQLite cannot ORDER BY a DateTimeOffset. The set is
-        // bounded by one page of Units, so ordering it here costs nothing and reads the same on both
-        // providers.
-        var terms = (await db.UnitTerms
-                .AsNoTracking()
-                .Where(t => t.InventoryId == query.InventoryId.Value && t.RetiredAt == null && unitIds.Contains(t.UnitId))
-                .Select(t => new { t.UnitId, t.Term, t.NormalizedTerm, t.IsCanonical, t.IsReserved, t.CreatedAt, t.Id })
-                .ToListAsync(cancellationToken))
-            .OrderByDescending(t => t.IsCanonical)
-            .ThenBy(t => t.CreatedAt)
-            .ThenBy(t => t.Id)
-            .ToList();
+        // Read unordered on purpose: a nested collection fetched alongside its parent rows has no
+        // guaranteed order on any provider, so <see cref="UnitCatalogRecord"/> imposes the one
+        // deterministic display order rather than this query pretending to.
+        var terms = await db.UnitTerms
+            .AsNoTracking()
+            .Where(t => t.InventoryId == query.InventoryId.Value && t.RetiredAt == null && unitIds.Contains(t.UnitId))
+            .Select(t => new { t.UnitId, t.Term, t.NormalizedTerm, t.IsCanonical, t.IsReserved })
+            .ToListAsync(cancellationToken);
 
         return page
             .Select(row => new UnitCatalogRecord(
@@ -120,16 +115,10 @@ public sealed class SqlReferenceCatalogStore(MultiChannelAgentDbContext db) : IR
             return null;
         }
 
-        // Ordered after materializing, for the same reason as ListUnitsAsync: one Unit's term set is
-        // small and bounded, and SQLite cannot ORDER BY a DateTimeOffset.
-        var terms = (await db.UnitTerms
-                .AsNoTracking()
-                .Where(t => t.InventoryId == inventoryId.Value && t.UnitId == unitId.Value && t.RetiredAt == null)
-                .Select(t => new { t.Term, t.NormalizedTerm, t.IsCanonical, t.IsReserved, t.CreatedAt, t.Id })
-                .ToListAsync(cancellationToken))
-            .OrderByDescending(t => t.IsCanonical)
-            .ThenBy(t => t.CreatedAt)
-            .ThenBy(t => t.Id)
+        // Unordered, for the same reason as ListUnitsAsync: the record decides the display order.
+        var terms = await db.UnitTerms
+            .AsNoTracking()
+            .Where(t => t.InventoryId == inventoryId.Value && t.UnitId == unitId.Value && t.RetiredAt == null)
             .Select(t => new UnitTerm
             {
                 Term = t.Term,
@@ -137,7 +126,7 @@ public sealed class SqlReferenceCatalogStore(MultiChannelAgentDbContext db) : IR
                 IsCanonical = t.IsCanonical,
                 IsReserved = t.IsReserved,
             })
-            .ToList();
+            .ToListAsync(cancellationToken);
 
         return new UnitCatalogRecord(
             unitId, unit.CanonicalName, unit.NormalizedCanonicalName, terms, unit.IsReserved, unit.ConcurrencyStamp);
