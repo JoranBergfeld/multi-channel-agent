@@ -4,7 +4,7 @@
 
 **Goal:** Complete issue #35 by giving the signed-in web channel a responsive conversation-primary layout with an accessible live Inventory workspace, a finite resumable per-Turn Server-Sent Events stream carrying progress, semantic response parts and one terminal Outcome with event IDs, a separate Participant-level stream that invalidates Inventory projections after a change from any channel, one browser-profile ChannelConversation that resumes across refreshes/restarts/tabs while preserving the shared FIFO queue, disconnect recovery that never resubmits unknown mutation-capable work, an explicit-only Active Inventory switch, and a "New conversation" action that atomically rotates the Foundry conversation generation and clears pending conversational confirmation state without removing any authorized access.
 
-**Architecture:** The per-Turn stream is a **projection with a minimal durable progress log**, read through one deep Application seam (`TurnEventReader`). Three of the four event kinds are projected from state that is already durable and permanent - `accepted` from the `InboxEntries` row, the semantic `part` events and the terminal `outcome` from the `Outcomes` row and its `Deliveries` - so they replay identically after any process restart and carry no second copy of a short-lived confirmation token. Because the `part` events are projected from the recorded `Outcomes` row, they become readable at the instant the Turn completes and therefore arrive **together with** the terminal event; `accepted` and `processing` are the incremental signals a Participant sees while waiting (see Known limits). The one event that durable state cannot express, `processing`, is a real row in a new bounded `TurnProgressEvents` table with a 24-hour delete sweep. Every event ID is a **fixed constant sequence** (`accepted`=1, `processing`=2, `part` n=99+n, `outcome`=1,000,000), which is what makes replay-after-`Last-Event-ID` exact, makes appends idempotent by primary key with no counter read and therefore no race, and makes a swept log indistinguishable from a full one. Inventory invalidation uses a per-Inventory `InventoryVersions.Version` counter bumped **inside the same transaction as every mutation**, from one seam - a `MultiChannelAgentDbContext.SaveChangesAsync` override that keys off the `InventoryAuditEntity` rows every state-changing store already stages - so no endpoint, worker, or future channel can forget to publish, and nothing is ever published before commit. The Participant-level stream is deliberately **snapshot-and-diff rather than cursor-replay**: every connection opens with the complete current version of every authorized Inventory, which makes any reconnect a total resynchronization and removes the identity-gap, retention, and membership-drift failure modes a cursor would introduce. Conversation rotation is one guarded, transactional store operation, and old work can never enter new history because each Turn **captures its Foundry conversation and generation at acceptance** on its own inbox row - and a Turn whose captured generation is no longer the conversation's current one is recognized as **accepted in a superseded conversation**, so any confirmation it would otherwise have left waiting is settled in the very pass that created it and can never become confirmable in the new conversation.
+**Architecture:** The per-Turn stream is a **projection with a minimal durable progress log**, read through one deep Application seam (`TurnEventReader`). Three of the four event kinds are projected from state that is already durable and permanent - `accepted` from the `InboxEntries` row, the semantic `part` events and the terminal `outcome` from the `Outcomes` row and its `Deliveries` - so they replay identically after any process restart and carry no second copy of a short-lived confirmation token. Because the `part` events are projected from the recorded `Outcomes` row, they become readable at the instant the Turn completes and therefore arrive **together with** the terminal event; `accepted` and `processing` are the incremental signals a Participant sees while waiting (see Known limits). The one event that durable state cannot express, `processing`, is a real row in a new bounded `TurnProgressEvents` table with a 24-hour delete sweep. Every event ID is a **fixed constant sequence** (`accepted`=1, `processing`=2, `part` n=99+n, `outcome`=1,000,000), which is what makes replay-after-`Last-Event-ID` exact, makes appends idempotent by primary key with no counter read and therefore no race, and makes a swept log indistinguishable from a full one. Inventory invalidation uses a per-Inventory `InventoryVersions.Version` counter bumped **inside the same transaction as every mutation**, from one seam - a `MultiChannelAgentDbContext.SaveChangesAsync` override that keys off the `InventoryAuditEntity` rows every state-changing store already stages - so no endpoint, worker, or future channel can forget to publish, and nothing is ever published before commit. The Participant-level stream is deliberately **snapshot-and-diff rather than cursor-replay**: every connection opens with the complete current version of every authorized Inventory, which makes any reconnect a total resynchronization and removes the identity-gap, retention, and membership-drift failure modes a cursor would introduce. Conversation rotation is one guarded, transactional store operation, and old work can never enter new history because each Turn **captures its Foundry conversation and generation at acceptance** on its own inbox row - and a Turn whose captured generation is no longer the conversation's current one is recognized as **accepted in a superseded conversation**, so any confirmation it would otherwise have left waiting is settled in the very pass that created it and can never become confirmable in the new conversation. That recognition is deliberately made **twice**: once before the Turn runs, from the trusted context, and once again after tool dispatch by **re-reading the conversation's current generation**, because a reset is free to commit while a Turn is being processed and an answer computed before it cannot know that.
 
 **Tech Stack:** C#/.NET 10, EF Core 10 (SQL Server in production, SQLite for Docker-free relational tests), ASP.NET Core minimal APIs with a custom `IResult` for `text/event-stream`, xUnit 2.9 with plain `Assert`, `Xunit.SkippableFact`, `Microsoft.Extensions.TimeProvider.Testing`, Testcontainers `MsSql`, React 19 + TypeScript + Vite 8 + oxlint, and (new) Vitest 5 + Testing Library + jsdom for web runtime tests.
 
@@ -131,17 +131,27 @@ These were the open questions. Each is decided here, once, with its reason. No t
 
 **Considered:** (a) stamp the captured generation onto `ConfirmationProposal` as its own column and compare it at confirmation time; (b) refuse to process any Turn whose captured generation is stale; (c) detect at processing time that the Turn belongs to a superseded conversation, and settle anything it leaves pending in the same pass.
 
-**Decided:** (c), with the detection made once in `TurnExecutionContextFactory` and acted on once in `ConfirmationProposalLifecycle`.
+**Decided:** (c), with the detection made **twice** - once in `TurnExecutionContextFactory`, before the Turn runs, and once again inside `ConfirmationProposalLifecycle` after it has run, by re-reading the binding rather than trusting the earlier answer.
 
-**Why not (a):** it copies a fact that is already durable. `InboxEntries.FoundryConversationGeneration` (D6) records the generation a Turn was accepted under, and the trusted `TurnExecutionContext` already carries it, so a column on the proposal would be a second copy of a fact the processing path already holds - with a migration, a backfill, a nullable legacy case, and the standing possibility of the two disagreeing. **Why not (b):** a stale *read* ("list stock") must still complete, against the history it was accepted into; #26 and AC 4 both require a reset not to abandon accepted work, and refusing would abandon it. **Why (c) is complete:** per-ChannelConversation FIFO is the reason. `IInboxStore.ClaimPendingAsync` only ever offers a conversation's head, so every Turn accepted before a rotation is processed before every Turn accepted after it. A superseded-generation Turn can therefore never be processed *after* a current-generation Turn in the same conversation, which means settling on supersession can never destroy a legitimate proposal that a newer Turn had just made - there cannot be one yet.
+**Why not (a):** it copies a fact that is already durable. `InboxEntries.FoundryConversationGeneration` (D6) records the generation a Turn was accepted under, and the trusted `TurnExecutionContext` already carries it, so a column on the proposal would be a second copy of a fact the processing path already holds - with a migration, a backfill, a nullable legacy case, and the standing possibility of the two disagreeing. **Why not (b):** a stale *read* ("list stock") must still complete, against the history it was accepted into; #26 and AC 4 both require a reset not to abandon accepted work, and refusing would abandon it. **Why (c) does not destroy legitimate work:** per-ChannelConversation FIFO. `IInboxStore.ClaimPendingAsync` only ever offers a conversation's head, so every Turn accepted before a rotation is processed before every Turn accepted after it. A superseded-generation Turn can therefore never be processed *after* a current-generation Turn in the same conversation, which means settling on supersession can never destroy a proposal a newer Turn had just made - there cannot be one yet.
 
-**How it is enforced: one detection, two settle points.**
+**Why the answer must be recomputed after dispatch, not reused.** A single detection made when the trusted context is assembled is a **snapshot of a value that keeps changing while the Turn runs**. Rotation is not quiesced against processing: nothing stops `SqlConversationRotationStore.RotateAsync` from committing after the context was built and before the tool dispatcher stores its proposal. In exactly that interleaving a flag captured at context-creation time reads `false`, the Turn stores a fresh `ConfirmationProposal`, and a settle gated on that flag does nothing - leaving a confirmable proposal in the conversation the Participant just started, which is the defect AC 7 forbids. So `SettleSupersededConversationAsync` **re-reads the conversation's current binding through `IFoundryConversationBindingStore` at settlement time** and compares its generation with `TurnExecutionContext.FoundryConversationGeneration` - the generation this Turn was accepted under, which is durable on its own inbox row (D6) and therefore cannot go stale. `TurnExecutionContext.AcceptedInSupersededConversation` survives, but only for the pre-dispatch reconcile, where it *is* fresh because it was computed moments earlier in the same pass.
 
-1. **Detection.** `TurnExecutionContextFactory` reads the Turn's captured binding (D6) *and* the conversation's current binding, and sets `TurnExecutionContext.AcceptedInSupersededConversation` when the generations differ. The captured binding still decides which Foundry conversation the Turn continues; the current one is read only to answer this question.
+**How it is enforced: one flag for the pre-dispatch pass, one re-read for the post-dispatch pass.**
+
+1. **Detection, for work that already existed.** `TurnExecutionContextFactory` reads the Turn's captured binding (D6) *and* the conversation's current binding, and sets `TurnExecutionContext.AcceptedInSupersededConversation` when the generations differ. The captured binding still decides which Foundry conversation the Turn continues; the current one is read only to answer this question.
 2. **Before the Turn does anything.** `ConfirmationProposalLifecycle.ReconcileAsync` gains one case: a superseded Turn settles whatever was already pending as `ConversationReset`, before the model is asked anything. This covers a proposal that outlived the rotation for any reason.
-3. **After the Turn has done everything.** `ConfirmationProposalLifecycle.SettleSupersededConversationAsync`, which `TurnProcessingCoordinator` calls **after** tool dispatch and **before** `ITurnResultStore.RecordAsync`, settles anything the Turn itself just stored. This is the case D6 could not see, and it is why the proposal is never pending across two Turns and the Participant is never shown a code that would work.
+3. **After the Turn has done everything.** `ConfirmationProposalLifecycle.SettleSupersededConversationAsync`, which `TurnProcessingCoordinator` calls **after** tool dispatch and **before** `ITurnResultStore.RecordAsync`, re-reads the current binding and settles anything the Turn itself just stored when the generation has moved past the one it was accepted under. This is the case D6 could not see.
 
-**What the Participant sees:** the stale Turn still answers. If it asked for confirmation, its Outcome still says `confirmation_required` and still carries a token - the answer is recorded atomically and is not rewritten by this - but the proposal behind it is already settled, so saying `confirm <code>` is answered as "there is nothing to confirm" rather than by executing it. That is the honest ordering: the Participant asked for a reset after asking for the change, and the reset wins. No migration, no new column, and no change to `IConfirmationProposalStore`, whose existing `InvalidatePendingAsync` is exactly this operation.
+**The orderings, and why together they are exhaustive.** Write *P* for the instant the dispatcher's proposal becomes durable, *S* for the post-dispatch re-read, and *R* for the instant `RotateAsync` commits. *P* always precedes *S*, because *S* runs after dispatch returns. Rotation can land anywhere, which gives three cases - the first two are the ones this task owns, and they are the two the review calls out:
+
+- **R before the Turn is claimed (rotation first).** The factory sees captured *n* against current *n+1*, so `ReconcileAsync` settles anything already pending before the model is asked anything, and *S* re-reads *n+1* against the Turn's *n* and settles whatever the Turn itself stored, if anything. Both passes fire; nothing survives.
+- **R between context creation and S (rotation during processing, model call, or dispatch).** The flag is `false` and `ReconcileAsync` correctly does nothing - at that moment the conversation genuinely was current. Then *P* happens, then *S* re-reads and finds *n+1* against *n*, and settles. **This is the ordering a captured bool misses**, and it is the entire reason for the re-read.
+- **R at or after S (rotation lands between the settle and the Outcome being recorded, or later).** *S* is a no-op, because the generations still match. But the proposal is already durable and `Pending` from *P*, so `RotateAsync`'s own transaction - which settles the one pending `ConfirmationProposal` for that (Participant, ChannelConversation) as `ConversationReset` in the same transaction as the generation bump (D6) - settles it. Task 10 owns this case, not Task 11.
+
+Every rotation is therefore either before *S* (caught by the re-read, because *P* < *S* means the proposal already exists to be settled) or at/after *S* (caught by rotation's own settle, for the same reason). **Stated honestly: this is a union of two mechanisms, not one atomic check.** The re-read and the proposal write are not in one transaction, and this plan deliberately does not put them in one - `ITurnResultStore.RecordAsync`'s atomic contract is untouched, and no store grows a new transactional effect. What makes the union total is only that the proposal is durable before either mechanism can miss it. A double settle is harmless and expected in the narrow overlap: `InvalidatePendingAsync` moves 0 rows the second time, which both call sites already treat as "nothing to settle".
+
+**What the Participant sees:** the stale Turn still answers. If it asked for confirmation, its Outcome still says `confirmation_required` and still carries a token - the answer is recorded atomically and is not rewritten by this - but the proposal behind it is already settled, so saying `confirm <code>` is answered as "there is nothing to confirm" rather than by executing it. That is the honest ordering: the Participant asked for a reset after asking for the change, and the reset wins. A read-only Turn accepted under the old generation is unaffected in every ordering: it completes normally against the history it was accepted into, because nothing here refuses, retries, or rewrites a Turn - the only effect is on a `ConfirmationProposal`, and a read leaves none. No migration, no new column, and no change to `IConfirmationProposalStore`, whose existing `InvalidatePendingAsync` is exactly this operation. The one structural cost is that `ConfirmationProposalLifecycle` gains a second dependency, `IFoundryConversationBindingStore` - already registered, already scoped, and the only seam that can answer "what generation is this conversation on *now*".
 
 **Initial Import is untouched.** `InvalidatePendingAsync` operates on `ConfirmationProposals` keyed by (Participant, ChannelConversation). An `ImportProposal` is a different table keyed by (Participant, Inventory) and is not reachable from here - the same structural reason Task 12 gives for rotation itself.
 
@@ -167,7 +177,7 @@ These were the open questions. Each is decided here, once, with its reason. No t
 | `Turns/TurnAcceptanceService.cs` (modify) | Resolves the Foundry binding at acceptance and passes it to the inbox so the Turn captures it. |
 | `Turns/IInboxStore.cs` (modify) | `AcceptAsync` takes the captured `FoundryConversationBinding`; new `FindCapturedBindingAsync`. |
 | `Turns/TurnExecutionContext.cs` (modify) | `TurnExecutionContextFactory` uses the captured binding (falling back to the current one only for Turns accepted before the migration) and flags `AcceptedInSupersededConversation` when that captured generation is no longer current. |
-| `Inventories/ConfirmationProposalLifecycle.cs` (modify) | Adds the superseded-conversation invalidation, and the post-dispatch `SettleSupersededConversationAsync` that stops a stale Turn leaving a confirmable proposal. |
+| `Inventories/ConfirmationProposalLifecycle.cs` (modify) | Adds the superseded-conversation invalidation, and the post-dispatch `SettleSupersededConversationAsync` that re-reads the conversation's current Foundry generation through `IFoundryConversationBindingStore` - so a reset that commits *while* a Turn is being processed still stops it leaving a confirmable proposal. |
 | `Turns/IConversationRotationStore.cs` (create) | The one atomic rotation: guarded generation increment plus pending-confirmation settle. |
 | `Turns/ConversationRotationService.cs` (create) | The application boundary the endpoint calls; owns `ConversationRotationView`. |
 | `Inventories/IInventoryVersionStore.cs` (create) | The read seam over per-Inventory versions. |
@@ -243,12 +253,12 @@ These were the open questions. Each is decided here, once, with its reason. No t
 | `tests/MultiChannelAgent.IntegrationTests/ConversationRotationHttpTests.cs` (create) | Rotation preserves access and selection, clears the conversational proposal, keeps the import proposal, changes the generation. |
 | `tests/MultiChannelAgent.IntegrationTests/SharedBrowserProfileScenario.cs` (create) | Two clients sharing one cookie jar: one ChannelConversation, shared FIFO, resume after disconnect, no duplicate mutation. |
 | `tests/MultiChannelAgent.IntegrationTests/WebConversationContinuitySqlScenarioTests.cs` (create) | Real SQL Server: migrations, concurrent rotation, rotation racing acceptance. |
-| `tests/MultiChannelAgent.IntegrationTests/ServerSentEventReader.cs` (create) | A stateful, async-disposable decoder that owns one reader over a live `text/event-stream` response, so several sequential reads of the same response cannot lose buffered bytes. |
+| `tests/MultiChannelAgent.IntegrationTests/ServerSentEventReader.cs` (create) | A stateful, async-disposable decoder that owns one reader over a live `text/event-stream` response. One parse/dispatch state machine serves both event reads and heartbeat waits, and completed events are queued, so several sequential reads of the same response cannot lose buffered bytes *or* a whole event to a heartbeat wait. |
 | `tests/MultiChannelAgent.IntegrationTests/SqlConversationRotationStoreTests.cs` (create) | Docker-free proof that rotation is atomic, guarded, and touches nothing it must not. |
 | `tests/MultiChannelAgent.Application.Tests/Turns/TurnProgressEventCleanupCoordinatorTests.cs` (create) | The leased, bounded progress sweep. |
-| `tests/MultiChannelAgent.Application.Tests/TurnProcessingCoordinatorTests.cs` (modify) | The progress publish, and the superseded-conversation settle after dispatch. |
+| `tests/MultiChannelAgent.Application.Tests/TurnProcessingCoordinatorTests.cs` (modify) | The progress publish; the superseded-conversation settle after dispatch; and the deterministic race in which the reset commits *while* the Turn is being processed. |
 | `tests/MultiChannelAgent.Application.Tests/TurnExecutionContextFactoryTests.cs` (modify) | The captured binding, its fallback, and superseded-generation detection. |
-| `tests/MultiChannelAgent.Application.Tests/Inventories/ConfirmationProposalLifecycleTests.cs` (modify) | The superseded-conversation invalidation, both before and after dispatch. |
+| `tests/MultiChannelAgent.Application.Tests/Inventories/ConfirmationProposalLifecycleTests.cs` (modify) | The superseded-conversation invalidation before dispatch, and the settlement-time binding re-read after it - including the reset that lands after the context was assembled. |
 | `tests/MultiChannelAgent.Application.Tests/TurnAcceptanceServiceTests.cs` (modify) | The Foundry binding captured at acceptance. |
 | `tests/MultiChannelAgent.IntegrationTests/ConversationTestClient.cs` (modify) | Shared-cookie second tab, SSE reader, rotation, version-stream helpers. |
 | `src/web/src/turnStream.test.ts` (create) | Event decoding, resume, terminal close, error surface. |
@@ -1971,12 +1981,32 @@ public sealed record ServerSentEvent(long? Id, string Name, string Data);
 /// first call had buffered. One reader, opened once, read repeatedly, disposed at the end, is the only
 /// shape in which a test can read some events, do something to the system, and then read the rest.
 ///
+/// Being stateful is not enough on its own, and the second half of the contract is what makes the
+/// first half true: <b>every</b> byte is consumed through the one <c>PumpAsync</c> state machine, and
+/// a completed event is <b>queued</b> rather than returned directly. Both consequences matter.
+/// The half-parsed record left behind when a read stops mid-event survives into the next call,
+/// because the fields it has already seen are instance state rather than locals. And an event that
+/// arrives while a caller is waiting for a heartbeat is queued for the next <see cref="ReadAsync"/>
+/// instead of being decoded and dropped - which is what a separate line-skipping heartbeat loop would
+/// do, silently, in exactly the tests written to prove nothing is lost.
+///
 /// The caller keeps owning the <see cref="HttpResponseMessage"/>; this owns only what it created.
 /// </summary>
 public sealed class ServerSentEventReader : IAsyncDisposable
 {
     private readonly Stream _stream;
     private readonly StreamReader _reader;
+
+    /// <summary>Events fully decoded but not yet handed to a caller - including any decoded while waiting for a heartbeat.</summary>
+    private readonly Queue<ServerSentEvent> _decoded = new();
+
+    // The record currently being decoded. Instance state, not locals, because one SSE record can
+    // straddle two calls: a read that has satisfied its count mid-record, or a heartbeat wait that
+    // stops between an event's "id:" line and its terminating blank line.
+    private readonly StringBuilder _data = new();
+    private long? _id;
+    private string? _name;
+    private bool _ended;
 
     private ServerSentEventReader(Stream stream)
     {
@@ -1999,60 +2029,24 @@ public sealed class ServerSentEventReader : IAsyncDisposable
     /// <summary>
     /// Reads events until <paramref name="count"/> have arrived or the server ends the stream. Never
     /// blocks forever: <paramref name="cancellationToken"/> is the test's own timeout. A second call
-    /// continues exactly where the previous one stopped.
+    /// continues exactly where the previous one stopped, and anything decoded during a
+    /// <see cref="WaitForHeartbeatsAsync"/> is returned here rather than lost.
     /// </summary>
     public async Task<IReadOnlyList<ServerSentEvent>> ReadAsync(int count, CancellationToken cancellationToken)
     {
         var events = new List<ServerSentEvent>();
 
-        long? id = null;
-        string? name = null;
-        var data = new StringBuilder();
-
         while (events.Count < count)
         {
-            var line = await _reader.ReadLineAsync(cancellationToken);
-            if (line is null)
+            if (_decoded.Count > 0)
+            {
+                events.Add(_decoded.Dequeue());
+                continue;
+            }
+
+            if (!await PumpAsync(cancellationToken))
             {
                 break;
-            }
-
-            if (line.Length == 0)
-            {
-                if (name is not null)
-                {
-                    events.Add(new ServerSentEvent(id, name, data.ToString()));
-                }
-
-                id = null;
-                name = null;
-                data.Clear();
-                continue;
-            }
-
-            if (line.StartsWith(':'))
-            {
-                HeartbeatCount++;
-                continue;
-            }
-
-            var separator = line.IndexOf(':');
-            var field = separator < 0 ? line : line[..separator];
-            var value = separator < 0 ? string.Empty : line[(separator + 1)..].TrimStart(' ');
-
-            switch (field)
-            {
-                case "id":
-                    id = long.Parse(value, CultureInfo.InvariantCulture);
-                    break;
-                case "event":
-                    name = value;
-                    break;
-                case "data":
-                    data.Append(value);
-                    break;
-                default:
-                    break;
             }
         }
 
@@ -2063,23 +2057,80 @@ public sealed class ServerSentEventReader : IAsyncDisposable
     /// Reads until at least <paramref name="count"/> comment lines have been passed over, or the
     /// stream ends. A comment carries no identity and no body, so it is invisible to
     /// <see cref="ReadAsync"/>; this is how a test asserts the keep-alive an ingress depends on is
-    /// actually being written.
+    /// actually being written. It consumes the stream through the same state machine
+    /// <see cref="ReadAsync"/> does, so any event that arrives while it is waiting is decoded and
+    /// queued for the next <see cref="ReadAsync"/> rather than discarded.
     /// </summary>
     public async Task WaitForHeartbeatsAsync(int count, CancellationToken cancellationToken)
     {
         while (HeartbeatCount < count)
         {
-            var line = await _reader.ReadLineAsync(cancellationToken);
-            if (line is null)
+            if (!await PumpAsync(cancellationToken))
             {
                 return;
             }
-
-            if (line.StartsWith(':'))
-            {
-                HeartbeatCount++;
-            }
         }
+    }
+
+    /// <summary>
+    /// Consumes exactly one line and applies it to the decode state, queueing an event when the line
+    /// terminates one. Returns false once the server has ended the stream, and never reads past that.
+    /// This is the single place bytes are interpreted, which is what stops the two public waits from
+    /// disagreeing about what a byte meant.
+    /// </summary>
+    private async Task<bool> PumpAsync(CancellationToken cancellationToken)
+    {
+        if (_ended)
+        {
+            return false;
+        }
+
+        var line = await _reader.ReadLineAsync(cancellationToken);
+        if (line is null)
+        {
+            _ended = true;
+            return false;
+        }
+
+        if (line.Length == 0)
+        {
+            if (_name is not null)
+            {
+                _decoded.Enqueue(new ServerSentEvent(_id, _name, _data.ToString()));
+            }
+
+            _id = null;
+            _name = null;
+            _data.Clear();
+            return true;
+        }
+
+        if (line.StartsWith(':'))
+        {
+            HeartbeatCount++;
+            return true;
+        }
+
+        var separator = line.IndexOf(':');
+        var field = separator < 0 ? line : line[..separator];
+        var value = separator < 0 ? string.Empty : line[(separator + 1)..].TrimStart(' ');
+
+        switch (field)
+        {
+            case "id":
+                _id = long.Parse(value, CultureInfo.InvariantCulture);
+                break;
+            case "event":
+                _name = value;
+                break;
+            case "data":
+                _data.Append(value);
+                break;
+            default:
+                break;
+        }
+
+        return true;
     }
 
     public async ValueTask DisposeAsync()
@@ -2267,8 +2318,10 @@ public sealed class TurnEventStreamHttpTests : IAsyncLifetime
         using var response = await participant.OpenTurnStreamAsync(turnId, cancellationToken: timeout.Token);
         await using var reader = await ServerSentEventReader.OpenAsync(response, timeout.Token);
 
-        Assert.Equal(["accepted"], (await reader.ReadAsync(1, timeout.Token)).Select(e => e.Name));
-
+        // Deliberately NOT reading the `accepted` event first. The stream writes it on its first
+        // poll, 50 ms in, long before the first 200 ms heartbeat - so waiting for heartbeats here
+        // means the wait itself consumes that event's lines. A heartbeat wait that skipped anything
+        // that was not a comment would decode it into nothing and lose it silently.
         await reader.WaitForHeartbeatsAsync(2, timeout.Token);
 
         // Two beats, so this cannot pass on a single accidental byte: the stream is repeating itself
@@ -2276,6 +2329,11 @@ public sealed class TurnEventStreamHttpTests : IAsyncLifetime
         Assert.True(
             reader.HeartbeatCount >= 2,
             $"A silent stream must keep writing keep-alive comments, but only {reader.HeartbeatCount} arrived.");
+
+        // And the event the wait ran over is still there to be read, because the wait used the same
+        // parse/dispatch state machine and queued what it completed. This is the reader's whole
+        // contract - sequential reads of one response lose nothing - asserted rather than assumed.
+        Assert.Equal(["accepted"], (await reader.ReadAsync(1, timeout.Token)).Select(e => e.Name));
     }
 
     [Fact]
@@ -5015,6 +5073,15 @@ git commit -m "feat: rotate a conversation's Foundry generation and pending conf
 
 This is D10. Task 10 settles what is pending **at the moment** a conversation is reset. This settles what a Turn accepted *before* that reset would otherwise leave pending **after** it - the one interleaving that would let a Participant confirm, in their new conversation, work they walked away from. Nothing here is persisted: the generation a Turn was accepted under is already durable on its inbox row from Task 9, and the proposal already names the Turn that proposed it, so this needs no column, no migration, and no backfill.
 
+**Read D10's "The two orderings" before writing Step 7.** There are two distinct races, and only one of them is closed by the flag Steps 1-4 add:
+
+- **Rotation before the Turn is claimed.** The factory computes `AcceptedInSupersededConversation: true`, and the pre-dispatch `ReconcileAsync` settles anything already pending before the model is asked anything.
+- **Rotation while the Turn is being processed** - after the trusted context was assembled, and before or during the dispatch that stores a proposal. Here the flag is `false`, because it was true-at-the-time when it was computed. A settle that short-circuits on it does nothing, and the Turn leaves a confirmable proposal in the conversation the Participant just started.
+
+So `SettleSupersededConversationAsync` **must not** gate on `context.AcceptedInSupersededConversation`. It re-reads the conversation's current binding through `IFoundryConversationBindingStore` at settlement time and compares it with `context.FoundryConversationGeneration` - the generation the Turn was accepted under, which came off the Turn's own inbox row and therefore cannot go stale. `ConfirmationProposalLifecycle` gains that store as a constructor dependency; it is already registered (`services.AddScoped<IFoundryConversationBindingStore, SqlFoundryConversationBindingStore>()`), and `ConfirmationProposalLifecycle` is itself already `AddScoped`, so **no production registration changes**. `ConfirmationProposalLifecycle.cs` already has `using MultiChannelAgent.Application.Turns;`, so no new using either.
+
+The flag stays, and stays used, for the pre-dispatch `ReconcileAsync` only - there it is fresh, computed moments earlier in the same pass.
+
 - [ ] **Step 1: Write the failing factory test**
 
 Append to `tests/MultiChannelAgent.Application.Tests/TurnExecutionContextFactoryTests.cs`, inside the existing class:
@@ -5058,12 +5125,15 @@ Append to `tests/MultiChannelAgent.Application.Tests/TurnExecutionContextFactory
     }
 
     [Fact]
-    public async Task A_turn_accepted_before_bindings_were_captured_is_never_treated_as_superseded()
+    public async Task A_turn_accepted_before_bindings_were_captured_is_not_superseded_when_its_context_is_assembled()
     {
         var (factory, _, _, _, _) = CreateFactory();
 
         // Never accepted through the inbox, so nothing was captured - exactly the residue Task 9's
         // migration backfills. The fallback uses the current binding, which by definition matches it.
+        // This is only a statement about context-creation time: the post-dispatch settle in Step 7
+        // compares generations rather than asking where the context's generation came from, so a
+        // reset landing later still settles what such a Turn stores.
         var context = await factory.CreateAsync(Turn("conversation-1"), Now, CancellationToken.None);
 
         Assert.False(context.AcceptedInSupersededConversation);
@@ -5149,7 +5219,25 @@ Expected: PASS, including the three new tests.
 
 - [ ] **Step 5: Write the failing lifecycle tests**
 
-Append to `tests/MultiChannelAgent.Application.Tests/Inventories/ConfirmationProposalLifecycleTests.cs`, inside the existing class:
+First give the file one construction helper, because `ConfirmationProposalLifecycle` now takes two dependencies and five existing tests construct it with one. Add this next to the existing `Context` helper in `tests/MultiChannelAgent.Application.Tests/Inventories/ConfirmationProposalLifecycleTests.cs`:
+
+```csharp
+    /// <summary>
+    /// The lifecycle under test. The binding store is a real dependency now: the post-dispatch settle
+    /// re-reads the conversation's CURRENT Foundry generation rather than trusting a flag decided
+    /// before the Turn ran. Tests that are about something else get a fresh, empty one, whose
+    /// first-generation answer matches the generation <see cref="Context"/> stamps.
+    /// </summary>
+    private static ConfirmationProposalLifecycle Lifecycle(
+        IConfirmationProposalStore store, InMemoryFoundryConversationBindingStore? bindings = null) =>
+        new(store, bindings ?? new InMemoryFoundryConversationBindingStore());
+```
+
+and add `using MultiChannelAgent.Application.Tests.TestDoubles;` to the file's usings (the binding double lives there, not under `TestDoubles.Inventories`).
+
+Then replace all five existing `new ConfirmationProposalLifecycle(store)` expressions in the file with `Lifecycle(store)`. They are on the lines that read `var settled = await new ConfirmationProposalLifecycle(store).ReconcileAsync(` (four of them) and `await new ConfirmationProposalLifecycle(store).ReconcileAsync(` (one). Nothing else about those tests changes: `ReconcileAsync` never reads the binding store at all - only the post-dispatch settle does - so a fresh empty one changes none of their behaviour.
+
+Now append these five tests to the same class:
 
 ```csharp
     [Fact]
@@ -5157,7 +5245,7 @@ Append to `tests/MultiChannelAgent.Application.Tests/Inventories/ConfirmationPro
     {
         var (store, proposal) = await PendingAsync();
 
-        var settled = await new ConfirmationProposalLifecycle(store).ReconcileAsync(
+        var settled = await Lifecycle(store).ReconcileAsync(
             Context(SomeInventory, acceptedInSupersededConversation: true), Now, CancellationToken.None);
 
         Assert.Equal(ProposalStatus.ConversationReset, settled);
@@ -5168,7 +5256,8 @@ Append to `tests/MultiChannelAgent.Application.Tests/Inventories/ConfirmationPro
     public async Task A_superseded_turn_settles_whatever_it_left_pending_itself()
     {
         var store = new InMemoryConfirmationProposalStore();
-        var lifecycle = new ConfirmationProposalLifecycle(store);
+        var bindings = await RotatedBindingsAsync();
+        var lifecycle = Lifecycle(store, bindings);
 
         // The order production runs in: the Turn is reconciled (nothing pending yet), then it does its
         // work and stores a proposal, then this settles what it just stored.
@@ -5182,14 +5271,48 @@ Append to `tests/MultiChannelAgent.Application.Tests/Inventories/ConfirmationPro
             Context(SomeInventory, acceptedInSupersededConversation: true), Now, CancellationToken.None);
 
         Assert.Equal(ProposalStatus.ConversationReset, settled);
+        Assert.Equal(ProposalStatus.ConversationReset, await store.FindStatusAsync(proposal.Id, CancellationToken.None));
         Assert.Null(await store.FindPendingAsync(Participant, Conversation, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task A_reset_that_lands_after_the_context_was_assembled_still_settles_what_the_turn_stored()
+    {
+        var store = new InMemoryConfirmationProposalStore();
+        var bindings = new InMemoryFoundryConversationBindingStore();
+        await bindings.GetOrCreateAsync(
+            Participant, new ChannelConversationId(Conversation), Now, CancellationToken.None);
+        var lifecycle = Lifecycle(store, bindings);
+
+        // The trusted context was assembled BEFORE the reset, so it says this Turn is in the current
+        // conversation. That answer was true when it was computed and is the only answer a flag
+        // captured at context-creation time can ever give.
+        var context = Context(SomeInventory, acceptedInSupersededConversation: false);
+
+        // The Turn does its work and stores a proposal.
+        var proposal = Proposal();
+        await store.StoreAsync(proposal, Now, CancellationToken.None);
+
+        // "New conversation" commits while the Turn is still being processed. It settles nothing,
+        // because it ran before the proposal existed - which is exactly why this settle has to look
+        // again instead of believing the context.
+        bindings.Rotate(Participant, new ChannelConversationId(Conversation), Now.AddMinutes(1));
+
+        var settled = await lifecycle.SettleSupersededConversationAsync(
+            context, Now.AddMinutes(2), CancellationToken.None);
+
+        Assert.Equal(ProposalStatus.ConversationReset, settled);
+        Assert.Equal(ProposalStatus.ConversationReset, await store.FindStatusAsync(proposal.Id, CancellationToken.None));
     }
 
     [Fact]
     public async Task A_turn_in_the_current_conversation_leaves_its_own_proposal_pending()
     {
         var store = new InMemoryConfirmationProposalStore();
-        var lifecycle = new ConfirmationProposalLifecycle(store);
+        var bindings = new InMemoryFoundryConversationBindingStore();
+        await bindings.GetOrCreateAsync(
+            Participant, new ChannelConversationId(Conversation), Now, CancellationToken.None);
+        var lifecycle = Lifecycle(store, bindings);
         var proposal = Proposal();
         await store.StoreAsync(proposal, Now, CancellationToken.None);
 
@@ -5198,7 +5321,40 @@ Append to `tests/MultiChannelAgent.Application.Tests/Inventories/ConfirmationPro
 
         Assert.NotNull(await store.FindPendingAsync(Participant, Conversation, CancellationToken.None));
     }
+
+    [Fact]
+    public async Task Settling_a_superseded_conversation_that_has_nothing_pending_reports_nothing()
+    {
+        var store = new InMemoryConfirmationProposalStore();
+        var lifecycle = Lifecycle(store, await RotatedBindingsAsync());
+
+        // A superseded READ Turn - "list stock" - leaves no proposal, so there is nothing to settle
+        // and nothing to report. It still completed normally; this seam never touches its Outcome.
+        Assert.Null(await lifecycle.SettleSupersededConversationAsync(
+            Context(SomeInventory, acceptedInSupersededConversation: true), Now, CancellationToken.None));
+    }
 ```
+
+and add the one shared setup helper those tests use, next to `PendingAsync`:
+
+```csharp
+    /// <summary>
+    /// A binding store whose conversation has already moved to generation 2, so it is one generation
+    /// past the generation <see cref="Context"/> stamps. This is what "the Participant started a new
+    /// conversation" looks like to the seam that re-reads the binding.
+    /// </summary>
+    private static async Task<InMemoryFoundryConversationBindingStore> RotatedBindingsAsync()
+    {
+        var bindings = new InMemoryFoundryConversationBindingStore();
+        await bindings.GetOrCreateAsync(
+            Participant, new ChannelConversationId(Conversation), Now, CancellationToken.None);
+        bindings.Rotate(Participant, new ChannelConversationId(Conversation), Now.AddMinutes(1));
+
+        return bindings;
+    }
+```
+
+`InMemoryFoundryConversationBindingStore.Rotate` is the helper Task 9 Step 1 added; it is already in place by the time this task runs.
 
 Widen the file's existing `Context` helper with one more optional parameter, keeping every existing call unchanged:
 
@@ -5220,21 +5376,43 @@ Widen the file's existing `Context` helper with one more optional parameter, kee
         acceptedInSupersededConversation);
 ```
 
+The `1` on the fifth line is `FoundryConversationGeneration`, and it is now load-bearing rather than incidental: it is the accepted generation `SettleSupersededConversationAsync` compares the re-read binding against.
+
 - [ ] **Step 6: Run the lifecycle tests to verify they fail**
 
 Run: `dotnet test tests/MultiChannelAgent.Application.Tests --filter FullyQualifiedName~ConfirmationProposalLifecycleTests`
-Expected: FAIL to compile with `CS1061: 'ConfirmationProposalLifecycle' does not contain a definition for 'SettleSupersededConversationAsync'`.
+Expected: FAIL to compile with `CS1729: 'ConfirmationProposalLifecycle' does not contain a constructor that takes 2 arguments` and `CS1061: 'ConfirmationProposalLifecycle' does not contain a definition for 'SettleSupersededConversationAsync'`.
 
 - [ ] **Step 7: Teach the lifecycle about superseded conversations**
 
-In `src/MultiChannelAgent.Application/Inventories/ConfirmationProposalLifecycle.cs`, add the new case as the **first** arm of the existing `switch`, so it is evaluated before the interruption and access checks:
+In `src/MultiChannelAgent.Application/Inventories/ConfirmationProposalLifecycle.cs`, take the binding store as a second dependency:
+
+```csharp
+public sealed class ConfirmationProposalLifecycle(
+    IConfirmationProposalStore proposalStore, IFoundryConversationBindingStore bindingStore)
+```
+
+and extend the class summary with:
+
+```
+/// It runs a second time after tool dispatch, through
+/// <see cref="SettleSupersededConversationAsync"/>, which is the only moment a proposal the Turn
+/// itself just stored exists to be settled. That pass re-reads the conversation's current Foundry
+/// generation instead of reusing the answer the trusted context was built with, because a reset can
+/// commit while a Turn is being processed and the context cannot know about one that had not happened
+/// when it was assembled.
+```
+
+Add the new case as the **first** arm of the existing `switch` in `ReconcileAsync`, so it is evaluated before the interruption and access checks:
 
 ```csharp
         var status = context switch
         {
             // The Participant started a new conversation after this Turn was accepted. Whatever is
             // waiting here belongs to the conversation they ended, so it stops being confirmable -
-            // exactly as if it had still been pending when the reset itself ran.
+            // exactly as if it had still been pending when the reset itself ran. The flag is trusted
+            // HERE and only here: this runs immediately after the context was assembled, so it is as
+            // fresh as a read can be.
             { AcceptedInSupersededConversation: true } => ProposalStatus.ConversationReset,
 
             // A cut-off utterance is not a statement of intent, and a conversation that has just been
@@ -5252,16 +5430,36 @@ In `src/MultiChannelAgent.Application/Inventories/ConfirmationProposalLifecycle.
     /// <see cref="ReconcileAsync"/> runs before the Turn does anything and therefore cannot see what
     /// the Turn itself will store. This runs after, which is the only moment at which that proposal
     /// exists and the only moment at which it can be stopped from becoming confirmable in the
-    /// conversation the Participant just started. Settling here is safe precisely because
-    /// per-ChannelConversation FIFO drains every Turn accepted before a reset before any Turn accepted
-    /// after it: there cannot yet be a legitimate newer proposal for this to destroy.
+    /// conversation the Participant just started.
+    ///
+    /// It deliberately does <b>not</b> read
+    /// <see cref="TurnExecutionContext.AcceptedInSupersededConversation"/>. That flag was decided when
+    /// the context was assembled, and a reset is free to commit after that and before this - while the
+    /// model is being asked, or while the tool that stores the proposal is running. In that ordering
+    /// the flag says "current", and a settle gated on it would leave exactly the confirmable proposal
+    /// this exists to prevent. So the conversation's binding is re-read here, now, and compared with
+    /// <see cref="TurnExecutionContext.FoundryConversationGeneration"/> - the generation this Turn was
+    /// accepted under, which came off the Turn's own durable inbox row and cannot go stale.
+    ///
+    /// Settling is safe precisely because per-ChannelConversation FIFO drains every Turn accepted
+    /// before a reset before any Turn accepted after it: there cannot yet be a legitimate newer
+    /// proposal for this to destroy. The remaining ordering - a reset that commits after this read -
+    /// is settled by the rotation's own transaction, which invalidates whatever is pending at the
+    /// instant it runs, and by then this Turn's proposal is durable and pending.
     /// </summary>
     public async Task<ProposalStatus?> SettleSupersededConversationAsync(
         TurnExecutionContext context, DateTimeOffset now, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(context);
 
-        if (!context.AcceptedInSupersededConversation)
+        // GetOrCreateAsync, not a bespoke read: by this point the binding certainly exists - the
+        // trusted context was built from it - so this is a read, and adding a second read method to
+        // IFoundryConversationBindingStore for a case that cannot arise would be an abstraction with
+        // no caller.
+        var current = await bindingStore.GetOrCreateAsync(
+            context.ParticipantId, context.ChannelConversationId, now, cancellationToken);
+
+        if (current.Generation == context.FoundryConversationGeneration)
         {
             return null;
         }
@@ -5273,6 +5471,8 @@ In `src/MultiChannelAgent.Application/Inventories/ConfirmationProposalLifecycle.
             now,
             cancellationToken);
 
+        // Zero rows is the ordinary case, not a fault: most Turns leave nothing pending, and the
+        // rotation itself may already have settled this one.
         return settled > 0 ? ProposalStatus.ConversationReset : null;
     }
 ```
@@ -5280,13 +5480,109 @@ In `src/MultiChannelAgent.Application/Inventories/ConfirmationProposalLifecycle.
 - [ ] **Step 8: Run the lifecycle tests to verify they pass**
 
 Run: `dotnet test tests/MultiChannelAgent.Application.Tests --filter FullyQualifiedName~ConfirmationProposalLifecycleTests`
-Expected: PASS, including the three new tests.
+Expected: PASS, including the five new tests.
 
-- [ ] **Step 9: Write the failing coordinator test**
+- [ ] **Step 9: Fix the coordinator harness so a mutation-capable Turn can actually reach a proposal**
 
-`TurnProcessingCoordinatorTests.CreateCoordinator` currently builds its tool dispatcher on one `InMemoryConfirmationProposalStore` and its `ConfirmationProposalLifecycle` on a **different** one, so the two have never been able to see each other's rows. That is a latent defect in the harness and it makes this behaviour untestable, so fix it in the same change: add one more optional parameter and use a single store for both.
+Two things in `tests/MultiChannelAgent.Application.Tests/TurnProcessingCoordinatorTests.cs` make the behaviour this task adds untestable, and both are fixed here:
 
-In `tests/MultiChannelAgent.Application.Tests/TurnProcessingCoordinatorTests.cs`, change the helper's signature to:
+1. `CreateCoordinator` builds its tool dispatcher on one `InMemoryConfirmationProposalStore`, its `ConfirmationProposalLifecycle` on a **second**, and its `InventorySelectionService` on a **third**, so none of them has ever been able to see another's rows.
+2. Its Inventory doubles are empty. A Turn saying `forget stock Steel Bolts` therefore never reaches the change-set path at all: `StockToolDispatcher.DispatchAsync` returns `no_active_inventory` on the first line, because `TurnExecutionContext.ActiveInventoryId` is null. Even with a selection it would then be refused for want of an Editor Membership, and then for want of the Stock Entry, and then - if that entry held any quantity - with `forget_requires_zero_quantity`, because Forget can never stand in for Remove. **All four have to be seeded or the test is green for the wrong reason before the implementation exists.**
+
+Add these constants next to the existing `Now` and `SomeParticipant` at the top of the class:
+
+```csharp
+    private static readonly InventoryId SomeInventory = new(Guid.Parse("33333333-3333-3333-3333-333333333333"));
+    private static readonly UnitId EachUnit = new(Guid.Parse("44444444-4444-4444-4444-444444444444"));
+    private static readonly ChannelConversationId SomeConversation = new("conversation-1");
+```
+
+Add the fixture and its two builders as private members of the same class:
+
+```csharp
+    /// <summary>
+    /// The Inventory-side doubles one coordinator is built over. They are grouped because a
+    /// mutation-capable Turn needs all four to agree with each other - the Membership that permits
+    /// the change, the selection that makes an Inventory active, the Unit its Stock is denominated
+    /// in, and the Stock itself - and because a test that only ever says "hello" needs none of them.
+    /// </summary>
+    private sealed record InventoryFixture(
+        InMemoryInventoryStore Inventories,
+        InMemoryActiveInventorySelectionStore Selections,
+        InMemoryStockStore Stock,
+        InMemoryInventoryReferenceStore References)
+    {
+        /// <summary>No Membership, no selection, no Stock - what every test that never reaches a tool wants.</summary>
+        public static InventoryFixture Empty() => new(
+            new InMemoryInventoryStore(_ => "Owner Name"),
+            new InMemoryActiveInventorySelectionStore(),
+            new InMemoryStockStore(),
+            new InMemoryInventoryReferenceStore());
+    }
+
+    /// <summary>
+    /// Everything <c>forget stock Steel Bolts</c> needs before it can get as far as asking for
+    /// confirmation, and nothing else. Each piece is load-bearing, and leaving any of them out makes
+    /// the Turn fail earlier with a different code - which would let a test claiming "no confirmable
+    /// proposal was left" pass without a proposal ever having been possible.
+    /// </summary>
+    private static async Task<InventoryFixture> SeedForgettableStockAsync()
+    {
+        var fixture = InventoryFixture.Empty();
+
+        // Editor, because StockChangeSetService.ProposeAsync authorizes with MembershipRole.Editor.
+        fixture.Inventories.GrantMembership(SomeInventory, SomeParticipant, MembershipRole.Editor, Now);
+
+        // The Active Inventory for this conversation, without which the dispatcher answers
+        // no_active_inventory before it looks at the tool name at all.
+        await fixture.Selections.UpsertAsync(
+            new ActiveInventorySelection(SomeParticipant, SomeConversation.Value, SomeInventory, Now),
+            CancellationToken.None);
+
+        fixture.References.AddUnit(SomeInventory, EachUnit, "each", "piece", "pieces", "pc", "pcs");
+
+        // Quantity ZERO. Forget refuses stock still on hand with forget_requires_zero_quantity and
+        // proposes nothing, so a non-empty entry here would make this test unable to fail.
+        fixture.Stock.CreateRow(
+            SomeInventory, "Steel Bolts", EachUnit, "each", locationId: null, locationName: null, note: null, Quantity.Zero);
+
+        return fixture;
+    }
+```
+
+Add the gate the race test needs, next to the existing `CountingModelBoundary` and `CapturingModelBoundary`:
+
+```csharp
+    /// <summary>
+    /// Blocks inside the exact window the generation/reset race lives in: after the trusted
+    /// <see cref="TurnExecutionContext"/> has been assembled - and therefore after supersession was
+    /// first evaluated - and before the tool dispatch that stores a confirmation proposal. A test
+    /// releases it once it has rotated the conversation, which reproduces "the Participant pressed
+    /// New conversation while this Turn was being worked on" deterministically, with no sleeps and no
+    /// dependence on scheduling.
+    /// </summary>
+    private sealed class GatedModelBoundary(IModelBoundary inner) : IModelBoundary
+    {
+        private readonly TaskCompletionSource _reached = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _released = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        /// <summary>Completes once processing has reached the model call and is waiting to be let through.</summary>
+        public Task Reached => _reached.Task;
+
+        public void Release() => _released.TrySetResult();
+
+        public async Task<ModelProposal> ProposeAsync(
+            InboundTurn turn, ModelInvocationContext context, CancellationToken cancellationToken)
+        {
+            _reached.TrySetResult();
+            await _released.Task.WaitAsync(cancellationToken);
+
+            return await inner.ProposeAsync(turn, context, cancellationToken);
+        }
+    }
+```
+
+Now replace the whole `CreateCoordinator` helper - signature and body - with this. It keeps the same six-element tuple, so **none of the nine existing destructuring call sites changes**:
 
 ```csharp
     private static (TurnProcessingCoordinator Coordinator, InMemoryInboxStore Inbox, InMemoryOutcomeStore Outcomes, InMemoryDeliveryStore Deliveries, InMemoryTurnResultStore ResultStore, InMemoryFoundryConversationBindingStore Bindings)
@@ -5294,18 +5590,61 @@ In `tests/MultiChannelAgent.Application.Tests/TurnProcessingCoordinatorTests.cs`
             TimeProvider timeProvider,
             IModelBoundary? modelBoundary = null,
             InMemoryTurnProgressEventStore? progressEvents = null,
-            InMemoryConfirmationProposalStore? proposals = null)
-```
+            InMemoryConfirmationProposalStore? proposals = null,
+            InventoryFixture? inventory = null)
+    {
+        var inbox = new InMemoryInboxStore();
+        var outcomes = new InMemoryOutcomeStore();
+        var deliveries = new InMemoryDeliveryStore();
+        var resultStore = new InMemoryTurnResultStore(inbox, outcomes, deliveries);
+        var leases = new InMemoryLeaseCoordinator(timeProvider);
+        var progressEventStore = progressEvents ?? new InMemoryTurnProgressEventStore();
 
-replace the line `var proposalStore = new InMemoryConfirmationProposalStore();` with:
-
-```csharp
+        // ONE proposal store for the whole coordinator. The dispatcher that stores a proposal, the
+        // lifecycle that settles one, and the selection service that invalidates one on an explicit
+        // switch all have to be looking at the same rows - otherwise nothing about confirmation state
+        // is observable here, and a test asserting "nothing is pending" passes trivially.
         var proposalStore = proposals ?? new InMemoryConfirmationProposalStore();
+
+        // Empty unless a test asks otherwise: most tests here send "hello" or the scripted failure
+        // marker, both Direct decisions that never reach a tool.
+        var fixture = inventory ?? InventoryFixture.Empty();
+
+        var auditStore = new InMemoryInventoryAuthorizationAuditStore(fixture.Selections);
+        var authorizationService = new InventoryAuthorizationService(fixture.Inventories, auditStore);
+        var selectionService = new InventorySelectionService(authorizationService, fixture.Selections, proposalStore);
+        var bindingStore = new InMemoryFoundryConversationBindingStore();
+        var executionContextFactory = new TurnExecutionContextFactory(inbox, bindingStore, selectionService);
+        var changeSetStore = new InMemoryStockChangeSetStore(fixture.Stock, proposalStore);
+        var toolDispatcher = new StockToolDispatcher(
+            new StockListingService(fixture.Stock, fixture.References, authorizationService),
+            new StockFindingService(fixture.Stock, fixture.References, authorizationService),
+            new StockMutationService(
+                fixture.Stock, new InMemoryStockMutationStore(fixture.Stock), fixture.References, authorizationService),
+            new StockChangeSetService(
+                new StockChangeResolver(fixture.Stock, fixture.References), changeSetStore, proposalStore, authorizationService),
+            new InventoryConfirmationService(
+                proposalStore, changeSetStore, new InMemoryReferenceAdministrationStore(proposalStore), authorizationService));
+
+        var coordinator = new TurnProcessingCoordinator(
+            inbox,
+            resultStore,
+            progressEventStore,
+            leases,
+            modelBoundary ?? new ScriptedModelBoundary(),
+            executionContextFactory,
+            new ConfirmationProposalLifecycle(proposalStore, bindingStore),
+            toolDispatcher,
+            timeProvider,
+            NullLogger<TurnProcessingCoordinator>.Instance);
+
+        return (coordinator, inbox, outcomes, deliveries, resultStore, bindingStore);
+    }
 ```
 
-and change the coordinator's `new ConfirmationProposalLifecycle(new InMemoryConfirmationProposalStore())` argument to `new ConfirmationProposalLifecycle(proposalStore)`.
+That deletes the helper's old comment beginning *"These tests never exercise the tool-dispatch path"*, which stops being true here.
 
-Then append this test to the same class:
+Then append these two tests to the same class:
 
 ```csharp
     [Fact]
@@ -5313,37 +5652,99 @@ Then append this test to the same class:
     {
         var timeProvider = new FakeTimeProvider(Now);
         var proposals = new InMemoryConfirmationProposalStore();
-        var (coordinator, inbox, _, _, _, bindings) = CreateCoordinator(
-            timeProvider, modelBoundary: null, progressEvents: null, proposals: proposals);
+        var (coordinator, inbox, outcomes, _, _, bindings) = CreateCoordinator(
+            timeProvider,
+            modelBoundary: null,
+            progressEvents: null,
+            proposals: proposals,
+            inventory: await SeedForgettableStockAsync());
 
-        var conversation = new ChannelConversationId("conversation-1");
-        var acceptedUnder = await bindings.GetOrCreateAsync(SomeParticipant, conversation, Now, CancellationToken.None);
+        var acceptedUnder = await bindings.GetOrCreateAsync(
+            SomeParticipant, SomeConversation, Now, CancellationToken.None);
 
-        // Accepted under the old generation, and mutation-capable: this is the Turn whose answer would
-        // ask for confirmation.
+        // Accepted under the old generation, and mutation-capable: this is the Turn whose answer asks
+        // for confirmation, and therefore the Turn that stores a proposal.
         var turn = TestTurns.Text(
-            "native-superseded-1", SomeParticipant, conversation.Value, "forget stock Steel Bolts", null, Now, null);
+            "native-superseded-1", SomeParticipant, SomeConversation.Value, "forget stock Steel Bolts", null, Now, null);
         await inbox.AcceptAsync(turn, acceptedUnder, CancellationToken.None);
 
         // The Participant starts a new conversation while that Turn is still queued.
-        bindings.Rotate(SomeParticipant, conversation, Now.AddMinutes(1));
+        bindings.Rotate(SomeParticipant, SomeConversation, Now.AddMinutes(1));
 
-        await coordinator.ProcessPendingAsync(CancellationToken.None);
+        Assert.Equal(1, await coordinator.ProcessPendingAsync(CancellationToken.None));
 
-        // Whatever it decided, nothing is left that a "confirm" in the new conversation could execute.
-        Assert.Null(await proposals.FindPendingAsync(SomeParticipant, conversation.Value, CancellationToken.None));
+        // It really did ask for confirmation - otherwise the assertion below would be vacuous.
+        var outcome = await outcomes.FindAsync(turn.TurnId, CancellationToken.None);
+        Assert.NotNull(outcome);
+        Assert.Equal(OutcomeCategory.ConfirmationRequired, outcome!.Category);
+
+        // And nothing is left that a "confirm" in the new conversation could execute.
+        Assert.Null(await proposals.FindPendingAsync(SomeParticipant, SomeConversation.Value, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task A_reset_that_commits_while_a_turn_is_being_processed_still_leaves_nothing_confirmable()
+    {
+        var timeProvider = new FakeTimeProvider(Now);
+        var proposals = new InMemoryConfirmationProposalStore();
+        var gate = new GatedModelBoundary(new ScriptedModelBoundary());
+        var (coordinator, inbox, outcomes, _, _, bindings) = CreateCoordinator(
+            timeProvider,
+            modelBoundary: gate,
+            progressEvents: null,
+            proposals: proposals,
+            inventory: await SeedForgettableStockAsync());
+
+        var acceptedUnder = await bindings.GetOrCreateAsync(
+            SomeParticipant, SomeConversation, Now, CancellationToken.None);
+        var turn = TestTurns.Text(
+            "native-superseded-2", SomeParticipant, SomeConversation.Value, "forget stock Steel Bolts", null, Now, null);
+        await inbox.AcceptAsync(turn, acceptedUnder, CancellationToken.None);
+
+        var processing = coordinator.ProcessPendingAsync(CancellationToken.None);
+
+        // Processing is now parked between "trusted context assembled" and "tool dispatched". The
+        // context was built BEFORE the rotation below, so every answer it carries - including whether
+        // this Turn's conversation was superseded - says the conversation is current. Rotating here is
+        // therefore the one interleaving a flag captured at context-creation time cannot see.
+        await gate.Reached.WaitAsync(TimeSpan.FromSeconds(30));
+        bindings.Rotate(SomeParticipant, SomeConversation, Now.AddMinutes(1));
+
+        // The rotation settles nothing, faithfully: at this instant nothing is pending, because the
+        // proposal this Turn is about to store does not exist yet. That is exactly the hole.
+        Assert.Null(await proposals.FindPendingAsync(SomeParticipant, SomeConversation.Value, CancellationToken.None));
+
+        gate.Release();
+        Assert.Equal(1, await processing);
+
+        var outcome = await outcomes.FindAsync(turn.TurnId, CancellationToken.None);
+        Assert.NotNull(outcome);
+        Assert.Equal(OutcomeCategory.ConfirmationRequired, outcome!.Category);
+
+        // The proposal it stored after the reset must already be settled: the post-dispatch settle
+        // re-read the binding and found a generation this Turn was never accepted under.
+        Assert.Null(await proposals.FindPendingAsync(SomeParticipant, SomeConversation.Value, CancellationToken.None));
     }
 ```
 
-> The scripted model boundary answers `forget stock <name>` with the change-set tool call that asks for
-> confirmation. If it does not - check `ScriptedModelBoundary` and `StockToolDispatcher` for the exact
-> phrasing the shipped `ConfirmedStockMutationScenario` uses - use that phrasing instead. Do not add a
-> second command vocabulary for the same behaviour.
+No new `using` directives are needed: the file already imports `MultiChannelAgent.Application.Inventories` (the services and `StockToolDispatcher`), `MultiChannelAgent.Application.Tests.TestDoubles` and `...TestDoubles.Inventories` (every double used above), `MultiChannelAgent.Domain.Inventories` (`InventoryId`, `UnitId`, `MembershipRole`, `ActiveInventorySelection`, `Quantity`), and `MultiChannelAgent.Domain.Turns` (`ChannelConversationId`, `OutcomeCategory`).
 
-- [ ] **Step 10: Run the coordinator test to verify it fails**
+- [ ] **Step 10: Run the coordinator tests to verify they fail**
 
 Run: `dotnet test tests/MultiChannelAgent.Application.Tests --filter FullyQualifiedName~TurnProcessingCoordinatorTests`
-Expected: FAIL with `Assert.Null() Failure` - the stale Turn stored a proposal and nothing settled it.
+Expected: FAIL. Both new tests reach their last line and fail there with `Assert.Null() Failure: Value is not null` - the Turn stored a proposal and nothing settled it. Every other test in the file must still pass; if any of them broke, the `CreateCoordinator` replacement was applied wrongly.
+
+**Check *where* they failed before continuing.** Both tests assert `OutcomeCategory.ConfirmationRequired` *before* the `Assert.Null`, precisely so a seeding mistake cannot masquerade as the behaviour under test. If either fails on that line instead, the fixture is wrong and the `Assert.Null` below it would have passed for the wrong reason. The failure message names the category the Turn actually reached:
+
+| Actual category | What is missing |
+| --- | --- |
+| `Invalid` (code `no_active_inventory`) | The `ActiveInventorySelection` upsert, or it names a different ChannelConversation than the Turn does |
+| `Forbidden` | The `GrantMembership` call, or it grants a role below `MembershipRole.Editor` |
+| `NotFound` | The `CreateRow` for `Steel Bolts`, or its name does not normalize to what `forget stock Steel Bolts` asks for |
+| `Conflict` (code `forget_requires_zero_quantity`) | The seeded row has a non-zero quantity |
+| `Completed` (summary starting `Echoed:`) | The content text is not one `ScriptedModelBoundary` recognizes as `forget stock <reference>` |
+
+Fix the fixture until both tests fail on the `Assert.Null` line, and only then implement.
 
 - [ ] **Step 11: Settle it in the coordinator**
 
@@ -5353,19 +5754,29 @@ In `src/MultiChannelAgent.Application/Turns/TurnProcessingCoordinator.cs`, insid
         // A Turn accepted before the Participant started a new conversation may still have stored a
         // proposal just now. It belongs to the conversation they ended, so it is settled here - in the
         // same pass that created it, before the answer is recorded - and can never be confirmed in the
-        // conversation they started. The answer itself is untouched: it is recorded exactly as decided,
-        // and saying "confirm" against it is simply answered as "there is nothing to confirm".
+        // conversation they started. This seam re-reads the conversation's current generation rather
+        // than reusing what the trusted context decided, because the reset may have committed while
+        // this very Turn was being processed. The answer itself is untouched: it is recorded exactly
+        // as decided, and saying "confirm" against it is simply answered as "there is nothing to
+        // confirm".
         await proposalLifecycle.SettleSupersededConversationAsync(executionContext, now, cancellationToken);
 ```
 
 Extend the class summary's last paragraph with:
 
 ```
-/// The same seam runs once more after dispatch, so a Turn accepted in a conversation the Participant
-/// has since reset cannot leave a confirmable proposal behind in the one they started.
+/// The same seam runs once more after dispatch, re-reading the conversation's current Foundry
+/// generation, so a Turn accepted in a conversation the Participant has since reset cannot leave a
+/// confirmable proposal behind in the one they started - including when the reset commits while the
+/// Turn is being processed.
 ```
 
-- [ ] **Step 12: Run the whole Application suite to verify nothing regressed**
+No constructor change: `ConfirmationProposalLifecycle` is already injected, and it is the lifecycle - not the coordinator - that gained the binding-store dependency.
+
+- [ ] **Step 12: Run the coordinator tests, then the whole Application suite**
+
+Run: `dotnet test tests/MultiChannelAgent.Application.Tests --filter FullyQualifiedName~TurnProcessingCoordinatorTests`
+Expected: PASS, including both new tests.
 
 Run: `dotnet test tests/MultiChannelAgent.Application.Tests`
 Expected: PASS. The harness now shares one proposal store, which is what the pre-existing tests always assumed.
@@ -5474,7 +5885,13 @@ public sealed class ConversationRotationHttpTests : IAsyncLifetime
 
         await participant.SubmitAcceptedTurnAsync("native-reset-2", "add stock Steel Bolts quantity 4");
         await ProcessUntilQuietAsync();
-        var proposalTurn = await participant.SubmitAcceptedTurnAsync("native-reset-3", "forget stock Steel Bolts");
+
+        // A batch, because a change set of more than one change always asks for confirmation whatever
+        // its changes are, so this needs no particular prior Stock state. A single
+        // `forget stock Steel Bolts` would instead be refused with forget_requires_zero_quantity -
+        // Forget can never stand in for Remove - and would leave nothing pending to clear.
+        var proposalTurn = await participant.SubmitAcceptedTurnAsync(
+            "native-reset-3", "change stock: add Steel Bolts quantity 1; add Brass Rivets quantity 2");
         await ProcessUntilQuietAsync();
 
         var proposalOutcome = await participant.GetOutcomeAsync(proposalTurn);
@@ -5597,7 +6014,14 @@ public sealed class ConversationRotationHttpTests : IAsyncLifetime
         // Accepted, then reset, then processed. The proposal this Turn asks for is created entirely
         // AFTER the reset committed, so the rotation's own transactional settle never saw it. This is
         // exactly the interleaving D10 exists for, end to end over HTTP.
-        var stale = await participant.SubmitAcceptedTurnAsync("native-reset-8", "forget stock Steel Bolts");
+        //
+        // A BATCH, deliberately: StockChangeSetService confirms whenever a change set carries more
+        // than one change, whatever each change is on its own, so this asks for confirmation without
+        // depending on any particular prior Stock state. (A single `forget stock Steel Bolts` would
+        // not: Forget refuses stock still on hand with forget_requires_zero_quantity and proposes
+        // nothing, so this test would prove nothing.)
+        var stale = await participant.SubmitAcceptedTurnAsync(
+            "native-reset-8", "change stock: add Steel Bolts quantity 1; add Brass Rivets quantity 2");
         Assert.Equal(HttpStatusCode.OK, (await participant.StartNewConversationAsync()).StatusCode);
         await ProcessUntilQuietAsync();
 
@@ -5614,8 +6038,8 @@ public sealed class ConversationRotationHttpTests : IAsyncLifetime
         using var scope = _factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<MultiChannelAgentDbContext>();
 
-        // Nothing was forgotten, and the proposal is settled as what it is: work belonging to a
-        // conversation the Participant ended.
+        // Nothing was changed and nothing was created, and the proposal is settled as what it is:
+        // work belonging to a conversation the Participant ended.
         Assert.Equal(
             nameof(ProposalStatus.ConversationReset),
             (await db.ConfirmationProposals.AsNoTracking().SingleAsync()).Status);
@@ -9145,7 +9569,8 @@ Start the application against a local SQL Server and confirm each criterion by h
 4. Add stock in one tab: the other tab's Stock workspace refreshes without being reloaded.
 5. Click "Use in this conversation" on a second Inventory: the header changes. Read the first Inventory's Stock: the header does not change.
 6. Ask for something that needs confirmation, then click "New conversation": the notice says the pending change was cleared, the Inventory is still active, the Inventories list is unchanged, and the code you were holding no longer works.
-7. Stop the worker, send `forget stock <something>`, click "New conversation", then start the worker again: the queued Turn still answers, but the code in its answer is refused - and the transcript did not reappear.
+7. Stop the worker, send `change stock: add Steel Bolts quantity 1; add Brass Rivets quantity 2` (a batch always asks for confirmation), click "New conversation", then start the worker again: the queued Turn still answers with a code, but that code is refused - and the transcript did not reappear.
+8. Repeat step 7 but click "New conversation" *while the worker is running* and the Turn is mid-flight (start the worker first, then submit and immediately reset): the same thing must happen. This is the ordering only the post-dispatch re-read catches (D10), and it is the one a hand pass is actually good at provoking.
 
 - [ ] **Step 8: Commit**
 
@@ -9168,7 +9593,7 @@ If Step 6 changed nothing, skip this commit rather than creating an empty one.
 | 4 | One browser-profile ChannelConversation resumes across refreshes, restarts, and tabs while preserving the shared FIFO queue | Shipped `WebConversationCookie` + `SqlInboxStore` FIFO, Task 17 (`conversationStorage`), Task 20 (mount-time resume, cross-tab `storage` subscription) | `SharedBrowserProfileScenario` (one ChannelConversation across tabs, one shared FIFO order, a second tab watching the first tab's Turn, identical replay on reconnect), `conversationStorage.test.ts`, `TurnTracer.test.tsx` (resume on mount, adopt another tab's Turn), Task 22 Step 7.3 |
 | 5 | Disconnect recovery retrieves recorded status and Outcome without resubmitting unknown mutation-capable work | Task 6 (the stream is a pure `GET`; disconnect cancels and undoes nothing), Task 17 (idempotency key recorded before the request leaves), Task 20 (resume reads; resubmits only the same native message id, and at most once per mount) | `TurnEventStreamHttpTests` disconnect test, `SharedBrowserProfileScenario` resubmission test (one inbox row, quantity applied exactly once), `TurnTracer.test.tsx` (reconnect issues no fetch at all; the lost-response case reuses the same `nativeMessageId`; a parent re-render during the pre-Turn-id window resubmits nothing) |
 | 6 | "Use in this conversation" explicitly switches Active Inventory and records the switch; browsing never switches implicitly | Shipped `InventorySelectionService` + `POST /api/inventories/{id}/select`, Task 21 (the button is the only caller) | `SharedBrowserProfileScenario` (browsing lists, Stock, and references changes nothing; selection changes and records; a switch in one tab is every tab's switch), `App.test.tsx` (no `/select` call until the button is clicked), Task 22 Step 7.5 |
-| 7 | "New conversation" rotates Foundry history and clears pending clarification/confirmation state without removing authorized access | Task 9 (generation captured at acceptance), Task 10 (`SqlConversationRotationStore`, `ProposalStatus.ConversationReset`), Task 11 (a superseded-conversation Turn leaves nothing confirmable), Task 12 (`POST /api/conversation/new`), Task 21 (the control, its notice, and forgetting the in-flight Turn) | `SqlConversationRotationStoreTests` (new generation, settled proposal, Membership and selection untouched, other conversations untouched, two rotations advancing two generations), `ConversationRotationServiceTests`, `TurnExecutionContextFactoryTests` (superseded detection and its fallback), `ConfirmationProposalLifecycleTests` (settled before dispatch and after it), `TurnProcessingCoordinatorTests` (a stale mutation Turn leaves nothing pending), `ConversationRotationHttpTests` (generation changes, authorizations and Active Inventory survive, the held token stops working, the Initial Import proposal survives, CSRF and authentication required, work accepted before the reset still completes, and a proposal created after the reset out of work from before it can never be confirmed), `App.test.tsx` (the in-flight Turn is forgotten and no old stream reopens), `WebConversationContinuitySqlScenarioTests` (concurrent resets with a real deadlock retry, reset racing acceptance) |
+| 7 | "New conversation" rotates Foundry history and clears pending clarification/confirmation state without removing authorized access | Task 9 (generation captured at acceptance), Task 10 (`SqlConversationRotationStore`, `ProposalStatus.ConversationReset`), Task 11 (a superseded-conversation Turn leaves nothing confirmable, decided by re-reading the binding after dispatch), Task 12 (`POST /api/conversation/new`), Task 21 (the control, its notice, and forgetting the in-flight Turn) | `SqlConversationRotationStoreTests` (new generation, settled proposal, Membership and selection untouched, other conversations untouched, two rotations advancing two generations), `ConversationRotationServiceTests`, `TurnExecutionContextFactoryTests` (superseded detection and its fallback), `ConfirmationProposalLifecycleTests` (settled before dispatch; settled after dispatch by re-reading the current generation; and settled when the reset lands *after* the trusted context was assembled, which is the ordering a captured flag cannot see), `TurnProcessingCoordinatorTests` (a stale mutation Turn leaves nothing pending, and a reset that commits while the Turn is parked at the model boundary still leaves nothing pending), `ConversationRotationHttpTests` (generation changes, authorizations and Active Inventory survive, the held token stops working, the Initial Import proposal survives, CSRF and authentication required, work accepted before the reset still completes, and a proposal created after the reset out of work from before it can never be confirmed), `App.test.tsx` (the in-flight Turn is forgotten and no old stream reopens), `WebConversationContinuitySqlScenarioTests` (concurrent resets with a real deadlock retry, reset racing acceptance) |
 | — | No monetary budget enforcement within this initial scope | Nothing is built | No task adds a cost check, spend ceiling, or budget policy; the Scope section forbids it outright |
 
 ## Parent decisions (#26) this plan upholds
@@ -9190,5 +9615,6 @@ If Step 6 changed nothing, skip this commit rather than creating an empty one.
 - **The Participant-level stream cannot be resumed from a position, only resynchronized.** That is the design (D5), and Task 8 proves it loses nothing. What it does mean is that a client which wants to know *what* changed while it was away cannot ask this stream; it learns only that the version moved and re-reads the projection. Nothing in #35 needs the former.
 - **A `processing` marker can be lost without failing the Turn.** `TurnProcessingCoordinator` appends it outside the atomic terminal write on purpose: a courtesy must never be able to stop a Turn from reaching its answer. The consequence is that a stream may go from `accepted` straight to the answer, which is honest.
 - **A Turn accepted before a reset still answers, and its answer may still say "confirmation required".** By D10 the proposal behind it is settled in the same pass, so the code in that answer will not work - deliberately, because the Participant asked for the reset after asking for the change. The Outcome is recorded exactly as decided rather than rewritten, because `ITurnResultStore.RecordAsync` is the atomic contract this plan does not touch. A Participant who tries the code is told there is nothing to confirm.
-- **`InboxEntries.FoundryConversationId` is nullable forever.** Only Turns accepted before Task 9's migration can be null, and the migration backfills every one that has a binding. The fallback in `TurnExecutionContextFactory` exists for the residue, is covered by its own test, and treats such a Turn as never superseded - which is correct, because it predates every reset. Making the column non-nullable later is a separate, safe migration once no such rows remain.
+- **Nothing confirmable survives a reset, but the guarantee is a union of two mechanisms rather than one atomic check.** D10 spells the orderings out: the post-dispatch re-read catches every rotation that commits before it, and rotation's own transaction catches every rotation that commits after it, because by then the Turn's proposal is already durable and pending. The two overlap rather than leaving a seam, and the overlap costs at most one no-op `InvalidatePendingAsync`. What is *not* claimed is that the proposal write and the supersession check are one transaction - they are not, and making them one would mean giving `ITurnResultStore` or `IConfirmationProposalStore` a new transactional effect this plan deliberately does not add.
+- **`InboxEntries.FoundryConversationId` is nullable forever.** Only Turns accepted before Task 9's migration can be null, and the migration backfills every one that has a binding. The fallback in `TurnExecutionContextFactory` exists for the residue, is covered by its own test, and reports such a Turn as not superseded *at context-creation time* - which is correct, because it predates every reset. It is not, and must not be, an exemption from the post-dispatch check: a reset that commits while such a Turn is being processed still settles what it stored, because that check compares the re-read generation against the generation on the context rather than consulting whether the context was built from a captured binding or a fallback. Making the column non-nullable later is a separate, safe migration once no such rows remain.
 - **`InventoryVersions` has no foreign key to `Inventories`.** Deliberate (D5), and it means a version row could in principle outlive an Inventory row if one were ever deleted - nothing in this system deletes one. The three mechanisms that keep the table consistent (migration backfill, save-time seeding, guarded fallback insertion) are each asserted in Task 7.
