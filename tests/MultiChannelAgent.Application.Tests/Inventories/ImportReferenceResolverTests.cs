@@ -144,47 +144,68 @@ public class ImportReferenceResolverTests
     [Fact]
     public async Task One_distinct_term_is_looked_up_once_however_many_rows_use_it()
     {
-        var rows = Enumerable.Range(0, 50).Select(index => Row(index + 2, unitTerm: "bx")).ToArray();
+        // Case/whitespace variants of the same term, so a refactor that keys the cache by raw text
+        // instead of the normalized form cannot pass by accident.
+        var variants = new[] { "bx", " bx ", "BX", "bx  " };
+        var rows = Enumerable.Range(0, 50).Select(index => Row(index + 2, unitTerm: variants[index % variants.Length])).ToArray();
 
         var result = await ResolveAsync(rows);
 
         Assert.Empty(result.Errors);
         Assert.Equal(50, result.Rows.Count);
         Assert.Equal(1, _references.UnitResolutionCount);
+
+        // Identity resolution being cached is not enough on its own: a refactor could still cache only
+        // the UnitId and make one display-name round trip per row. This proves both are bounded.
+        Assert.Equal(1, _references.UnitCanonicalNameLookupCount);
     }
 
     [Fact]
     public async Task One_distinct_Location_name_is_looked_up_once_however_many_rows_use_it()
     {
-        var rows = Enumerable.Range(0, 50).Select(index => Row(index + 2, locationName: "Shelf A")).ToArray();
+        var variants = new[] { "Shelf A", "  shelf a", "SHELF   A", "shelf a " };
+        var rows = Enumerable.Range(0, 50)
+            .Select(index => Row(index + 2, locationName: variants[index % variants.Length]))
+            .ToArray();
 
         var result = await ResolveAsync(rows);
 
         Assert.Empty(result.Errors);
         Assert.Equal(50, result.Rows.Count);
         Assert.Equal(1, _references.LocationResolutionCount);
+        Assert.Equal(1, _references.LocationNameLookupCount);
     }
 
     [Fact]
     public async Task An_unknown_term_is_looked_up_once_however_many_rows_share_it_because_a_negative_result_is_cached_too()
     {
-        var rows = Enumerable.Range(0, 50).Select(index => Row(index + 2, unitTerm: "crate")).ToArray();
+        var variants = new[] { "crate", " crate ", "CRATE", "crate  " };
+        var rows = Enumerable.Range(0, 50).Select(index => Row(index + 2, unitTerm: variants[index % variants.Length])).ToArray();
 
         var result = await ResolveAsync(rows);
 
         Assert.Equal(50, result.Errors.Count);
         Assert.Equal(1, _references.UnitResolutionCount);
+
+        // The resolver's own suggestion cache must also collapse the same normalized term to one
+        // lookup, not just the reference-identity cache: a file naming one unknown Unit five thousand
+        // times must not fetch suggestions five thousand times.
+        Assert.Equal(1, _catalog.SuggestionCount);
     }
 
     [Fact]
     public async Task An_unknown_Location_name_is_looked_up_once_however_many_rows_share_it_because_a_negative_result_is_cached_too()
     {
-        var rows = Enumerable.Range(0, 50).Select(index => Row(index + 2, locationName: "Bay 9")).ToArray();
+        var variants = new[] { "Bay 9", "  bay 9", "BAY   9", "bay 9 " };
+        var rows = Enumerable.Range(0, 50)
+            .Select(index => Row(index + 2, locationName: variants[index % variants.Length]))
+            .ToArray();
 
         var result = await ResolveAsync(rows);
 
         Assert.Equal(50, result.Errors.Count);
         Assert.Equal(1, _references.LocationResolutionCount);
+        Assert.Equal(1, _catalog.SuggestionCount);
     }
 
     [Fact]
@@ -199,6 +220,7 @@ public class ImportReferenceResolverTests
         Assert.Empty(result.Errors);
         Assert.Equal(4, result.Rows.Count);
         Assert.Equal(1, _references.UnitResolutionCount);
+        Assert.Equal(1, _references.UnitCanonicalNameLookupCount);
     }
 
     [Fact]
@@ -213,6 +235,7 @@ public class ImportReferenceResolverTests
         Assert.Empty(result.Errors);
         Assert.Equal(4, result.Rows.Count);
         Assert.Equal(1, _references.LocationResolutionCount);
+        Assert.Equal(1, _references.LocationNameLookupCount);
     }
 
     [Fact]

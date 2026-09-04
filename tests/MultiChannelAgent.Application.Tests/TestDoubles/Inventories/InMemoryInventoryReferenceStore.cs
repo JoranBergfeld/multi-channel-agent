@@ -25,6 +25,15 @@ public sealed class InMemoryInventoryReferenceStore : IInventoryReferenceStore
     /// <summary>How many times a Location reference was resolved. See <see cref="UnitResolutionCount"/>.</summary>
     public int LocationResolutionCount { get; private set; }
 
+    /// <summary>
+    /// How many times a Unit's canonical name was looked up, so a caller cannot claim identity caching
+    /// while quietly making one display-name round trip per row.
+    /// </summary>
+    public int UnitCanonicalNameLookupCount { get; private set; }
+
+    /// <summary>How many times a Location's display name was looked up. See <see cref="UnitCanonicalNameLookupCount"/>.</summary>
+    public int LocationNameLookupCount { get; private set; }
+
     /// <summary>Withdraws a Unit from resolution exactly as retiring it does in SQL: it becomes as unknown as one that never existed.</summary>
     public void RetireUnit(InventoryId inventoryId, UnitId unitId) => _retiredUnits.Add((inventoryId, unitId));
 
@@ -53,13 +62,21 @@ public sealed class InMemoryInventoryReferenceStore : IInventoryReferenceStore
         _locationDisplayNames[(inventoryId, locationId)] = name;
     }
 
-    public Task<string?> FindUnitCanonicalNameAsync(InventoryId inventoryId, UnitId unitId, CancellationToken cancellationToken) =>
-        Task.FromResult(!_retiredUnits.Contains((inventoryId, unitId))
-            && _unitCanonicalNames.TryGetValue((inventoryId, unitId), out var name) ? name : null);
+    public Task<string?> FindUnitCanonicalNameAsync(InventoryId inventoryId, UnitId unitId, CancellationToken cancellationToken)
+    {
+        UnitCanonicalNameLookupCount++;
 
-    public Task<string?> FindLocationNameAsync(InventoryId inventoryId, LocationId locationId, CancellationToken cancellationToken) =>
-        Task.FromResult(!_retiredLocations.Contains((inventoryId, locationId))
+        return Task.FromResult(!_retiredUnits.Contains((inventoryId, unitId))
+            && _unitCanonicalNames.TryGetValue((inventoryId, unitId), out var name) ? name : null);
+    }
+
+    public Task<string?> FindLocationNameAsync(InventoryId inventoryId, LocationId locationId, CancellationToken cancellationToken)
+    {
+        LocationNameLookupCount++;
+
+        return Task.FromResult(!_retiredLocations.Contains((inventoryId, locationId))
             && _locationDisplayNames.TryGetValue((inventoryId, locationId), out var name) ? name : null);
+    }
 
     public Task<UnitId?> ResolveUnitAsync(InventoryId inventoryId, string reference, CancellationToken cancellationToken)
     {
