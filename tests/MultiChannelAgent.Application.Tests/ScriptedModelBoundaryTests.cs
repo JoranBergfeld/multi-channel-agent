@@ -1,3 +1,4 @@
+using MultiChannelAgent.Application.Inventories;
 using MultiChannelAgent.Application.Turns;
 using MultiChannelAgent.Domain.Inventories;
 using MultiChannelAgent.Domain.Turns;
@@ -235,6 +236,126 @@ public class ScriptedModelBoundaryTests
     {
         var proposal = await new ScriptedModelBoundary().ProposeAsync(
             Turn("add stock"), BoundConversation, CancellationToken.None);
+
+        Assert.Equal(ModelProposalKind.Direct, proposal.Kind);
+        Assert.Equal("echoed", proposal.Direct!.Code);
+    }
+    // ---- Move, Rename, Forget, batches, confirmation, and rejection (issue #32) ----
+
+    private static async Task<(string ToolName, IReadOnlyDictionary<string, string> Args)> ToolCallAsync(string contentText)
+    {
+        var proposal = await new ScriptedModelBoundary().ProposeAsync(Turn(contentText), BoundConversation, CancellationToken.None);
+
+        Assert.Equal(ModelProposalKind.ToolCall, proposal.Kind);
+        return (proposal.ToolCall!.ToolName, proposal.ToolCall.UntrustedArgs);
+    }
+
+    [Fact]
+    public async Task Move_stock_to_a_Location_proposes_a_move_with_that_destination()
+    {
+        var (toolName, args) = await ToolCallAsync("move stock Steel Bolts quantity 3 to Shelf A");
+
+        Assert.Equal("move_stock", toolName);
+        Assert.Equal("Steel Bolts", args["reference"]);
+        Assert.Equal("3", args["quantity"]);
+        Assert.Equal("Shelf A", args["to"]);
+        Assert.False(args.ContainsKey("all"));
+    }
+
+    [Fact]
+    public async Task Move_stock_all_to_unlocated_proposes_a_move_to_the_unlocated_state()
+    {
+        var (toolName, args) = await ToolCallAsync("move stock Steel Bolts all to unlocated");
+
+        Assert.Equal("move_stock", toolName);
+        Assert.Equal("Steel Bolts", args["reference"]);
+        Assert.Equal("true", args["all"]);
+        Assert.Equal("true", args["toUnlocated"]);
+        Assert.False(args.ContainsKey("to"));
+    }
+
+    [Fact]
+    public async Task Move_stock_with_an_amount_proposes_a_partial_move()
+    {
+        var (toolName, args) = await ToolCallAsync("move stock Steel Bolts quantity 2.5 to Shelf B");
+
+        Assert.Equal("move_stock", toolName);
+        Assert.Equal("2.5", args["quantity"]);
+        Assert.Equal("Shelf B", args["to"]);
+    }
+
+    [Fact]
+    public async Task Rename_stock_proposes_the_exact_new_name()
+    {
+        var (toolName, args) = await ToolCallAsync("rename stock Steel Bolts to Brass Rivets");
+
+        Assert.Equal("rename_stock", toolName);
+        Assert.Equal("Steel Bolts", args["reference"]);
+        Assert.Equal("Brass Rivets", args["newName"]);
+        Assert.False(args.ContainsKey("to"));
+    }
+
+    [Fact]
+    public async Task Forget_stock_proposes_a_forget_for_that_reference()
+    {
+        var (toolName, args) = await ToolCallAsync("forget stock Steel Bolts unlocated");
+
+        Assert.Equal("forget_stock", toolName);
+        Assert.Equal("Steel Bolts", args["reference"]);
+        Assert.Equal("true", args["unlocated"]);
+    }
+
+    [Fact]
+    public async Task Change_stock_proposes_one_batch_carrying_every_sub_command_in_order()
+    {
+        var (toolName, args) = await ToolCallAsync("change stock: add Bolts quantity 2; forget Rivets");
+
+        Assert.Equal("apply_stock_changes", toolName);
+        Assert.True(StockChangeSetParser.TryParse(args["changes"], out var requests, out _));
+        Assert.Equal(2, requests.Count);
+        Assert.Equal([1, 2], requests.Select(r => r.Order));
+        Assert.Equal(StockMutationKind.Add, requests[0].Kind);
+        Assert.Equal("Bolts", requests[0].Reference);
+        Assert.Equal("2", requests[0].QuantityText);
+        Assert.Equal(StockMutationKind.Forget, requests[1].Kind);
+        Assert.Equal("Rivets", requests[1].Reference);
+    }
+
+    [Fact]
+    public async Task Confirm_with_a_code_proposes_the_confirmation_tool_carrying_only_that_code()
+    {
+        var token = ConfirmationToken.Issue();
+
+        var (toolName, args) = await ToolCallAsync($"confirm {token}");
+
+        Assert.Equal("confirm_inventory_operation", toolName);
+        Assert.Equal(token, Assert.Single(args).Value);
+        Assert.Equal("token", args.Keys.Single());
+    }
+
+    [Fact]
+    public async Task Reject_proposes_the_rejection_tool()
+    {
+        var (toolName, args) = await ToolCallAsync("reject");
+
+        Assert.Equal("reject_inventory_operation", toolName);
+        Assert.Empty(args);
+    }
+
+    [Fact]
+    public async Task A_reference_containing_the_word_to_is_not_split_at_it()
+    {
+        var (toolName, args) = await ToolCallAsync("forget stock Tomato Paste");
+
+        Assert.Equal("forget_stock", toolName);
+        Assert.Equal("Tomato Paste", args["reference"]);
+    }
+
+    [Fact]
+    public async Task A_change_stock_command_with_an_unrecognized_sub_command_is_not_recognized_at_all()
+    {
+        var proposal = await new ScriptedModelBoundary().ProposeAsync(
+            Turn("change stock: add Bolts quantity 2; destroy Rivets"), BoundConversation, CancellationToken.None);
 
         Assert.Equal(ModelProposalKind.Direct, proposal.Kind);
         Assert.Equal("echoed", proposal.Direct!.Code);
