@@ -51,6 +51,8 @@ public static class ServiceCollectionExtensions
         services.AddScoped<IStockStore, SqlStockStore>();
         services.AddScoped<IStockMutationStore, SqlStockMutationStore>();
         services.AddScoped<IInventoryReferenceStore, SqlInventoryReferenceStore>();
+        services.AddScoped<IConfirmationProposalStore, SqlConfirmationProposalStore>();
+        services.AddScoped<IStockChangeSetStore, SqlStockChangeSetStore>();
 
         // Only ever constructed (and its TokenCredential only ever built/validated) the first time
         // something actually resolves ITenantMemberDirectory - which never happens for
@@ -76,6 +78,9 @@ public static class ServiceCollectionExtensions
         services.AddScoped<StockListingService>();
         services.AddScoped<StockFindingService>();
         services.AddScoped<StockMutationService>();
+        services.AddScoped<StockChangeResolver>();
+        services.AddScoped<StockChangeSetService>();
+        services.AddScoped<StockConfirmationService>();
 
         return services;
     }
