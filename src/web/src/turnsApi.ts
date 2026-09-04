@@ -151,12 +151,98 @@ export interface StockChangesPayload {
   changes: StockChangeView[];
 }
 
+/** One active Unit: its stable identity, its canonical name, and its active aliases in order. */
+export interface UnitView {
+  id: string;
+  name: string;
+  aliases: string[];
+}
+
+/** One active Location. Flat and alias-free; unlocated stock is the absence of a reference and never appears here. */
+export interface LocationView {
+  id: string;
+  name: string;
+}
+
+export interface UnitListPayload {
+  version: number;
+  kind: 'unit_list';
+  units: UnitView[];
+  nextCursor: string | null;
+  hasMore: boolean;
+}
+
+export interface LocationListPayload {
+  version: number;
+  kind: 'location_list';
+  locations: LocationView[];
+  nextCursor: string | null;
+  hasMore: boolean;
+}
+
+/** One Unit or Location administration change, exactly as proposed or exactly as applied. */
+export interface ReferenceChangeView {
+  order: number;
+  operation:
+    | 'create_unit'
+    | 'rename_unit'
+    | 'add_unit_alias'
+    | 'remove_unit_alias'
+    | 'retire_unit'
+    | 'create_location'
+    | 'rename_location'
+    | 'retire_location';
+  reference: 'unit' | 'location';
+  /** The reference's stable identity. It never changes - not when renamed, and not when retired. */
+  referenceId: string;
+  name: string;
+  newName: string | null;
+  alias: string | null;
+  aliases: string[];
+}
+
+/**
+ * An exact set of reference changes awaiting explicit confirmation. `token` is the same short-lived
+ * single-use confirmation code a stock proposal carries: render it, do not log it, and do not
+ * persist it separately.
+ */
+export interface ReferenceProposalPayload {
+  version: number;
+  kind: 'reference_proposal';
+  token: string;
+  expiresAt: string;
+  changes: ReferenceChangeView[];
+}
+
+/** What one applied administration change set did. */
+export interface ReferenceChangesPayload {
+  version: number;
+  kind: 'reference_changes';
+  changes: ReferenceChangeView[];
+}
+
+/**
+ * The bounded, deterministic alternatives an unknown reference offers - active names sharing the
+ * requested prefix, or else what this Inventory actually has. Never a nearest-match guess.
+ */
+export interface ReferenceSuggestionsPayload {
+  version: number;
+  kind: 'reference_suggestions';
+  reference: 'unit' | 'location';
+  suggestions: string[];
+}
+
 export type TurnOutcomePayload =
   | StockListPayload
   | StockFindPayload
   | StockMutationPayload
   | StockProposalPayload
-  | StockChangesPayload;
+  | StockChangesPayload
+  | UnitListPayload
+  | LocationListPayload
+  | ReferenceProposalPayload
+  | ReferenceChangesPayload
+  | ReferenceSuggestionsPayload;
 
 export interface TurnOutcomeView {
   turnId: string;

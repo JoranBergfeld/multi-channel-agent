@@ -8,6 +8,10 @@ import {
   type StockNarrowingHints,
   type StockProposalPayload,
   type StockRowView,
+  type ReferenceChangeView,
+  type ReferenceChangesPayload,
+  type ReferenceProposalPayload,
+  type ReferenceSuggestionsPayload,
   type TurnOutcomeView,
 } from './turnsApi';
 
@@ -207,6 +211,81 @@ interface TurnTracerProps {
  * Participant/ChannelConversation identity is always derived server-side; this component never
  * supplies either.
  */
+function ReferenceChangeRows({ changes }: { changes: ReferenceChangeView[] }) {
+  return (
+    <table>
+      <thead>
+        <tr>
+          <th>Change</th>
+          <th>Reference</th>
+          <th>Name</th>
+          <th>Result</th>
+        </tr>
+      </thead>
+      <tbody>
+        {changes.map((change) => (
+          <tr key={change.order}>
+            <td>{change.operation.replaceAll('_', ' ')}</td>
+            <td>{change.reference}</td>
+            <td>{change.name}</td>
+            <td>
+              {change.newName ?? change.alias ?? (change.aliases.length > 0 ? change.aliases.join(', ') : '—')}
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+function ReferenceProposal({
+  payload,
+  onCommand,
+}: {
+  payload: ReferenceProposalPayload;
+  onCommand: (command: string) => void;
+}) {
+  return (
+    <section>
+      <h3>Confirm this change to Units and Locations</h3>
+      <ReferenceChangeRows changes={payload.changes} />
+      <p>Expires at {new Date(payload.expiresAt).toLocaleTimeString()}</p>
+      <button type="button" onClick={() => onCommand(`confirm ${payload.token}`)}>
+        Confirm
+      </button>
+      <button type="button" onClick={() => onCommand('reject')}>
+        Reject
+      </button>
+    </section>
+  );
+}
+
+function ReferenceChanges({ payload }: { payload: ReferenceChangesPayload }) {
+  return (
+    <section>
+      <h3>Applied</h3>
+      <ReferenceChangeRows changes={payload.changes} />
+    </section>
+  );
+}
+
+function ReferenceSuggestions({ payload }: { payload: ReferenceSuggestionsPayload }) {
+  return (
+    <section>
+      <h3>No such {payload.reference}</h3>
+      {payload.suggestions.length === 0 ? (
+        <p>This Inventory has no {payload.reference}s yet.</p>
+      ) : (
+        <ul>
+          {payload.suggestions.map((suggestion) => (
+            <li key={suggestion}>{suggestion}</li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
 function TurnTracer({ csrfToken, onTerminalOutcome }: TurnTracerProps) {
   const [contentText, setContentText] = useState('list stock');
   const [submitting, setSubmitting] = useState(false);
@@ -359,6 +438,41 @@ function TurnTracer({ csrfToken, onTerminalOutcome }: TurnTracerProps) {
           )}
 
           {outcome.payload?.kind === 'stock_changes' && <StockChanges payload={outcome.payload} />}
+
+          {outcome.payload?.kind === 'unit_list' && (
+            <section>
+              <h3>Units</h3>
+              <ul>
+                {outcome.payload.units.map((unit) => (
+                  <li key={unit.id}>
+                    {unit.name}
+                    {unit.aliases.length > 0 && ` (${unit.aliases.join(', ')})`}
+                  </li>
+                ))}
+              </ul>
+              {outcome.payload.hasMore && <p>More Units are available.</p>}
+            </section>
+          )}
+
+          {outcome.payload?.kind === 'location_list' && (
+            <section>
+              <h3>Locations</h3>
+              <ul>
+                {outcome.payload.locations.map((location) => (
+                  <li key={location.id}>{location.name}</li>
+                ))}
+              </ul>
+              {outcome.payload.hasMore && <p>More Locations are available.</p>}
+            </section>
+          )}
+
+          {outcome.payload?.kind === 'reference_proposal' && (
+            <ReferenceProposal payload={outcome.payload} onCommand={setContentText} />
+          )}
+
+          {outcome.payload?.kind === 'reference_changes' && <ReferenceChanges payload={outcome.payload} />}
+
+          {outcome.payload?.kind === 'reference_suggestions' && <ReferenceSuggestions payload={outcome.payload} />}
 
           {outcome.deliveries.length > 0 && (
             <>
