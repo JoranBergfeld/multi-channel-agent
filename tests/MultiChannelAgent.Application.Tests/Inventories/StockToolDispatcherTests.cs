@@ -13,6 +13,8 @@ public class StockToolDispatcherTests
     private static readonly ParticipantId Stranger = new(Guid.Parse("22222222-2222-2222-2222-222222222222"));
     private static readonly InventoryId SomeInventory = new(Guid.Parse("33333333-3333-3333-3333-333333333333"));
     private static readonly UnitId EachUnit = new(Guid.Parse("44444444-4444-4444-4444-444444444444"));
+    private static readonly LocationId ShelfA = new(Guid.Parse("55555555-5555-5555-5555-555555555555"));
+    private static readonly ParticipantId Editor = new(Guid.Parse("66666666-6666-6666-6666-666666666666"));
     private static readonly ChannelConversationId SomeConversation = new("conversation-1");
     private static readonly DateTimeOffset Now = new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
 
@@ -36,6 +38,21 @@ public class StockToolDispatcherTests
     private static (StockToolDispatcher Dispatcher, InMemoryStockStore StockStore, InMemoryStockMutationStore MutationStore)
         CreateDispatcherWithMutations(ParticipantId participantId, MembershipRole role)
     {
+        var full = CreateFullDispatcher(participantId, role);
+
+        return (full.Dispatcher, full.StockStore, full.MutationStore);
+    }
+
+    private sealed record DispatcherHarness(
+        StockToolDispatcher Dispatcher,
+        InMemoryStockStore StockStore,
+        InMemoryStockMutationStore MutationStore,
+        InMemoryConfirmationProposalStore ProposalStore,
+        InMemoryStockChangeSetStore ChangeSetStore,
+        InMemoryInventoryReferenceStore ReferenceStore);
+
+    private static DispatcherHarness CreateFullDispatcher(ParticipantId participantId, MembershipRole role)
+    {
         var inventoryStore = new InMemoryInventoryStore(_ => "Owner Name");
         inventoryStore.GrantMembership(SomeInventory, participantId, role, Now);
         var auditStore = new InMemoryInventoryAuthorizationAuditStore(new InMemoryActiveInventorySelectionStore());
@@ -46,16 +63,36 @@ public class StockToolDispatcherTests
         var mutationStore = new InMemoryStockMutationStore(stockStore);
         mutationStore.NameUnit(EachUnit, "each");
 
+        referenceStore.AddLocation(SomeInventory, ShelfA, "Shelf A");
+
+        var proposalStore = new InMemoryConfirmationProposalStore();
+        var changeSetStore = new InMemoryStockChangeSetStore(stockStore, proposalStore);
+
         var dispatcher = new StockToolDispatcher(
             new StockListingService(stockStore, referenceStore, authorizationService),
             new StockFindingService(stockStore, referenceStore, authorizationService),
-            new StockMutationService(stockStore, mutationStore, referenceStore, authorizationService));
+            new StockMutationService(stockStore, mutationStore, referenceStore, authorizationService),
+            new StockChangeSetService(
+                new StockChangeResolver(stockStore, referenceStore), changeSetStore, proposalStore, authorizationService),
+            new StockConfirmationService(proposalStore, changeSetStore, authorizationService));
 
-        return (dispatcher, stockStore, mutationStore);
+        return new DispatcherHarness(dispatcher, stockStore, mutationStore, proposalStore, changeSetStore, referenceStore);
     }
 
     private static TurnExecutionContext Context(ParticipantId participantId, InventoryId? activeInventoryId) => new(
         TurnId.NewId(), participantId, SomeConversation, new FoundryConversationId(Guid.NewGuid()), FoundryConversationGeneration: 1, activeInventoryId, TraceId: null);
+
+    /// <summary>A trusted context carrying this Turn's own confirmation evidence, and optionally a fixed Turn identity for replay.</summary>
+    private static TurnExecutionContext ConfirmingContext(
+        ParticipantId participantId, DirectConfirmationEvidence evidence, TurnId? turnId = null) => new(
+        turnId ?? TurnId.NewId(),
+        participantId,
+        SomeConversation,
+        new FoundryConversationId(Guid.NewGuid()),
+        FoundryConversationGeneration: 1,
+        SomeInventory,
+        TraceId: null,
+        evidence);
 
     [Fact]
     public async Task List_stock_tool_call_returns_a_completed_decision_with_a_typed_payload()
@@ -397,5 +434,248 @@ public class StockToolDispatcherTests
         Assert.Contains("\"quantity\":\"15\"", first.Payload);
         Assert.Contains("\"quantity\":\"15\"", retry.Payload);
         Assert.Single(mutationStore.AuditFacts);
+    }
+    // ---- Move, Rename, Forget, batches, confirmation, and rejection (issue #32) ----
+
+    private static StockEntrySummary SeedStock(
+        DispatcherHarness harness, string name, decimal quantity, LocationId? locationId = null) =>
+        harness.StockStore.CreateRow(
+            SomeInventory,
+            name,
+            EachUnit,
+            "each",
+            locationId,
+            locationId == ShelfA ? "Shelf A" : null,
+            note: null,
+            Quantity.Create(quantity));
+
+    [Fact]
+    public async Task Move_stock_transfers_and_reports_the_exact_read_back()
+    {
+        var harness = CreateFullDispatcher(Editor, MembershipRole.Editor);
+        var source = SeedStock(harness, "Bolts", 10m);
+        var proposal = new ToolCallProposal(
+            "move_stock", new Dictionary<string, string> { ["reference"] = "Bolts", ["all"] = "true", ["to"] = "Shelf A" });
+
+        var decision = await harness.Dispatcher.DispatchAsync(proposal, Context(Editor, SomeInventory), Now, CancellationToken.None);
+
+        Assert.Equal(OutcomeCategory.Completed, decision.Category);
+        Assert.Contains("\"kind\":\"stock_changes\"", decision.Payload);
+        Assert.Contains("\"effect\":\"placed\"", decision.Payload);
+        Assert.Contains(source.Id.ToString(), decision.Payload);
+        Assert.Equal(ShelfA, harness.StockStore.Find(SomeInventory, source.Id)!.LocationId);
+    }
+
+    [Fact]
+    public async Task Move_stock_that_would_retire_its_source_answers_confirmation_required_with_an_exact_proposal()
+    {
+        var harness = CreateFullDispatcher(Editor, MembershipRole.Editor);
+        var source = SeedStock(harness, "Bolts", 10m);
+        var destination = SeedStock(harness, "Bolts", 4m, ShelfA);
+        var proposal = new ToolCallProposal(
+            "move_stock",
+            new Dictionary<string, string>
+            {
+                ["reference"] = "Bolts", ["unlocated"] = "true", ["all"] = "true", ["to"] = "Shelf A",
+            });
+
+        var decision = await harness.Dispatcher.DispatchAsync(proposal, Context(Editor, SomeInventory), Now, CancellationToken.None);
+
+        Assert.Equal(OutcomeCategory.ConfirmationRequired, decision.Category);
+        Assert.Equal("confirmation_required", decision.Code);
+        Assert.Contains("\"kind\":\"stock_proposal\"", decision.Payload);
+        Assert.Contains("\"token\":", decision.Payload);
+        Assert.Contains("\"expiresAt\":", decision.Payload);
+        Assert.Contains($"\"survivingStockEntryId\":\"{destination.Id}\"", decision.Payload);
+        Assert.Contains($"\"retiredStockEntryId\":\"{source.Id}\"", decision.Payload);
+        Assert.DoesNotContain(SomeInventory.ToString(), decision.Summary);
+        Assert.Equal("10", harness.StockStore.Find(SomeInventory, source.Id)!.Quantity.ToInvariantText());
+    }
+
+    [Fact]
+    public async Task Rename_stock_preserves_identity_and_reports_the_new_name()
+    {
+        var harness = CreateFullDispatcher(Editor, MembershipRole.Editor);
+        var source = SeedStock(harness, "Bolts", 4m);
+        var proposal = new ToolCallProposal(
+            "rename_stock", new Dictionary<string, string> { ["reference"] = "Bolts", ["newName"] = "Steel Bolts" });
+
+        var decision = await harness.Dispatcher.DispatchAsync(proposal, Context(Editor, SomeInventory), Now, CancellationToken.None);
+
+        Assert.Equal(OutcomeCategory.Completed, decision.Category);
+        Assert.Contains("\"effect\":\"renamed\"", decision.Payload);
+        Assert.Contains("\"newName\":\"Steel Bolts\"", decision.Payload);
+        Assert.Equal("Steel Bolts", harness.StockStore.Find(SomeInventory, source.Id)!.Name);
+    }
+
+    [Fact]
+    public async Task Forget_stock_always_answers_confirmation_required()
+    {
+        var harness = CreateFullDispatcher(Editor, MembershipRole.Editor);
+        var empty = SeedStock(harness, "Bolts", 0m);
+        var proposal = new ToolCallProposal("forget_stock", new Dictionary<string, string> { ["reference"] = "Bolts" });
+
+        var decision = await harness.Dispatcher.DispatchAsync(proposal, Context(Editor, SomeInventory), Now, CancellationToken.None);
+
+        Assert.Equal(OutcomeCategory.ConfirmationRequired, decision.Category);
+        Assert.Contains("\"effect\":\"forgotten\"", decision.Payload);
+        Assert.NotNull(harness.StockStore.Find(SomeInventory, empty.Id));
+        Assert.Empty(harness.ChangeSetStore.AuditFacts);
+    }
+
+    [Fact]
+    public async Task Apply_stock_changes_proposes_the_whole_batch_atomically()
+    {
+        var harness = CreateFullDispatcher(Editor, MembershipRole.Editor);
+        var first = SeedStock(harness, "Bolts", 10m);
+        var second = SeedStock(harness, "Rivets", 6m);
+        var proposal = new ToolCallProposal(
+            "apply_stock_changes",
+            new Dictionary<string, string>
+            {
+                ["changes"] = """[{"kind":"add","reference":"Bolts","quantity":"1"},{"kind":"remove","reference":"Rivets","quantity":"2"}]""",
+            });
+
+        var decision = await harness.Dispatcher.DispatchAsync(proposal, Context(Editor, SomeInventory), Now, CancellationToken.None);
+
+        Assert.Equal(OutcomeCategory.ConfirmationRequired, decision.Category);
+        Assert.Contains("\"kind\":\"stock_proposal\"", decision.Payload);
+        Assert.Equal("10", harness.StockStore.Find(SomeInventory, first.Id)!.Quantity.ToInvariantText());
+        Assert.Equal("6", harness.StockStore.Find(SomeInventory, second.Id)!.Quantity.ToInvariantText());
+        Assert.Empty(harness.ChangeSetStore.AuditFacts);
+    }
+
+    [Fact]
+    public async Task Apply_stock_changes_refuses_a_malformed_changes_argument_without_touching_Stock()
+    {
+        var harness = CreateFullDispatcher(Editor, MembershipRole.Editor);
+        var untouched = SeedStock(harness, "Bolts", 10m);
+        var proposal = new ToolCallProposal(
+            "apply_stock_changes",
+            new Dictionary<string, string> { ["changes"] = """[{"kind":"add","reference":"Bolts","participantId":"me"}]""" });
+
+        var decision = await harness.Dispatcher.DispatchAsync(proposal, Context(Editor, SomeInventory), Now, CancellationToken.None);
+
+        Assert.Equal(OutcomeCategory.Invalid, decision.Category);
+        Assert.Equal("invalid_changes", decision.Code);
+        Assert.Equal("10", harness.StockStore.Find(SomeInventory, untouched.Id)!.Quantity.ToInvariantText());
+        Assert.Null(await harness.ProposalStore.FindPendingAsync(Editor, SomeConversation.Value, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Confirm_inventory_operation_executes_only_when_the_Turn_itself_confirmed()
+    {
+        var harness = CreateFullDispatcher(Editor, MembershipRole.Editor);
+        var token = await ProposeForgetAsync(harness);
+
+        var decision = await harness.Dispatcher.DispatchAsync(
+            new ToolCallProposal("confirm_inventory_operation", new Dictionary<string, string> { ["token"] = token }),
+            ConfirmingContext(Editor, DirectConfirmationEvidence.Confirmed),
+            Now,
+            CancellationToken.None);
+
+        Assert.Equal(OutcomeCategory.Completed, decision.Category);
+        Assert.Contains("\"kind\":\"stock_changes\"", decision.Payload);
+        Assert.Contains("\"effect\":\"forgotten\"", decision.Payload);
+        Assert.Single(harness.ChangeSetStore.AuditFacts);
+    }
+
+    [Fact]
+    public async Task Confirm_inventory_operation_proposed_by_the_model_alone_executes_nothing()
+    {
+        var harness = CreateFullDispatcher(Editor, MembershipRole.Editor);
+        var token = await ProposeForgetAsync(harness);
+        var pending = (await harness.ProposalStore.FindPendingAsync(Editor, SomeConversation.Value, CancellationToken.None))!;
+
+        var decision = await harness.Dispatcher.DispatchAsync(
+            new ToolCallProposal("confirm_inventory_operation", new Dictionary<string, string> { ["token"] = token }),
+            ConfirmingContext(Editor, DirectConfirmationEvidence.None),
+            Now,
+            CancellationToken.None);
+
+        Assert.Equal(OutcomeCategory.Invalid, decision.Category);
+        Assert.Equal("confirmation_evidence_missing", decision.Code);
+        Assert.Empty(harness.ChangeSetStore.AuditFacts);
+        Assert.Equal(ProposalStatus.Pending, await harness.ProposalStore.FindStatusAsync(pending.Id, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Reject_inventory_operation_settles_the_proposal_when_the_Turn_itself_rejected()
+    {
+        var harness = CreateFullDispatcher(Editor, MembershipRole.Editor);
+        var token = await ProposeForgetAsync(harness);
+        var pending = (await harness.ProposalStore.FindPendingAsync(Editor, SomeConversation.Value, CancellationToken.None))!;
+
+        var decision = await harness.Dispatcher.DispatchAsync(
+            new ToolCallProposal("reject_inventory_operation", new Dictionary<string, string> { ["token"] = token }),
+            ConfirmingContext(Editor, DirectConfirmationEvidence.Rejected),
+            Now,
+            CancellationToken.None);
+
+        Assert.Equal(OutcomeCategory.Completed, decision.Category);
+        Assert.Equal("rejected", decision.Code);
+        Assert.Empty(harness.ChangeSetStore.AuditFacts);
+        Assert.Equal(ProposalStatus.Rejected, await harness.ProposalStore.FindStatusAsync(pending.Id, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Every_new_tool_derives_its_operation_identity_from_the_Turn_and_never_from_its_arguments()
+    {
+        var harness = CreateFullDispatcher(Editor, MembershipRole.Editor);
+        var source = SeedStock(harness, "Bolts", 10m);
+        var turnId = TurnId.NewId();
+        var context = ConfirmingContext(Editor, DirectConfirmationEvidence.None, turnId);
+        var proposal = new ToolCallProposal(
+            "move_stock", new Dictionary<string, string> { ["reference"] = "Bolts", ["all"] = "true", ["to"] = "Shelf A" });
+
+        var first = await harness.Dispatcher.DispatchAsync(proposal, context, Now, CancellationToken.None);
+
+        // The same Turn re-driven, with arguments that would now refuse: the ledger answers instead.
+        var replay = await harness.Dispatcher.DispatchAsync(proposal, context, Now, CancellationToken.None);
+
+        Assert.Equal(OutcomeCategory.Completed, first.Category);
+        Assert.Equal(OutcomeCategory.Completed, replay.Category);
+        Assert.Equal(first.Payload, replay.Payload);
+        Assert.Single(harness.ChangeSetStore.AuditFacts);
+        Assert.Equal(ShelfA, harness.StockStore.Find(SomeInventory, source.Id)!.LocationId);
+    }
+
+    [Fact]
+    public async Task A_proposal_payload_never_carries_a_row_version_an_audit_id_or_a_proposal_identity()
+    {
+        var harness = CreateFullDispatcher(Editor, MembershipRole.Editor);
+        SeedStock(harness, "Bolts", 0m);
+
+        var decision = await harness.Dispatcher.DispatchAsync(
+            new ToolCallProposal("forget_stock", new Dictionary<string, string> { ["reference"] = "Bolts" }),
+            Context(Editor, SomeInventory),
+            Now,
+            CancellationToken.None);
+
+        var pending = (await harness.ProposalStore.FindPendingAsync(Editor, SomeConversation.Value, CancellationToken.None))!;
+
+        Assert.DoesNotContain("concurrencyStamp", decision.Payload, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("proposalId", decision.Payload, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("rowVersion", decision.Payload, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("auditId", decision.Payload, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(pending.Id.ToString(), decision.Payload, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>Proposes a Forget of an empty Stock Entry and returns the one-time token the answer carried.</summary>
+    private static async Task<string> ProposeForgetAsync(DispatcherHarness harness)
+    {
+        SeedStock(harness, "Bolts", 0m);
+
+        var decision = await harness.Dispatcher.DispatchAsync(
+            new ToolCallProposal("forget_stock", new Dictionary<string, string> { ["reference"] = "Bolts" }),
+            Context(Editor, SomeInventory),
+            Now,
+            CancellationToken.None);
+
+        Assert.Equal(OutcomeCategory.ConfirmationRequired, decision.Category);
+        harness.ChangeSetStore.AuditFacts.Clear();
+
+        using var payload = System.Text.Json.JsonDocument.Parse(decision.Payload!);
+        return payload.RootElement.GetProperty("token").GetString()!;
     }
 }

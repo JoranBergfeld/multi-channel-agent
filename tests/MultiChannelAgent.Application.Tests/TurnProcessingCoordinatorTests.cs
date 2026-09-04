@@ -60,11 +60,16 @@ public class TurnProcessingCoordinatorTests
         var executionContextFactory = new TurnExecutionContextFactory(bindingStore, selectionService);
         var stockStore = new InMemoryStockStore();
         var referenceStore = new InMemoryInventoryReferenceStore();
+        var proposalStore = new InMemoryConfirmationProposalStore();
+        var changeSetStore = new InMemoryStockChangeSetStore(stockStore, proposalStore);
         var toolDispatcher = new StockToolDispatcher(
             new StockListingService(stockStore, referenceStore, authorizationService),
             new StockFindingService(stockStore, referenceStore, authorizationService),
             new StockMutationService(
-                stockStore, new InMemoryStockMutationStore(stockStore), referenceStore, authorizationService));
+                stockStore, new InMemoryStockMutationStore(stockStore), referenceStore, authorizationService),
+            new StockChangeSetService(
+                new StockChangeResolver(stockStore, referenceStore), changeSetStore, proposalStore, authorizationService),
+            new StockConfirmationService(proposalStore, changeSetStore, authorizationService));
 
         var coordinator = new TurnProcessingCoordinator(
             inbox,
