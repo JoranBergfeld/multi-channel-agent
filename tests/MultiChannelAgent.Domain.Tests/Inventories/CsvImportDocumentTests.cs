@@ -249,6 +249,19 @@ public class CsvImportDocumentTests
         var bytes = Encoding.UTF8.GetBytes(builder.ToString());
         Assert.True(bytes.Length <= ImportContract.MaxUploadBytes);
 
+        // This is a guard against O(rows-in-file) allocation, not a performance benchmark, so the
+        // budget below is derived from the two things reading is actually allowed to scale with:
+        // decoding the whole upload into UTF-16 text (bounded by MaxUploadBytes, i.e. bytes.Length),
+        // and materializing at most MaxSourceRows + 1 records before Read gives up. Both allowances
+        // are deliberately generous - many times the bytes/record a correct implementation needs -
+        // so the assertion stays valid if MaxUploadBytes or MaxSourceRows ever change, while still
+        // failing hard on the pre-fix behavior of materializing every one of the ~2,000,000 blank
+        // records in this file (~306 MiB observed).
+        const int BytesPerDecodedByte = 4; // UTF-16 doubles byte count, plus slack for reader/decoder buffers
+        const int BytesPerMaterializedRecord = 4 * 1024; // CsvImportRecord + its List<string>, rounded well up
+        var budget = (long)bytes.Length * BytesPerDecodedByte
+            + (long)(ImportContract.MaxSourceRows + 1) * BytesPerMaterializedRecord;
+
         var allocatedBefore = GC.GetAllocatedBytesForCurrentThread();
         var result = CsvImportDocument.Read(bytes);
         var allocated = GC.GetAllocatedBytesForCurrentThread() - allocatedBefore;
@@ -256,7 +269,9 @@ public class CsvImportDocumentTests
         Assert.Equal(ImportErrorCode.TooManyRows, Assert.Single(result.Errors).Code);
         Assert.Null(result.Document);
         Assert.True(
-            allocated < 10 * 1024 * 1024,
-            $"expected an allocation bounded by MaxSourceRows, but reading allocated {allocated:N0} bytes");
+            allocated < budget,
+            $"expected allocation bounded by decoding {bytes.Length:N0} bytes and materializing at most " +
+            $"{ImportContract.MaxSourceRows + 1:N0} records (budget {budget:N0} bytes), but reading allocated " +
+            $"{allocated:N0} bytes");
     }
 }
