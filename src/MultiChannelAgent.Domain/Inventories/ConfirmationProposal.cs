@@ -279,26 +279,20 @@ public sealed record ConfirmationProposal
     /// </summary>
     public IReadOnlyList<UnitId> ReferencedUnitIds =>
     [
-        .. Changes
-            .SelectMany(change => new[] { (UnitId?)change.Source.UnitId, change.Destination?.UnitId })
-            .Concat(ExpectedAbsences.Select(absence => (UnitId?)absence.UnitId))
+        .. StockReferenceDependencies.UnitsOf(Changes, ExpectedAbsences)
             .Concat(ReferenceChanges
                 .Where(change => change.Target.Kind == ReferenceKind.Unit)
-                .Select(change => (UnitId?)new UnitId(change.Target.ReferenceId)))
-            .OfType<UnitId>()
+                .Select(change => new UnitId(change.Target.ReferenceId)))
             .Distinct(),
     ];
 
     /// <summary>Every Location this proposal depends on. See <see cref="ReferencedUnitIds"/>.</summary>
     public IReadOnlyList<LocationId> ReferencedLocationIds =>
     [
-        .. Changes
-            .SelectMany(change => new[] { change.Source.LocationId, change.Destination?.LocationId })
-            .Concat(ExpectedAbsences.Select(absence => absence.LocationId))
+        .. StockReferenceDependencies.LocationsOf(Changes, ExpectedAbsences)
             .Concat(ReferenceChanges
                 .Where(change => change.Target.Kind == ReferenceKind.Location)
-                .Select(change => (LocationId?)new LocationId(change.Target.ReferenceId)))
-            .OfType<LocationId>()
+                .Select(change => new LocationId(change.Target.ReferenceId)))
             .Distinct(),
     ];
 
