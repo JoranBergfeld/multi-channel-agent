@@ -17,7 +17,31 @@ namespace MultiChannelAgent.Infrastructure.Inventories;
 /// </summary>
 internal static class ConfirmationProposalMapper
 {
-    public const int SchemaVersion = 1;
+    /// <summary>
+    /// Bumped by #33, which added the reference administration payload. A row this process cannot
+    /// read is refused, not guessed at - a proposal is only ever ten minutes old, so an unreadable
+    /// shape is a deployment mistake rather than a migration case.
+    /// </summary>
+    public const int SchemaVersion = 2;
+
+    private sealed record UnitTermDto(string Term, string NormalizedTerm, bool IsCanonical, bool IsReserved);
+
+    private sealed record ReferenceStateDto(string Kind, Guid ReferenceId, string Name, string NormalizedName, bool Reserved);
+
+    private sealed record ReferenceChangeDto(
+        int Order,
+        string Kind,
+        ReferenceStateDto Target,
+        string? NewName,
+        string? NewNormalizedName,
+        UnitTermDto? Term,
+        IReadOnlyList<UnitTermDto> Terms);
+
+    private sealed record ReferenceVersionDto(string Kind, Guid ReferenceId, Guid ConcurrencyStamp);
+
+    private sealed record TermAbsenceDto(string Kind, string NormalizedTerm);
+
+    private sealed record ReferenceChangesEnvelope(int Version, IReadOnlyList<ReferenceChangeDto> Changes);
 
     private static readonly JsonSerializerOptions Options = new()
     {
@@ -55,43 +79,87 @@ internal static class ConfirmationProposalMapper
 
     private sealed record ChangesEnvelope(int Version, IReadOnlyList<ChangeDto> Changes);
 
-    public static ConfirmationProposalEntity ToEntity(ConfirmationProposal proposal) => new()
+    public static ConfirmationProposalEntity ToEntity(ConfirmationProposal proposal)
     {
-        ProposalId = proposal.Id.Value,
-        TokenHash = proposal.TokenHash.Value,
-        ParticipantId = proposal.ParticipantId.Value,
-        ChannelConversationId = proposal.ChannelConversationId,
-        InventoryId = proposal.InventoryId.Value,
-        ProposedInTurnId = proposal.ProposedInTurnId.Value,
-        Status = nameof(ProposalStatus.Pending),
-        Kind = proposal.Kind.ToString(),
-        ChangesJson = JsonSerializer.Serialize(
-            new ChangesEnvelope(SchemaVersion, proposal.Changes.Select(ToDto).ToList()), Options),
-        ExpectedVersionsJson = JsonSerializer.Serialize(
-            proposal.ExpectedVersions.Select(v => new VersionDto(v.StockEntryId.Value, v.ConcurrencyStamp)).ToList(), Options),
-        ExpectedAbsencesJson = JsonSerializer.Serialize(
-            proposal.ExpectedAbsences.Select(a => new AbsenceDto(a.NormalizedName, a.UnitId.Value, a.LocationId?.Value)).ToList(), Options),
-        CreatedAt = proposal.CreatedAt,
-        ExpiresAt = proposal.ExpiresAt,
-        ExpiresAtTicks = proposal.ExpiresAt.UtcTicks,
-        SettledAt = null,
-        SettledAtTicks = null,
-    };
+        var isReferenceProposal = proposal.Kind == ProposalKind.ReferenceAdministration;
+
+        return new ConfirmationProposalEntity
+        {
+            ProposalId = proposal.Id.Value,
+            TokenHash = proposal.TokenHash.Value,
+            ParticipantId = proposal.ParticipantId.Value,
+            ChannelConversationId = proposal.ChannelConversationId,
+            InventoryId = proposal.InventoryId.Value,
+            ProposedInTurnId = proposal.ProposedInTurnId.Value,
+            Status = nameof(ProposalStatus.Pending),
+            Kind = proposal.Kind.ToString(),
+            ChangesJson = JsonSerializer.Serialize(
+                new ChangesEnvelope(SchemaVersion, proposal.Changes.Select(ToDto).ToList()), Options),
+            ExpectedVersionsJson = JsonSerializer.Serialize(
+                proposal.ExpectedVersions.Select(v => new VersionDto(v.StockEntryId.Value, v.ConcurrencyStamp)).ToList(), Options),
+            ExpectedAbsencesJson = JsonSerializer.Serialize(
+                proposal.ExpectedAbsences.Select(a => new AbsenceDto(a.NormalizedName, a.UnitId.Value, a.LocationId?.Value)).ToList(), Options),
+            ReferenceChangesJson = isReferenceProposal
+                ? JsonSerializer.Serialize(
+                    new ReferenceChangesEnvelope(SchemaVersion, proposal.ReferenceChanges.Select(ToDto).ToList()), Options)
+                : null,
+            ExpectedReferenceVersionsJson = isReferenceProposal
+                ? JsonSerializer.Serialize(
+                    proposal.ExpectedReferenceVersions
+                        .Select(v => new ReferenceVersionDto(v.Kind.ToString(), v.ReferenceId, v.ConcurrencyStamp))
+                        .ToList(),
+                    Options)
+                : null,
+            ExpectedTermAbsencesJson = isReferenceProposal
+                ? JsonSerializer.Serialize(
+                    proposal.ExpectedTermAbsences
+                        .Select(a => new TermAbsenceDto(a.Kind.ToString(), a.NormalizedTerm))
+                        .ToList(),
+                    Options)
+                : null,
+            CreatedAt = proposal.CreatedAt,
+            ExpiresAt = proposal.ExpiresAt,
+            ExpiresAtTicks = proposal.ExpiresAt.UtcTicks,
+            SettledAt = null,
+            SettledAtTicks = null,
+        };
+    }
 
     public static ConfirmationProposal ToDomain(ConfirmationProposalEntity entity)
     {
+        if (!Enum.TryParse<ProposalKind>(entity.Kind, ignoreCase: false, out var kind))
+        {
+            throw new InvalidOperationException("A stored proposal carried an unreadable kind.");
+        }
+
         var envelope = JsonSerializer.Deserialize<ChangesEnvelope>(entity.ChangesJson, Options)
             ?? throw new InvalidOperationException("A stored proposal carried no changes.");
 
         if (envelope.Version != SchemaVersion)
         {
-            // A proposal is only ever ten minutes old, so a shape this process cannot read is a
-            // deployment mistake, not a migration case to guess at.
             throw new InvalidOperationException($"A stored proposal uses unsupported schema version {envelope.Version}.");
         }
 
         var versions = JsonSerializer.Deserialize<List<VersionDto>>(entity.ExpectedVersionsJson, Options) ?? [];
         var absences = JsonSerializer.Deserialize<List<AbsenceDto>>(entity.ExpectedAbsencesJson, Options) ?? [];
+
+        var referenceChanges = entity.ReferenceChangesJson is { } referenceJson
+            ? (JsonSerializer.Deserialize<ReferenceChangesEnvelope>(referenceJson, Options)
+                ?? throw new InvalidOperationException("A stored proposal carried an unreadable reference payload."))
+                .Changes.Select(ToDomain).ToList()
+            : [];
+
+        var referenceVersions = entity.ExpectedReferenceVersionsJson is { } versionJson
+            ? (JsonSerializer.Deserialize<List<ReferenceVersionDto>>(versionJson, Options) ?? [])
+                .Select(v => new ExpectedReferenceVersion(ParseReferenceKind(v.Kind), v.ReferenceId, v.ConcurrencyStamp))
+                .ToList()
+            : [];
+
+        var termAbsences = entity.ExpectedTermAbsencesJson is { } absenceJson
+            ? (JsonSerializer.Deserialize<List<TermAbsenceDto>>(absenceJson, Options) ?? [])
+                .Select(a => new ExpectedTermAbsence(ParseReferenceKind(a.Kind), a.NormalizedTerm))
+                .ToList()
+            : [];
 
         return new ConfirmationProposal
         {
@@ -101,7 +169,7 @@ internal static class ConfirmationProposalMapper
             ChannelConversationId = entity.ChannelConversationId,
             InventoryId = new InventoryId(entity.InventoryId),
             ProposedInTurnId = new TurnId(entity.ProposedInTurnId),
-            Kind = ProposalKind.Stock,
+            Kind = kind,
             Changes = envelope.Changes.Select(ToDomain).ToList(),
             ExpectedVersions = versions
                 .Select(v => new ExpectedEntryVersion(new StockEntryId(v.StockEntryId), v.ConcurrencyStamp))
@@ -110,9 +178,66 @@ internal static class ConfirmationProposalMapper
                 .Select(a => new ExpectedEquivalentStockAbsence(
                     a.NormalizedName, new UnitId(a.UnitId), a.LocationId is { } id ? new LocationId(id) : null))
                 .ToList(),
+            ReferenceChanges = referenceChanges,
+            ExpectedReferenceVersions = referenceVersions,
+            ExpectedTermAbsences = termAbsences,
             CreatedAt = entity.CreatedAt,
         };
     }
+
+    private static ReferenceChangeDto ToDto(ProposedReferenceChange change) => new(
+        change.Order,
+        ReferenceAdministrationFacts.ToMachineText(change.Kind),
+        new ReferenceStateDto(
+            change.Target.Kind.ToString(),
+            change.Target.ReferenceId,
+            change.Target.Name,
+            change.Target.NormalizedName,
+            change.Target.Reserved),
+        change.NewName,
+        change.NewNormalizedName,
+        change.Term is null ? null : ToDto(change.Term),
+        change.Terms.Select(ToDto).ToList());
+
+    private static UnitTermDto ToDto(UnitTerm term) =>
+        new(term.Term, term.NormalizedTerm, term.IsCanonical, term.IsReserved);
+
+    private static ProposedReferenceChange ToDomain(ReferenceChangeDto dto)
+    {
+        if (!ReferenceAdministrationFacts.TryParse(dto.Kind, out var kind))
+        {
+            throw new InvalidOperationException("A stored proposal carried an unreadable reference change kind.");
+        }
+
+        return new ProposedReferenceChange
+        {
+            Order = dto.Order,
+            Kind = kind,
+            Target = new ProposedReferenceState(
+                ParseReferenceKind(dto.Target.Kind),
+                dto.Target.ReferenceId,
+                dto.Target.Name,
+                dto.Target.NormalizedName,
+                dto.Target.Reserved),
+            NewName = dto.NewName,
+            NewNormalizedName = dto.NewNormalizedName,
+            Term = dto.Term is null ? null : ToDomain(dto.Term),
+            Terms = dto.Terms.Select(ToDomain).ToList(),
+        };
+    }
+
+    private static UnitTerm ToDomain(UnitTermDto dto) => new()
+    {
+        Term = dto.Term,
+        NormalizedTerm = dto.NormalizedTerm,
+        IsCanonical = dto.IsCanonical,
+        IsReserved = dto.IsReserved,
+    };
+
+    private static ReferenceKind ParseReferenceKind(string text) =>
+        Enum.TryParse<ReferenceKind>(text, ignoreCase: false, out var kind)
+            ? kind
+            : throw new InvalidOperationException("A stored proposal carried an unreadable reference kind.");
 
     private static ChangeDto ToDto(ProposedChange change) => new(
         change.Order,

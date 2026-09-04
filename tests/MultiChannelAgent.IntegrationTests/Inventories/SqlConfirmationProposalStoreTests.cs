@@ -361,4 +361,166 @@ public sealed class SqlConfirmationProposalStoreTests : SqlIntegrationTestBase
         Assert.Null(await store2.FindStatusAsync(settled.Id, CancellationToken.None));
         Assert.Equal(ProposalStatus.Pending, await store2.FindStatusAsync(pending.Id, CancellationToken.None));
     }
+    [SkippableFact]
+    public async Task A_reference_proposal_round_trips_every_exact_change_it_carries()
+    {
+        Skip.IfNot(DockerAvailable, "Docker is not available in this environment; skipping the SQL-backed proposal round-trip.");
+
+        var (participantId, inventoryId) = await SeedAsync();
+        var unitId = Guid.NewGuid();
+        var locationId = Guid.NewGuid();
+        using var scope = Factory!.Services.CreateScope();
+        var store = new SqlConfirmationProposalStore(Db(scope));
+
+        var proposal = ConfirmationProposal.CreateForReferences(
+            ConfirmationToken.HashOf(ConfirmationToken.Issue()),
+            new ParticipantId(participantId),
+            "web-conversation-1",
+            new InventoryId(inventoryId),
+            new TurnId(Guid.NewGuid()),
+            [
+                new ProposedReferenceChange
+                {
+                    Order = 1,
+                    Kind = ReferenceChangeKind.CreateUnit,
+                    Target = new ProposedReferenceState(ReferenceKind.Unit, unitId, "Cardboard Box", "cardboard box", false),
+                    Terms =
+                    [
+                        UnitTerm.Create("Cardboard Box", isCanonical: true, isReserved: false),
+                        UnitTerm.Create("boxes", isCanonical: false, isReserved: false),
+                    ],
+                },
+                new ProposedReferenceChange
+                {
+                    Order = 2,
+                    Kind = ReferenceChangeKind.RetireLocation,
+                    Target = new ProposedReferenceState(ReferenceKind.Location, locationId, "Old Bay", "old bay", false),
+                },
+            ],
+            [new ExpectedReferenceVersion(ReferenceKind.Location, locationId, Guid.NewGuid())],
+            [new ExpectedTermAbsence(ReferenceKind.Unit, "cardboard box"), new ExpectedTermAbsence(ReferenceKind.Unit, "boxes")],
+            DateTimeOffset.UnixEpoch);
+
+        await store.StoreAsync(proposal, DateTimeOffset.UnixEpoch, CancellationToken.None);
+
+        var read = await store.FindPendingAsync(new ParticipantId(participantId), "web-conversation-1", CancellationToken.None);
+
+        Assert.NotNull(read);
+        Assert.Equal(ProposalKind.ReferenceAdministration, read!.Kind);
+        Assert.Empty(read.Changes);
+        Assert.Equal(2, read.ReferenceChanges.Count);
+        Assert.Equal(ReferenceChangeKind.CreateUnit, read.ReferenceChanges[0].Kind);
+        Assert.Equal(unitId, read.ReferenceChanges[0].Target.ReferenceId);
+        Assert.Equal(["Cardboard Box", "boxes"], read.ReferenceChanges[0].Terms.Select(term => term.Term));
+        Assert.True(read.ReferenceChanges[0].Terms[0].IsCanonical);
+        Assert.Equal(ReferenceChangeKind.RetireLocation, read.ReferenceChanges[1].Kind);
+        Assert.Equal(MembershipRole.Owner, read.RequiredRole);
+        Assert.Equal(proposal.ExpectedReferenceVersions[0].ConcurrencyStamp, read.ExpectedReferenceVersions[0].ConcurrencyStamp);
+        Assert.Equal(["cardboard box", "boxes"], read.ExpectedTermAbsences.Select(absence => absence.NormalizedTerm));
+    }
+
+    [SkippableFact]
+    public async Task Storing_a_proposal_records_every_reference_it_depends_on()
+    {
+        Skip.IfNot(DockerAvailable, "Docker is not available in this environment; skipping the SQL-backed proposal reference index.");
+
+        var (participantId, inventoryId) = await SeedAsync();
+        var locationId = Guid.NewGuid();
+        using var scope = Factory!.Services.CreateScope();
+        var db = Db(scope);
+        var store = new SqlConfirmationProposalStore(db);
+
+        var proposal = ConfirmationProposal.CreateForReferences(
+            ConfirmationToken.HashOf(ConfirmationToken.Issue()),
+            new ParticipantId(participantId),
+            "web-conversation-1",
+            new InventoryId(inventoryId),
+            new TurnId(Guid.NewGuid()),
+            [
+                new ProposedReferenceChange
+                {
+                    Order = 1,
+                    Kind = ReferenceChangeKind.RetireLocation,
+                    Target = new ProposedReferenceState(ReferenceKind.Location, locationId, "Old Bay", "old bay", false),
+                },
+            ],
+            [new ExpectedReferenceVersion(ReferenceKind.Location, locationId, Guid.NewGuid())],
+            [],
+            DateTimeOffset.UnixEpoch);
+
+        await store.StoreAsync(proposal, DateTimeOffset.UnixEpoch, CancellationToken.None);
+
+        var recorded = await db.ConfirmationProposalReferences
+            .AsNoTracking()
+            .Where(r => r.ProposalId == proposal.Id.Value)
+            .ToListAsync();
+
+        var reference = Assert.Single(recorded);
+        Assert.Equal(nameof(ReferenceKind.Location), reference.ReferenceKind);
+        Assert.Equal(locationId, reference.ReferenceId);
+    }
+
+    [SkippableFact]
+    public async Task Retiring_a_reference_settles_every_pending_proposal_that_depends_on_it()
+    {
+        Skip.IfNot(DockerAvailable, "Docker is not available in this environment; skipping the SQL-backed invalidation.");
+
+        var (participantId, inventoryId) = await SeedAsync();
+        var locationId = Guid.NewGuid();
+        using var scope = Factory!.Services.CreateScope();
+        var store = new SqlConfirmationProposalStore(Db(scope));
+
+        var proposal = ConfirmationProposal.CreateForReferences(
+            ConfirmationToken.HashOf(ConfirmationToken.Issue()),
+            new ParticipantId(participantId),
+            "web-conversation-1",
+            new InventoryId(inventoryId),
+            new TurnId(Guid.NewGuid()),
+            [
+                new ProposedReferenceChange
+                {
+                    Order = 1,
+                    Kind = ReferenceChangeKind.RenameLocation,
+                    Target = new ProposedReferenceState(ReferenceKind.Location, locationId, "Old Bay", "old bay", false),
+                    NewName = "New Bay",
+                    NewNormalizedName = "new bay",
+                },
+            ],
+            [new ExpectedReferenceVersion(ReferenceKind.Location, locationId, Guid.NewGuid())],
+            [],
+            DateTimeOffset.UnixEpoch);
+
+        await store.StoreAsync(proposal, DateTimeOffset.UnixEpoch, CancellationToken.None);
+
+        var settled = await store.InvalidateReferencingAsync(
+            new InventoryId(inventoryId), ReferenceKind.Location, locationId, DateTimeOffset.UnixEpoch, CancellationToken.None);
+
+        Assert.Equal(1, settled);
+        Assert.Equal(ProposalStatus.Conflicted, await store.FindStatusAsync(proposal.Id, CancellationToken.None));
+
+        // Idempotent: a second retire of the same identity finds nothing pending to settle.
+        Assert.Equal(0, await store.InvalidateReferencingAsync(
+            new InventoryId(inventoryId), ReferenceKind.Location, locationId, DateTimeOffset.UnixEpoch, CancellationToken.None));
+    }
+
+    private static MultiChannelAgentDbContext Db(IServiceScope scope) =>
+        scope.ServiceProvider.GetRequiredService<MultiChannelAgentDbContext>();
+
+    /// <summary>Seeds the Participant and Inventory a reference proposal has to be bound to, and reports both identities.</summary>
+    private async Task<(Guid ParticipantId, Guid InventoryId)> SeedAsync()
+    {
+        await SeedInventoryAsync();
+
+        using var db = NewContext();
+        db.Participants.Add(new ParticipantEntity
+        {
+            Id = _participant.Value,
+            DisplayName = "Proposal Person",
+            CreatedAt = Now,
+            UpdatedAt = Now,
+        });
+        await db.SaveChangesAsync();
+
+        return (_participant.Value, _inventory.Value);
+    }
 }
