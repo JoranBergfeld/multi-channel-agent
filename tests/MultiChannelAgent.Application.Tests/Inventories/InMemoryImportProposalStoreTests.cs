@@ -51,6 +51,20 @@ public sealed class InMemoryImportProposalStoreTests
     }
 
     [Fact]
+    public async Task Stored_raw_content_is_unaffected_by_later_mutation_of_the_caller_s_buffer()
+    {
+        var store = new InMemoryImportProposalStore();
+        var proposal = Proposal();
+        var original = new byte[] { 1, 2, 3 };
+        var mutable = new byte[] { 1, 2, 3 };
+
+        await store.StoreAsync(proposal, mutable, Now, CancellationToken.None);
+        mutable[0] = 99;
+
+        Assert.Equal(original, (await store.FindRawContentAsync(proposal.Id, CancellationToken.None))!.Value.ToArray());
+    }
+
+    [Fact]
     public async Task Storing_a_new_proposal_supersedes_the_pending_one_and_discards_its_raw_content()
     {
         var store = new InMemoryImportProposalStore();

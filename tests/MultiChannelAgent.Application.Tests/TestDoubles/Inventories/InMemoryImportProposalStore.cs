@@ -33,7 +33,9 @@ public sealed class InMemoryImportProposalStore : IImportProposalStore
             superseded = true;
         }
 
-        _rows[proposal.Id] = new Row(proposal, ImportProposalStatus.Pending, null) { RawContent = rawContent };
+        // Owned copy: a caller's buffer may be reused or mutated after this call returns, and the
+        // SQL store's raw content is likewise immune to changes the caller makes afterwards.
+        _rows[proposal.Id] = new Row(proposal, ImportProposalStatus.Pending, null) { RawContent = rawContent.ToArray() };
 
         return Task.FromResult(superseded);
     }

@@ -9,7 +9,7 @@ namespace MultiChannelAgent.Application.Tests.TestDoubles.Inventories;
 /// empty-state re-check, one audit fact, and nothing written when any of them refuses.
 /// </summary>
 public sealed class InMemoryImportExecutionStore(
-    InMemoryImportProposalStore? proposalStore = null, InMemoryStockEmptyStateReader? emptyState = null)
+    InMemoryImportProposalStore proposalStore, InMemoryStockEmptyStateReader emptyState)
     : IImportExecutionStore
 {
     private readonly Dictionary<(InventoryId, ImportOperationId), RecordedImport> _recorded = [];
@@ -33,23 +33,22 @@ public sealed class InMemoryImportExecutionStore(
             return new ImportExecutionResult(ImportExecutionOutcome.AlreadyApplied, already);
         }
 
-        // The SQL store does all of this in one transaction, so a conflict discovered after the
-        // proposal was consumed still leaves it exactly as it was. This double has no transaction, so
-        // it refuses before consuming rather than rolling back afterwards.
-        if (emptyState is not null && await emptyState.AnyStockAsync(command.InventoryId, cancellationToken))
+        // Both dependencies are always present (required constructor params), so this double
+        // matches the SQL store's single transaction: re-assert emptiness, then consume the
+        // proposal, before anything is written.
+        if (await emptyState.AnyStockAsync(command.InventoryId, cancellationToken))
         {
             return new ImportExecutionResult(ImportExecutionOutcome.Conflict, null);
         }
 
-        if (proposalStore is not null
-            && !await proposalStore.SettleAsync(
+        if (!await proposalStore.SettleAsync(
                 command.ConsumesProposalId, ImportProposalStatus.Confirmed, command.Now, cancellationToken))
         {
             return new ImportExecutionResult(ImportExecutionOutcome.Conflict, null);
         }
 
         CreatedEntries.AddRange(command.Entries);
-        emptyState?.SetAnyStock(command.InventoryId, true);
+        emptyState.SetAnyStock(command.InventoryId, true);
 
         Audits.Add(AuditFact.Create(
             AuditEventType.StockImported,
