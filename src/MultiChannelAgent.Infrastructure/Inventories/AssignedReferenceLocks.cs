@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 using MultiChannelAgent.Domain.Inventories;
 using MultiChannelAgent.Infrastructure.Persistence;
 
@@ -25,12 +26,17 @@ namespace MultiChannelAgent.Infrastructure.Inventories;
 /// Stock and answers <c>reference_in_use</c>.</item>
 /// </list>
 ///
-/// The lock order matches <see cref="SqlReferenceAdministrationStore"/> exactly - Units before
-/// Locations, then the ordinal text of the identity - and reference locks are always taken
-/// <em>before</em> any Stock row lock, so the two stores contend in one agreed order rather than
-/// deadlocking halfway through. Where they still can deadlock (a Retire's Serializable range scan
-/// over Stock crossing a write that already holds a reference), SQL Server picks a victim, the fault
-/// propagates as the transient thing it is, and the Turn is simply retried.
+/// The order is <b>reference, then proposal, then Stock rows</b>, and it is shared rather than local.
+/// Within references it matches <see cref="SqlReferenceAdministrationStore"/> exactly - Units before
+/// Locations, then the ordinal text of the identity. Putting references first matters as much as the
+/// order among them: a Retire takes the reference and only then settles every pending proposal that
+/// referenced it, so a confirmation that consumed its own proposal before taking the reference would
+/// leave each side holding precisely what the other waits for.
+///
+/// One cycle remains, and it is a different animal: a Retire's Serializable range scan over Stock can
+/// cross a write that already holds a reference. There is no ordering that removes it, because the
+/// two are ordered on different things. SQL Server picks a victim, the fault propagates as the
+/// transient thing it is, and the Turn is simply retried.
 /// </summary>
 internal static class AssignedReferenceLocks
 {
@@ -59,6 +65,8 @@ internal static class AssignedReferenceLocks
         IEnumerable<LocationId> locationIds,
         CancellationToken cancellationToken)
     {
+        RequireHoldingTransaction(db);
+
         foreach (var unitId in Ordered(unitIds.Select(id => id.Value)))
         {
             var active = await db.Units
@@ -82,6 +90,27 @@ internal static class AssignedReferenceLocks
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// Refuses to claim a lock this caller cannot actually be holding. Reading under read-committed
+    /// releases its lock immediately, so a caller that forgot its transaction - or opened a weaker one
+    /// - would get an answer that looks identical and guarantees nothing. Only levels known to be too
+    /// weak are rejected, so a provider that reports its own level differently is not second-guessed.
+    /// </summary>
+    private static void RequireHoldingTransaction(MultiChannelAgentDbContext db)
+    {
+        var isolation = db.Database.CurrentTransaction?.GetDbTransaction().IsolationLevel
+            ?? throw new InvalidOperationException(
+                "Assigned reference locks must be claimed inside a transaction that holds them until it commits.");
+
+        if (isolation is System.Data.IsolationLevel.ReadUncommitted
+            or System.Data.IsolationLevel.ReadCommitted
+            or System.Data.IsolationLevel.Chaos)
+        {
+            throw new InvalidOperationException(
+                $"Assigned reference locks need at least {Isolation}, but this transaction is {isolation}.");
+        }
     }
 
     private static IEnumerable<Guid> Ordered(IEnumerable<Guid> ids) =>

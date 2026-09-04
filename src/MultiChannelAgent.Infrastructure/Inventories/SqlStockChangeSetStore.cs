@@ -68,8 +68,28 @@ public sealed class SqlStockChangeSetStore(MultiChannelAgentDbContext db) : ISto
 
         try
         {
-            // 1. Consume the proposal, guarded. Doing this first means a losing confirmation stops
-            //    here, before it has touched any Stock at all.
+            // 1. Lock and verify every Unit and Location this set's final states reference, before
+            //    anything else this transaction will hold, and in the order
+            //    SqlReferenceAdministrationStore uses. A proposal may have been reviewed minutes ago;
+            //    a Retire since then must stop it here rather than let it create or place Stock at a
+            //    reference that no longer exists.
+            //
+            //    This comes before the proposal on purpose. A Retire takes the reference and only then
+            //    settles the pending proposals that referenced it, so consuming the proposal first
+            //    would leave each side holding exactly what the other waits for. Reference, then
+            //    proposal, then Stock rows is the one order both stores agree on - and reading a
+            //    reference writes nothing, so a losing confirmation still touches no data.
+            if (!await AssignedReferenceLocks.TryHoldActiveAsync(
+                    db,
+                    command.InventoryId,
+                    StockReferenceDependencies.UnitsOf(command.Changes, command.ExpectedAbsences),
+                    StockReferenceDependencies.LocationsOf(command.Changes, command.ExpectedAbsences),
+                    cancellationToken))
+            {
+                return await RolledBackConflictAsync(transaction);
+            }
+
+            // 2. Consume the proposal, guarded, so a losing confirmation stops before any Stock moves.
             if (command.ConsumesProposalId is { } proposalId)
             {
                 var consumed = await db.ConfirmationProposals
@@ -85,16 +105,6 @@ public sealed class SqlStockChangeSetStore(MultiChannelAgentDbContext db) : ISto
                 {
                     return await RolledBackConflictAsync(transaction);
                 }
-            }
-
-            // 2. Lock and verify every Unit and Location this set's final states reference, before any
-            //    Stock row is touched, in the order SqlReferenceAdministrationStore uses. A proposal
-            //    may have been reviewed minutes ago; a Retire since then must stop it here rather than
-            //    let it create or place Stock at a reference that no longer exists.
-            if (!await AssignedReferenceLocks.TryHoldActiveAsync(
-                    db, command.InventoryId, ReferencedUnitIds(command), ReferencedLocationIds(command), cancellationToken))
-            {
-                return await RolledBackConflictAsync(transaction);
             }
 
             // 3. Lock and verify every touched row, in one globally agreed order. Each statement both
@@ -376,24 +386,6 @@ public sealed class SqlStockChangeSetStore(MultiChannelAgentDbContext db) : ISto
 
         return deleted == 1;
     }
-
-    /// <summary>
-    /// Every Unit a change set's states reference, including the ones only an expected absence names.
-    /// Quantity-only changes contribute their own Stock Entry's Unit too, which costs one read and
-    /// keeps the protocol one rule rather than a per-effect exception list.
-    /// </summary>
-    private static IEnumerable<UnitId> ReferencedUnitIds(StockChangeSetCommand command) =>
-        command.Changes
-            .SelectMany(change => new[] { (UnitId?)change.Source.UnitId, change.Destination?.UnitId })
-            .Concat(command.ExpectedAbsences.Select(absence => (UnitId?)absence.UnitId))
-            .OfType<UnitId>();
-
-    /// <summary>Every Location a change set's states reference. Unlocated is the absence of one, so it contributes nothing.</summary>
-    private static IEnumerable<LocationId> ReferencedLocationIds(StockChangeSetCommand command) =>
-        command.Changes
-            .SelectMany(change => new[] { change.Source.LocationId, change.Destination?.LocationId })
-            .Concat(command.ExpectedAbsences.Select(absence => absence.LocationId))
-            .OfType<LocationId>();
 
     private async Task<StockChangeSetStoreResult> RolledBackConflictAsync(IDbContextTransaction transaction)
     {
