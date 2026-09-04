@@ -180,6 +180,11 @@ internal static class ReferenceAdministrationScenario
         var bayRetire = await OutcomeAsync(factory, owner, "ref-retire-6", "retire location Bay 7");
         await CompleteAsync(factory, owner, "ref-confirm-3", $"confirm {TokenOf(bayRetire)}");
 
+        // Durable state, not just the answer: the Retire settled it inside its own transaction, so
+        // nothing is left Pending here for anyone to confirm.
+        Assert.Equal(0, await CountProposalsAsync(factory, inventoryId, ProposalStatus.Pending));
+        Assert.True(await CountProposalsAsync(factory, inventoryId, ProposalStatus.Conflicted) > 0);
+
         var strandedConfirm = await OutcomeAsync(factory, editor, "ref-editor-2", $"confirm {TokenOf(editorProposal)}");
         Assert.Equal("not_found", strandedConfirm.GetProperty("category").GetString());
         Assert.Equal("proposal_not_found", strandedConfirm.GetProperty("code").GetString());
@@ -328,6 +333,18 @@ internal static class ReferenceAdministrationScenario
                 + "|" + (e.LocationId == null ? "" : e.LocationId.ToString()) + "|" + e.Quantity.ToString()
                 + "|" + (e.Note ?? "") + "|" + e.ConcurrencyStamp.ToString())
             .ToListAsync();
+    }
+
+    private static async Task<int> CountProposalsAsync(
+        WebApplicationFactory<Program> factory, Guid inventoryId, ProposalStatus status)
+    {
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<MultiChannelAgentDbContext>();
+        var statusText = status.ToString();
+
+        return await db.ConfirmationProposals
+            .AsNoTracking()
+            .CountAsync(p => p.InventoryId == inventoryId && p.Status == statusText);
     }
 
     private static async Task<int> CountAuditsAsync(WebApplicationFactory<Program> factory, Guid inventoryId, string eventType)

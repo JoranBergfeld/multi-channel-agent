@@ -11,6 +11,28 @@ namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
         /// <inheritdoc />
         protected override void Up(MigrationBuilder migrationBuilder)
         {
+            // First, before one column changes.
+            //
+            // From here on, "a confirmed Retire invalidates every pending proposal that references the
+            // retired identity" is answered by joining ConfirmationProposalReferences - a table written
+            // when a proposal is stored, and therefore empty for every proposal stored before this ran.
+            // A Retire would look straight past those proposals, and confirming one afterwards would
+            // still execute: SqlStockChangeSetStore pins Stock Entry versions and never independently
+            // re-checks whether a Unit or Location has since been retired, so it would happily create or
+            // move Stock at a reference that no longer exists.
+            //
+            // Rebuilding the index for them would mean parsing every historical serialized payload and
+            // trusting that none is malformed. A proposal lives ten minutes, so the conservative answer
+            // is to settle them all: Conflicted says exactly what happened - current state no longer
+            // matches what was proposed - and the Participant is told only that nothing is waiting for
+            // them, which discloses nothing. SettledAt and SettledAtTicks are taken from the row's own
+            // expiry, so retention and the sweep behave exactly as they would have had it simply
+            // expired, with no clock arithmetic in SQL. The guard means an already terminal proposal is
+            // untouched, and re-running the migration moves nothing.
+            migrationBuilder.Sql(
+                "UPDATE ConfirmationProposals SET Status = 'Conflicted', SettledAt = ExpiresAt, " +
+                "SettledAtTicks = ExpiresAtTicks WHERE Status = 'Pending';");
+
             migrationBuilder.DropIndex(
                 name: "IX_UnitTerms_InventoryId_NormalizedTerm",
                 table: "UnitTerms");
@@ -245,17 +267,6 @@ namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
         /// <inheritdoc />
         protected override void Down(MigrationBuilder migrationBuilder)
         {
-            migrationBuilder.AlterColumn<string>(
-                name: "NormalizedTerm",
-                table: "UnitTerms",
-                type: "nvarchar(100)",
-                maxLength: 100,
-                nullable: false,
-                oldClrType: typeof(string),
-                oldType: "nvarchar(100)",
-                oldMaxLength: 100,
-                oldCollation: "Latin1_General_100_BIN2");
-
             migrationBuilder.DropTable(
                 name: "ConfirmationProposalReferences");
 
@@ -272,6 +283,19 @@ namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
             migrationBuilder.DropIndex(
                 name: "IX_UnitTerms_InventoryId_UnitId_RetiredAt",
                 table: "UnitTerms");
+
+            // Only now: SQL Server refuses to alter a column an index still depends on, and the
+            // filtered unique index above was built over exactly this column.
+            migrationBuilder.AlterColumn<string>(
+                name: "NormalizedTerm",
+                table: "UnitTerms",
+                type: "nvarchar(100)",
+                maxLength: 100,
+                nullable: false,
+                oldClrType: typeof(string),
+                oldType: "nvarchar(100)",
+                oldMaxLength: 100,
+                oldCollation: "Latin1_General_100_BIN2");
 
             migrationBuilder.DropIndex(
                 name: "IX_Units_InventoryId_RetiredAt",
