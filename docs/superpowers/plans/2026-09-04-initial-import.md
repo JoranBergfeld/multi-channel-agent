@@ -8028,15 +8028,19 @@ Expected: `clean`. #26 lists ten Unit and Location tools and nine stock tools, a
 
 Run:
 ```bash
-grep -rln "ImportUploads" src --include=*.cs
+grep -rln "ImportUploads" src --include=*.cs \
+  | grep -v "/Persistence/Migrations/" \
+  | sort
 ```
-Expected: exactly three files - `MultiChannelAgentDbContext.cs`, `ImportUploadEntityConfiguration.cs`, `SqlImportProposalStore.cs`, plus `SqlImportExecutionStore.cs` for the delete. Any other reader would be a second place raw uploaded data can escape from.
+Expected: exactly four files - `MultiChannelAgentDbContext.cs`, `ImportUploadEntityConfiguration.cs`, `SqlImportProposalStore.cs`, and `SqlImportExecutionStore.cs` for the delete. Any other reader would be a second place raw uploaded data can escape from.
 
 - [ ] **Step 8: Confirm no budget or spend policy crept in**
 
 Run:
 ```bash
-git diff origin/main...HEAD -- src tests | grep -niE "budget|spend threshold|chargeback|cost ceiling|quota purchase" || echo "clean"
+git diff origin/prototype/inventory-conversation...HEAD -- src tests \
+  | grep -niE "monetary budget|spend threshold|chargeback|cost ceiling|quota purchase" \
+  || echo "clean"
 ```
 Expected: `clean`. The parent spec puts every one of these out of scope; a "safety" limit added here would be behavior nobody asked for.
 
