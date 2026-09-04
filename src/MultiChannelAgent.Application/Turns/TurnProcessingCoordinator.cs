@@ -124,7 +124,7 @@ public sealed class TurnProcessingCoordinator(
         // any later one - to trigger.
         await proposalLifecycle.ReconcileAsync(executionContext, now, cancellationToken);
 
-        await turnProgressEventStore.AppendAsync(TurnProgressEvent.Processing(turn.TurnId, now));
+        await turnProgressEventStore.AppendAsync(TurnProgressEvent.Processing(turn.TurnId, now), cancellationToken);
 
         var proposal = await modelBoundary.ProposeAsync(
             turn,

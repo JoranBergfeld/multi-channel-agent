@@ -12,7 +12,7 @@ public sealed class InMemoryTurnProgressEventStore : ITurnProgressEventStore
 
     public bool WasAppendedBeforeFirstModelCall { get; private set; }
 
-    public Task<bool> AppendAsync(TurnProgressEvent progressEvent)
+    public Task<bool> AppendAsync(TurnProgressEvent progressEvent, CancellationToken cancellationToken)
     {
         lock (gate)
         {
@@ -26,7 +26,7 @@ public sealed class InMemoryTurnProgressEventStore : ITurnProgressEventStore
         }
     }
 
-    public Task<IReadOnlyList<TurnProgressEvent>> ReadAsync(TurnId turnId)
+    public Task<IReadOnlyList<TurnProgressEvent>> ReadAsync(TurnId turnId, CancellationToken cancellationToken)
     {
         lock (gate)
         {
@@ -38,7 +38,7 @@ public sealed class InMemoryTurnProgressEventStore : ITurnProgressEventStore
         }
     }
 
-    public Task<int> DeleteExpiredAsync(DateTimeOffset now, int maxCount)
+    public Task<int> DeleteExpiredAsync(DateTimeOffset now, int maxCount, CancellationToken cancellationToken)
     {
         lock (gate)
         {

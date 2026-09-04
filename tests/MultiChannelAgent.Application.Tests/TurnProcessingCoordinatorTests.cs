@@ -136,7 +136,7 @@ public class TurnProcessingCoordinatorTests
 
         await coordinator.ProcessPendingAsync(CancellationToken.None);
 
-        var progressEvent = Assert.Single(await progressStore.ReadAsync(turn.TurnId));
+        var progressEvent = Assert.Single(await progressStore.ReadAsync(turn.TurnId, CancellationToken.None));
         Assert.Equal(TurnEventSequence.Processing, progressEvent.Sequence);
         Assert.Equal(TurnEventKind.Processing, progressEvent.Kind);
         Assert.Equal(Now, progressEvent.OccurredAt);
@@ -157,7 +157,7 @@ public class TurnProcessingCoordinatorTests
         Assert.Equal(0, await coordinator.ProcessPendingAsync(CancellationToken.None));
         Assert.Equal(1, await coordinator.ProcessPendingAsync(CancellationToken.None));
 
-        var progressEvent = Assert.Single(await progressStore.ReadAsync(turn.TurnId));
+        var progressEvent = Assert.Single(await progressStore.ReadAsync(turn.TurnId, CancellationToken.None));
         Assert.Equal(TurnEventSequence.Processing, progressEvent.Sequence);
     }
 
