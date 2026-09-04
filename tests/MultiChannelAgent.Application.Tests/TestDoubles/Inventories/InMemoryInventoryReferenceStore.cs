@@ -19,6 +19,12 @@ public sealed class InMemoryInventoryReferenceStore : IInventoryReferenceStore
     private readonly HashSet<(InventoryId, UnitId)> _retiredUnits = [];
     private readonly HashSet<(InventoryId, LocationId)> _retiredLocations = [];
 
+    /// <summary>How many times a Unit reference was resolved, so a caller's caching claim can be proven rather than trusted.</summary>
+    public int UnitResolutionCount { get; private set; }
+
+    /// <summary>How many times a Location reference was resolved. See <see cref="UnitResolutionCount"/>.</summary>
+    public int LocationResolutionCount { get; private set; }
+
     /// <summary>Withdraws a Unit from resolution exactly as retiring it does in SQL: it becomes as unknown as one that never existed.</summary>
     public void RetireUnit(InventoryId inventoryId, UnitId unitId) => _retiredUnits.Add((inventoryId, unitId));
 
@@ -57,6 +63,8 @@ public sealed class InMemoryInventoryReferenceStore : IInventoryReferenceStore
 
     public Task<UnitId?> ResolveUnitAsync(InventoryId inventoryId, string reference, CancellationToken cancellationToken)
     {
+        UnitResolutionCount++;
+
         if (Guid.TryParse(reference, out var id))
         {
             var unitId = new UnitId(id);
@@ -73,6 +81,8 @@ public sealed class InMemoryInventoryReferenceStore : IInventoryReferenceStore
 
     public Task<LocationId?> ResolveLocationAsync(InventoryId inventoryId, string reference, CancellationToken cancellationToken)
     {
+        LocationResolutionCount++;
+
         if (Guid.TryParse(reference, out var id))
         {
             var locationId = new LocationId(id);
