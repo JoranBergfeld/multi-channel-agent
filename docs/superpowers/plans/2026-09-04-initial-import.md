@@ -7700,7 +7700,10 @@ Create `tests/MultiChannelAgent.IntegrationTests/InitialImportScenario.cs`, foll
         var inventoryId = await owner.CreateAndSelectInventoryAsync("Import Warehouse");
 
         // 1. A brand new Inventory is empty, so import is offered.
-        Assert.True((await EligibilityAsync(owner, inventoryId)).GetProperty("eligible").GetBoolean());
+        var initialEligibility = await EligibilityAsync(owner, inventoryId);
+        Assert.Equal(HttpStatusCode.OK, initialEligibility.Status);
+        Assert.True(initialEligibility.Body.GetProperty("eligible").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, initialEligibility.Body.GetProperty("reason").ValueKind);
 
         // 2. Reference data has to exist first: import resolves, it never creates.
         await CompleteAsync(factory, owner, "imp-unit-1", "create unit Cardboard Box aliases boxes, bx");
@@ -7720,19 +7723,33 @@ Create `tests/MultiChannelAgent.IntegrationTests/InitialImportScenario.cs`, foll
         ]));
 
         Assert.Equal(HttpStatusCode.BadRequest, broken.Status);
+        Assert.Equal("invalid_file", broken.Body.GetProperty("code").GetString());
         Assert.Equal(
-            ["missing_name", "invalid_quantity", "unknown_unit", "unknown_location"],
+            ["missing_name", "invalid_quantity", "unknown_unit", "unknown_location", "conflicting_notes"],
             ErrorCodes(broken.Body));
+
+        // Every problem is reported against the exact line a Participant has to open, in source
+        // order, and nothing is reported twice however many phases independently found something.
+        Assert.Equal(
+            [2, 3, 4, 5, 7],
+            broken.Body.GetProperty("errors").EnumerateArray().Select(e => e.GetProperty("lineNumber").GetInt32()));
+        Assert.Equal(0, broken.Body.GetProperty("omittedErrorCount").GetInt32());
         Assert.Equal(0, await CountPendingImportsAsync(factory, inventoryId));
+        Assert.Equal(0, await CountRawUploadsAsync(factory));
 
-        // Row-level problems are answered before equivalence is even considered, so the conflicting
-        // Notes on lines 6 and 7 are not piled on top of four unreadable rows.
+        // All four phases are independent, and Task 8 shipped them that way deliberately: a row's own
+        // error means its Unit and Location were never looked up, and the merge only ever names rows
+        // that did resolve, so the conflicting Notes on lines 6 and 7 are reported in the same answer
+        // as the four unreadable rows rather than held back for a second upload.
 
-        // 4. A file whose only problem is conflicting Notes says exactly that.
+        // 4. A file whose only problem is conflicting Notes says exactly that, and nothing else - the
+        //    merge diagnostic above was this same rule, reported alongside errors it does not depend on.
         var conflicting = await ValidateAsync(owner, inventoryId, string.Join('\n',
             [Header, "Copper Nails,1,,,Blue box", "Copper Nails,1,,,Red box", string.Empty]));
 
+        Assert.Equal(HttpStatusCode.BadRequest, conflicting.Status);
         Assert.Equal(["conflicting_notes"], ErrorCodes(conflicting.Body));
+        Assert.Equal(0, await CountPendingImportsAsync(factory, inventoryId));
 
         // 5. A valid file previews the exact normalized entries, merging equivalent rows.
         var csv = string.Join('\n',
@@ -7748,47 +7765,67 @@ Create `tests/MultiChannelAgent.IntegrationTests/InitialImportScenario.cs`, foll
         var preview = await ValidateAsync(owner, inventoryId, csv);
         Assert.Equal(HttpStatusCode.OK, preview.Status);
         Assert.Equal(4, preview.Body.GetProperty("sourceRowCount").GetInt32());
+        Assert.False(preview.Body.GetProperty("supersededPrevious").GetBoolean());
 
         var entries = preview.Body.GetProperty("entries").EnumerateArray().ToList();
         Assert.Equal(3, entries.Count);
-        Assert.Equal("Steel Bolts", entries[0].GetProperty("name").GetString());
-        Assert.Equal("10", entries[0].GetProperty("quantity").GetString());
-        Assert.Equal("Cardboard Box", entries[0].GetProperty("unitCanonicalName").GetString());
-        Assert.Equal("Shelf A", entries[0].GetProperty("locationName").GetString());
-        Assert.Equal("Blue box", entries[0].GetProperty("note").GetString());
-        Assert.Equal([2, 4], entries[0].GetProperty("sourceLineNumbers").EnumerateArray().Select(n => n.GetInt32()));
+        AssertEntry(entries[0], "Steel Bolts", "10", "Cardboard Box", "Shelf A", "Blue box", [2, 4]);
+        AssertEntry(entries[1], "Brass Rivets", "2.5", "each", null, null, [3]);
+
+        // Zero is an amount, not an absence: it previews as its own entry rather than merging away.
+        AssertEntry(entries[2], "Zinc Screws", "0", "each", null, null, [5]);
 
         // 6. Nothing has happened yet: no Stock, and the file is held for exactly this proposal.
         Assert.Equal(0, await CountStockAsync(factory, inventoryId));
         Assert.Equal(1, await CountPendingImportsAsync(factory, inventoryId));
         Assert.Equal(1, await CountRawUploadsAsync(factory));
+        Assert.Equal([ProposalId(preview.Body)], await RawUploadOwnersAsync(factory));
 
         // 7. Validating again replaces this Participant's own pending import and its file.
         var replaced = await ValidateAsync(owner, inventoryId, csv);
         Assert.True(replaced.Body.GetProperty("supersededPrevious").GetBoolean());
+        Assert.NotEqual(ProposalId(preview.Body), ProposalId(replaced.Body));
         Assert.Equal(1, await CountPendingImportsAsync(factory, inventoryId));
+
+        // The superseded import is settled under its own identity, and the one retained file is the
+        // new proposal's - the replaced upload is discarded with the proposal that held it. A count
+        // alone would let a supersede keep the replaced file and discard the new one and still pass.
+        Assert.Equal(
+            nameof(ImportProposalStatus.Superseded), await ImportStatusAsync(factory, ProposalId(preview.Body)));
         Assert.Equal(1, await CountRawUploadsAsync(factory));
+        Assert.Equal([ProposalId(replaced.Body)], await RawUploadOwnersAsync(factory));
 
         // 8. Cancelling changes nothing at all, and discards the file.
-        Assert.Equal(HttpStatusCode.OK, (await RejectAsync(
-            owner, inventoryId, ProposalId(replaced.Body), Token(replaced.Body))).Status);
+        var rejected = await RejectAsync(
+            owner, inventoryId, ProposalId(replaced.Body), Token(replaced.Body));
+        Assert.Equal(HttpStatusCode.OK, rejected.Status);
+        Assert.True(rejected.Body.GetProperty("rejected").GetBoolean());
+        Assert.Equal(
+            nameof(ImportProposalStatus.Rejected), await ImportStatusAsync(factory, ProposalId(replaced.Body)));
         Assert.Equal(0, await CountStockAsync(factory, inventoryId));
+        Assert.Equal(0, await CountPendingImportsAsync(factory, inventoryId));
         Assert.Equal(0, await CountRawUploadsAsync(factory));
-        Assert.True((await EligibilityAsync(owner, inventoryId)).GetProperty("eligible").GetBoolean());
+        Assert.True((await EligibilityAsync(owner, inventoryId)).Body.GetProperty("eligible").GetBoolean());
 
         // 9. A confirmed import creates exactly the entries that were previewed, and one audit fact.
         var confirmed = await ValidateAsync(owner, inventoryId, csv);
-        var applied = await ConfirmAsync(
-            owner, inventoryId, ProposalId(confirmed.Body), Token(confirmed.Body));
+        var proposalId = ProposalId(confirmed.Body);
+        var token = Token(confirmed.Body);
+        var applied = await ConfirmAsync(owner, inventoryId, proposalId, token);
 
         Assert.Equal(HttpStatusCode.OK, applied.Status);
+        Assert.Equal(proposalId, ProposalId(applied.Body));
         Assert.Equal(3, applied.Body.GetProperty("createdEntryCount").GetInt32());
         Assert.Equal(3, await CountStockAsync(factory, inventoryId));
         Assert.Equal(1, await CountAuditsAsync(factory, inventoryId, nameof(AuditEventType.StockImported)));
 
         // 10. The raw CSV is gone, and only the digest remains in the ledger.
+        Assert.Equal(nameof(ImportProposalStatus.Confirmed), await ImportStatusAsync(factory, proposalId));
+        Assert.Equal(0, await CountPendingImportsAsync(factory, inventoryId));
         Assert.Equal(0, await CountRawUploadsAsync(factory));
-        Assert.Equal(confirmed.Body.GetProperty("fileDigest").GetString(), await LedgerDigestAsync(factory, inventoryId));
+        var digest = confirmed.Body.GetProperty("fileDigest").GetString();
+        Assert.Equal(digest, applied.Body.GetProperty("fileDigest").GetString());
+        Assert.Equal(digest, await LedgerDigestAsync(factory, inventoryId));
 
         // 11. The imported Stock is exactly what the preview promised, readable through the ordinary
         //     authorized projection - including the zero-quantity entry, which is on hand nowhere but
@@ -7798,13 +7835,24 @@ Create `tests/MultiChannelAgent.IntegrationTests/InitialImportScenario.cs`, foll
         await AssertStockAsync(owner, inventoryId, "Zinc Screws", "0", "each", null, includeZero: true);
 
         // 12. A lost-response retry re-reports the recorded result without importing twice, and
-        //     import is no longer offered at all.
-        Assert.Equal(HttpStatusCode.OK, (await ConfirmAsync(
-            owner, inventoryId, ProposalId(confirmed.Body), Token(confirmed.Body))).Status);
+        //     import is no longer offered at all. The status alone would prove nothing: what proves
+        //     the answer was re-read rather than re-run is the identical recorded result plus the
+        //     unchanged Stock and audit counts.
+        var retry = await ConfirmAsync(owner, inventoryId, proposalId, token);
+        Assert.Equal(HttpStatusCode.OK, retry.Status);
+        Assert.Equal(proposalId, ProposalId(retry.Body));
+        Assert.Equal(3, retry.Body.GetProperty("createdEntryCount").GetInt32());
+        Assert.Equal(digest, retry.Body.GetProperty("fileDigest").GetString());
+        Assert.Equal(3, await CountStockAsync(factory, inventoryId));
+        Assert.Equal(1, await CountAuditsAsync(factory, inventoryId, nameof(AuditEventType.StockImported)));
+
         var afterwards = await EligibilityAsync(owner, inventoryId);
-        Assert.False(afterwards.GetProperty("eligible").GetBoolean());
-        Assert.Equal("inventory_not_empty", afterwards.GetProperty("reason").GetString());
-        Assert.Equal(HttpStatusCode.Conflict, (await ValidateAsync(owner, inventoryId, csv)).Status);
+        Assert.False(afterwards.Body.GetProperty("eligible").GetBoolean());
+        Assert.Equal("inventory_not_empty", afterwards.Body.GetProperty("reason").GetString());
+
+        var afterImport = await ValidateAsync(owner, inventoryId, csv);
+        Assert.Equal(HttpStatusCode.Conflict, afterImport.Status);
+        Assert.Equal("inventory_not_empty", afterImport.Body.GetProperty("code").GetString());
 
         // 13. Retired reference data is unknown to import too.
         var second = await ConversationTestClient.SignInAsync(
@@ -7823,40 +7871,40 @@ Create `tests/MultiChannelAgent.IntegrationTests/InitialImportScenario.cs`, foll
             ConversationTestClient.CreateHttpsClient(factory), "Third Viewer");
         await second.GrantMembershipAsync(emptyInventoryId, viewer.ParticipantIdentifier, "Viewer");
 
-        Assert.Equal(HttpStatusCode.NotFound, (await EligibilityAsync(viewer, emptyInventoryId)).Status);
-        Assert.Equal(HttpStatusCode.NotFound, (await ValidateAsync(viewer, emptyInventoryId, csv)).Status);
+        AssertUndisclosed(await EligibilityAsync(viewer, emptyInventoryId));
+        AssertUndisclosed(await ValidateAsync(viewer, emptyInventoryId, csv));
 
         // 15. A stranger sees exactly the same 404 for an Inventory they are not a member of.
         var stranger = await ConversationTestClient.SignInAsync(
             ConversationTestClient.CreateHttpsClient(factory), "Fourth Stranger");
-        Assert.Equal(HttpStatusCode.NotFound, (await EligibilityAsync(stranger, inventoryId)).Status);
+
+        AssertUndisclosed(await EligibilityAsync(stranger, inventoryId));
+        AssertUndisclosed(await ValidateAsync(stranger, inventoryId, csv));
     }
 ```
 
-Add the helpers this uses in the same file, following the shipped scenario's style: `Header` (the five column names joined by commas), `EligibilityAsync`, `ValidateAsync` (multipart), `ConfirmAsync`, `RejectAsync` (all returning a `(HttpStatusCode Status, JsonElement Body)` tuple), `ProposalId`, `Token`, `ErrorCodes`, `CountStockAsync`, `CountPendingImportsAsync`, `CountRawUploadsAsync`, `CountAuditsAsync`, `LedgerDigestAsync`, `AssertStockAsync`, plus `CompleteAsync`, `OutcomeAsync`, `TokenOf`, and `ProcessPendingAsync` copied from `ReferenceAdministrationScenario.cs` for the conversational steps that create and retire reference data.
+Add the helpers this uses in the same file, following the shipped scenario's style: `Header` (the five column names joined by commas), `EligibilityAsync`, `ValidateAsync` (multipart), `ConfirmAsync`, `RejectAsync` (all returning a `(HttpStatusCode Status, JsonElement Body)` tuple), `ProposalId`, `Token`, `ErrorCodes`, `AssertEntry`, `AssertUndisclosed`, `CountStockAsync`, `CountPendingImportsAsync`, `CountRawUploadsAsync`, `RawUploadOwnersAsync`, `ImportStatusAsync`, `CountAuditsAsync`, `LedgerDigestAsync`, `AssertStockAsync`, plus `CompleteAsync`, `OutcomeAsync`, `TokenOf`, and `ProcessPendingAsync` copied from `ReferenceAdministrationScenario.cs` for the conversational steps that create and retire reference data.
+
+Two details the tuple has to get right. A refusal that discloses nothing carries no body at all, so the reader has to tolerate an empty one and yield `JsonValueKind.Undefined` rather than throw - which is exactly what `AssertUndisclosed` then asserts, because a body of any kind would be the difference between "not yours", "not yours to import into", and "not there". And `AssertStockAsync` needs the `includeZero` parameter its `ReferenceAdministrationScenario` counterpart does not: the zero-quantity entry is a Stock Entry, and the on-hand default projection deliberately omits it.
 
 - [ ] **Step 2: Write both runners**
 
-Create `tests/MultiChannelAgent.IntegrationTests/InitialImportSqliteTests.cs`:
+Create `tests/MultiChannelAgent.IntegrationTests/InitialImportSqliteTests.cs`, following the shipped
+`ReferenceAdministrationSqliteTests` rather than inventing a lifecycle for a factory only one test uses:
 
 ```csharp
 namespace MultiChannelAgent.IntegrationTests;
 
 /// <summary>The Docker-free twin of the SQL-backed Initial Import scenario, so the protocol is proven on every machine.</summary>
-public sealed class InitialImportSqliteTests : IAsyncLifetime
+public sealed class InitialImportSqliteTests
 {
-    private SqliteWebApplicationFactory? _factory;
-
-    public Task InitializeAsync()
-    {
-        _factory = new SqliteWebApplicationFactory();
-        return Task.CompletedTask;
-    }
-
-    public Task DisposeAsync() => _factory!.DisposeAsync().AsTask();
-
     [Fact]
-    public Task Initial_import_works_end_to_end() => InitialImportScenario.RunAsync(_factory!);
+    public async Task Initial_import_works_end_to_end()
+    {
+        await using var factory = new SqliteWebApplicationFactory();
+
+        await InitialImportScenario.RunAsync(factory);
+    }
 }
 ```
 
@@ -7867,7 +7915,10 @@ namespace MultiChannelAgent.IntegrationTests.Inventories;
 
 /// <summary>
 /// The whole Initial Import protocol against real SQL Server under production migrations - the
-/// highest required correctness seam in this repository.
+/// highest required correctness seam in this repository. Its SQLite twin proves the same externally
+/// observable behavior without Docker; this one additionally proves the production schema, the
+/// filtered unique index that admits one pending import per Participant and Inventory, the
+/// serializable supersede, and the atomic write that creates every Stock Entry or none.
 /// </summary>
 public sealed class InitialImportSqlScenarioTests : SqlIntegrationTestBase
 {
@@ -7886,10 +7937,26 @@ public sealed class InitialImportSqlScenarioTests : SqlIntegrationTestBase
 Run: `dotnet test tests/MultiChannelAgent.IntegrationTests/MultiChannelAgent.IntegrationTests.csproj --filter "FullyQualifiedName~InitialImportSqliteTests"`
 Expected: FAIL first, on whichever assertion the wiring has not satisfied yet; then PASS once every task above is in place. Fix the wiring, never the assertion - each one is an acceptance criterion.
 
+The one exception is an assertion that contradicts an approved earlier task, which is a stale
+expectation rather than a missing behavior. This sketch originally expected step 3 to report only
+`["missing_name", "invalid_quantity", "unknown_unit", "unknown_location"]`, and explained that "row-level
+problems are answered before equivalence is even considered". Run against the shipped service, it
+failed with `conflicting_notes` appended - and correctly so: Task 8 shipped the merge phase running
+over whatever resolved precisely so that "a Participant fixing an unknown Unit on line 4 deserves to
+hear about a Notes conflict on lines 9 and 12 in the same answer rather than on a second upload." The
+expectation and its rationale above are corrected to the approved contract; the service is untouched.
+
 - [ ] **Step 4: Run the SQL-backed run**
 
 Run: `REQUIRE_DOCKER_TESTS=true dotnet test tests/MultiChannelAgent.IntegrationTests/MultiChannelAgent.IntegrationTests.csproj --filter "FullyQualifiedName~InitialImportSqlScenarioTests"`
-Expected: PASS. If Docker is unavailable locally, confirm it reports as skipped rather than failed and say so plainly in the commit message; CI runs it with `REQUIRE_DOCKER_TESTS=true`.
+Expected: PASS.
+
+Without a Docker daemon that variable must not be set locally: `SqlIntegrationTestBase` treats
+`REQUIRE_DOCKER_TESTS=true` plus an unreachable daemon as the CI contract and throws rather than
+skipping, which is exactly the guarantee that keeps this suite honest and must not be weakened. So run
+it locally as `dotnet test tests/MultiChannelAgent.IntegrationTests/MultiChannelAgent.IntegrationTests.csproj --filter "FullyQualifiedName~InitialImportSqlScenarioTests"`,
+confirm it reports as skipped rather than failed, and say so plainly in the commit message; CI runs it
+with `REQUIRE_DOCKER_TESTS=true`, where a missing daemon fails the build.
 
 - [ ] **Step 5: Commit**
 
