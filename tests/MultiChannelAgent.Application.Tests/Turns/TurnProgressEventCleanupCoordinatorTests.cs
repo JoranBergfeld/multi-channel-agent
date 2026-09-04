@@ -47,7 +47,7 @@ public sealed class TurnProgressEventCleanupCoordinatorTests
 
         harness.Time.SetUtcNow(Now.Add(TurnProgressEvent.Retention).AddMinutes(1));
 
-        Assert.Equal(2, await harness.Coordinator.CleanupAsync(CancellationToken.None));
+        Assert.Equal(2, await harness.Coordinator.PurgeExpiredProgressAsync(CancellationToken.None));
         Assert.Empty(await harness.Progress.ReadAsync(expiredOne, CancellationToken.None));
         Assert.Empty(await harness.Progress.ReadAsync(expiredTwo, CancellationToken.None));
         Assert.Single(await harness.Progress.ReadAsync(retained, CancellationToken.None));
@@ -63,7 +63,7 @@ public sealed class TurnProgressEventCleanupCoordinatorTests
 
         harness.Time.SetUtcNow(Now.Add(TurnProgressEvent.Retention).Subtract(TimeSpan.FromMinutes(1)));
 
-        Assert.Equal(0, await harness.Coordinator.CleanupAsync(CancellationToken.None));
+        Assert.Equal(0, await harness.Coordinator.PurgeExpiredProgressAsync(CancellationToken.None));
         var events = await harness.Progress.ReadAsync(turnId, CancellationToken.None);
         Assert.Single(events);
         Assert.Equal(TurnEventKind.Processing, events[0].Kind);
@@ -82,7 +82,7 @@ public sealed class TurnProgressEventCleanupCoordinatorTests
             "turn-progress-cleanup", "another-replica", TimeSpan.FromSeconds(30), CancellationToken.None);
 
         Assert.NotNull(held);
-        Assert.Equal(0, await harness.Coordinator.CleanupAsync(CancellationToken.None));
+        Assert.Equal(0, await harness.Coordinator.PurgeExpiredProgressAsync(CancellationToken.None));
         Assert.Single(await harness.Progress.ReadAsync(turnId, CancellationToken.None));
     }
 }

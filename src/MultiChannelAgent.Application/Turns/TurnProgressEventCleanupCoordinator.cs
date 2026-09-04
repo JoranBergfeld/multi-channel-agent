@@ -18,7 +18,7 @@ public sealed class TurnProgressEventCleanupCoordinator(
     private const string LeaseName = "turn-progress-cleanup";
     private const int MaxBatchSize = 500;
 
-    public async Task<int> CleanupAsync(CancellationToken cancellationToken)
+    public async Task<int> PurgeExpiredProgressAsync(CancellationToken cancellationToken)
     {
         await using var lease = await leaseCoordinator.TryAcquireAsync(
             LeaseName,

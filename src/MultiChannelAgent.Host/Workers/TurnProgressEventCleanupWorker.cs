@@ -4,7 +4,7 @@ using MultiChannelAgent.Application.Turns;
 namespace MultiChannelAgent.Host.Workers;
 
 /// <summary>
-/// Periodically drives <see cref="TurnProgressEventCleanupCoordinator.CleanupAsync"/>, so retained
+/// Periodically drives <see cref="TurnProgressEventCleanupCoordinator.PurgeExpiredProgressAsync"/>, so retained
 /// progress markers age out on the same retention window as Outcome payloads instead of
 /// accumulating forever. Only progress markers are swept; the Turn, its Outcome, and any Deliveries
 /// are untouched.
@@ -26,7 +26,7 @@ public sealed class TurnProgressEventCleanupWorker(
             {
                 using var scope = scopeFactory.CreateScope();
                 var coordinator = scope.ServiceProvider.GetRequiredService<TurnProgressEventCleanupCoordinator>();
-                await coordinator.CleanupAsync(stoppingToken);
+                await coordinator.PurgeExpiredProgressAsync(stoppingToken);
             }
             catch (Exception ex) when (!stoppingToken.IsCancellationRequested)
             {
