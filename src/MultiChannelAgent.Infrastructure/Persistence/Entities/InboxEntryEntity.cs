@@ -45,6 +45,12 @@ public sealed class InboxEntryEntity
 
     public string? TraceId { get; set; }
 
+    /// <summary>
+    /// Whether the channel reported this utterance as interrupted. Durable because it is part of what
+    /// the Turn <em>is</em>: a Turn re-driven after a restart must still refuse to confirm anything.
+    /// </summary>
+    public bool WasInterrupted { get; set; }
+
     public DateTimeOffset ReceivedAt { get; set; }
 
     /// <summary>
