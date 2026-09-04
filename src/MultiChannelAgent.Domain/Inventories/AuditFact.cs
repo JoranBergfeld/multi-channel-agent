@@ -55,6 +55,9 @@ public enum AuditEventType
 
     /// <summary>An unused Location was withdrawn from matching and assignment after explicit Owner confirmation. Its identity remains.</summary>
     LocationRetired,
+
+    /// <summary>An empty Inventory's starting Stock Entries were created by a confirmed Initial Import. The fact records that it happened, never what was imported.</summary>
+    StockImported,
 }
 
 /// <summary>
