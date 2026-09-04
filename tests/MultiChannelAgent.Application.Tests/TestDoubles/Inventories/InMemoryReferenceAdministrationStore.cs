@@ -51,13 +51,9 @@ public sealed class InMemoryReferenceAdministrationStore(InMemoryConfirmationPro
             return new ReferenceAdministrationStoreResult(ReferenceAdministrationStoreOutcome.AlreadyApplied, already);
         }
 
-        if (command.ConsumesProposalId is { } proposalId
-            && proposalStore is not null
-            && !await proposalStore.SettleAsync(proposalId, ProposalStatus.Confirmed, command.Now, cancellationToken))
-        {
-            return Conflict();
-        }
-
+        // The SQL store does everything below in one transaction, so a conflict discovered after the
+        // proposal was consumed still leaves it exactly as it was. This double has no transaction, so
+        // it refuses before consuming rather than rolling back afterwards.
         foreach (var expected in command.ExpectedVersions)
         {
             if (_versions.TryGetValue((expected.Kind, expected.ReferenceId), out var current)
@@ -82,6 +78,13 @@ public sealed class InMemoryReferenceAdministrationStore(InMemoryConfirmationPro
             {
                 return Conflict();
             }
+        }
+
+        if (command.ConsumesProposalId is { } proposalId
+            && proposalStore is not null
+            && !await proposalStore.SettleAsync(proposalId, ProposalStatus.Confirmed, command.Now, cancellationToken))
+        {
+            return Conflict();
         }
 
         var recorded = new List<RecordedReferenceChange>(command.Changes.Count);

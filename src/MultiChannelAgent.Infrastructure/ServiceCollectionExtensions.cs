@@ -80,7 +80,7 @@ public static class ServiceCollectionExtensions
         services.AddScoped<StockMutationService>();
         services.AddScoped<StockChangeResolver>();
         services.AddScoped<StockChangeSetService>();
-        services.AddScoped<StockConfirmationService>();
+        services.AddScoped<InventoryConfirmationService>();
         services.AddScoped<ConfirmationProposalLifecycle>();
         services.AddScoped<ConfirmationProposalCleanupCoordinator>();
 

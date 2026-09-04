@@ -20,7 +20,7 @@ public sealed class StockToolDispatcher(
     StockFindingService findingService,
     StockMutationService mutationService,
     StockChangeSetService changeSetService,
-    StockConfirmationService confirmationService) : IToolDispatcher
+    InventoryConfirmationService confirmationService) : IToolDispatcher
 {
     public const string ListStockToolName = "list_stock";
     public const string FindStockToolName = "find_stock";
@@ -566,18 +566,24 @@ public sealed class StockToolDispatcher(
         return ToDecision(result);
     }
 
-    private static ModelDecision ToDecision(StockConfirmationResult result) => result.Kind switch
+    private static ModelDecision ToDecision(InventoryConfirmationResult result) => result.Kind switch
     {
-        StockConfirmationResultKind.Completed => Completed(
+        InventoryConfirmationResultKind.Completed when result.Applied is { } applied => Completed(
             "completed",
-            SummarizeChanges(result.Applied!),
-            JsonSerializer.Serialize(new StockChangesPayload(1, "stock_changes", result.Applied!.Changes), PayloadOptions)),
-        StockConfirmationResultKind.Rejected => Semantic(
+            SummarizeChanges(applied),
+            JsonSerializer.Serialize(new StockChangesPayload(1, "stock_changes", applied.Changes), PayloadOptions)),
+
+        // A confirmed administration proposal is answered by the reference dispatcher's own shaping,
+        // reached through the router; a confirmation that executed one is reported here only as the
+        // completed fact it is, because this dispatcher owns no reference vocabulary.
+        InventoryConfirmationResultKind.Completed => Semantic(
+            OutcomeCategory.Completed, "completed", "That change was applied."),
+        InventoryConfirmationResultKind.Rejected => Semantic(
             OutcomeCategory.Completed, "rejected", "That change was not made, and nothing was changed."),
-        StockConfirmationResultKind.NotFound => Semantic(
+        InventoryConfirmationResultKind.NotFound => Semantic(
             OutcomeCategory.NotFound, result.Code, "There is nothing waiting for your confirmation here."),
-        StockConfirmationResultKind.Conflict => Semantic(OutcomeCategory.Conflict, result.Code, ConfirmationConflictSummary(result.Code)),
-        StockConfirmationResultKind.Invalid => Semantic(OutcomeCategory.Invalid, result.Code, InvalidConfirmationSummary(result.Code)),
+        InventoryConfirmationResultKind.Conflict => Semantic(OutcomeCategory.Conflict, result.Code, ConfirmationConflictSummary(result.Code)),
+        InventoryConfirmationResultKind.Invalid => Semantic(OutcomeCategory.Invalid, result.Code, InvalidConfirmationSummary(result.Code)),
         _ => Semantic(OutcomeCategory.Forbidden, "forbidden", "That request could not be completed."),
     };
 

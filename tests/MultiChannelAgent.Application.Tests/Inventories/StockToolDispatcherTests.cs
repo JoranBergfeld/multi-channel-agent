@@ -74,7 +74,8 @@ public class StockToolDispatcherTests
             new StockMutationService(stockStore, mutationStore, referenceStore, authorizationService),
             new StockChangeSetService(
                 new StockChangeResolver(stockStore, referenceStore), changeSetStore, proposalStore, authorizationService),
-            new StockConfirmationService(proposalStore, changeSetStore, authorizationService));
+            new InventoryConfirmationService(
+                proposalStore, changeSetStore, new InMemoryReferenceAdministrationStore(proposalStore), authorizationService));
 
         return new DispatcherHarness(dispatcher, stockStore, mutationStore, proposalStore, changeSetStore, referenceStore);
     }

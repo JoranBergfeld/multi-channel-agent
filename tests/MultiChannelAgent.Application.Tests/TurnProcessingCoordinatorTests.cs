@@ -69,7 +69,8 @@ public class TurnProcessingCoordinatorTests
                 stockStore, new InMemoryStockMutationStore(stockStore), referenceStore, authorizationService),
             new StockChangeSetService(
                 new StockChangeResolver(stockStore, referenceStore), changeSetStore, proposalStore, authorizationService),
-            new StockConfirmationService(proposalStore, changeSetStore, authorizationService));
+            new InventoryConfirmationService(
+                proposalStore, changeSetStore, new InMemoryReferenceAdministrationStore(proposalStore), authorizationService));
 
         var coordinator = new TurnProcessingCoordinator(
             inbox,
