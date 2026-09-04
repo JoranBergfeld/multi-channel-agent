@@ -6,13 +6,16 @@ namespace MultiChannelAgent.Application.Turns;
 
 /// <summary>
 /// Claims durably accepted Turns and drives them to a terminal <see cref="Outcome"/> through the
-/// scripted model boundary, atomically recording the Outcome, any requested Deliveries, and inbox
-/// completion via <see cref="ITurnResultStore"/>. Runs under an exclusive lease so multiple hosted
-/// replicas never process the same Turn twice, and exposes a deterministic one-shot operation so
-/// tests can drive processing without timing a background loop. Per-ChannelConversation FIFO is
-/// owned by <see cref="IInboxStore.ClaimPendingAsync"/>, which only ever offers a conversation's
-/// head; this coordinator additionally stops offering a conversation any further Turn for the rest of
-/// the pass once its head fails, while unrelated ChannelConversations proceed independently.
+/// scripted model boundary. Before the first model call it publishes a durable Processing courtesy
+/// event through <see cref="ITurnProgressEventStore"/>; that write is intentionally separate from the
+/// terminal result transaction, and exact Turn/sequence idempotency makes retries harmless. It then
+/// atomically records the Outcome, any requested Deliveries, and inbox completion via
+/// <see cref="ITurnResultStore"/>. Runs under an exclusive lease so multiple hosted replicas never
+/// process the same Turn twice, and exposes a deterministic one-shot operation so tests can drive
+/// processing without timing a background loop. Per-ChannelConversation FIFO is owned by
+/// <see cref="IInboxStore.ClaimPendingAsync"/>, which only ever offers a conversation's head; this
+/// coordinator additionally stops offering a conversation any further Turn for the rest of the pass
+/// once its head fails, while unrelated ChannelConversations proceed independently.
 ///
 /// It also reconciles pending confirmation state against the freshly assembled trusted context before
 /// the Turn is interpreted, so an interrupted Turn, a switched Active Inventory, or lost access can
@@ -21,6 +24,7 @@ namespace MultiChannelAgent.Application.Turns;
 public sealed class TurnProcessingCoordinator(
     IInboxStore inboxStore,
     ITurnResultStore turnResultStore,
+    ITurnProgressEventStore turnProgressEventStore,
     ILeaseCoordinator leaseCoordinator,
     IModelBoundary modelBoundary,
     TurnExecutionContextFactory executionContextFactory,
@@ -119,6 +123,8 @@ public sealed class TurnProcessingCoordinator(
         // Inventory, or lost access can never leave a confirmable proposal behind for this Turn - or
         // any later one - to trigger.
         await proposalLifecycle.ReconcileAsync(executionContext, now, cancellationToken);
+
+        await turnProgressEventStore.AppendAsync(TurnProgressEvent.Processing(turn.TurnId, now));
 
         var proposal = await modelBoundary.ProposeAsync(
             turn,

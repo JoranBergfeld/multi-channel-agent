@@ -38,13 +38,31 @@ public class TurnProcessingCoordinatorTests
         }
     }
 
+    private sealed class ProgressObservingModelBoundary(
+        IModelBoundary inner,
+        InMemoryTurnProgressEventStore progressStore) : IModelBoundary
+    {
+        public Task<ModelProposal> ProposeAsync(
+            InboundTurn turn,
+            ModelInvocationContext context,
+            CancellationToken cancellationToken)
+        {
+            progressStore.ModelWasCalled = true;
+            return inner.ProposeAsync(turn, context, cancellationToken);
+        }
+    }
+
     private static (TurnProcessingCoordinator Coordinator, InMemoryInboxStore Inbox, InMemoryOutcomeStore Outcomes, InMemoryDeliveryStore Deliveries, InMemoryTurnResultStore ResultStore, InMemoryFoundryConversationBindingStore Bindings)
-        CreateCoordinator(TimeProvider timeProvider, IModelBoundary? modelBoundary = null)
+        CreateCoordinator(
+            TimeProvider timeProvider,
+            IModelBoundary? modelBoundary = null,
+            InMemoryTurnProgressEventStore? progressStore = null)
     {
         var inbox = new InMemoryInboxStore();
         var outcomes = new InMemoryOutcomeStore();
         var deliveries = new InMemoryDeliveryStore();
         var resultStore = new InMemoryTurnResultStore(inbox, outcomes, deliveries);
+        progressStore ??= new InMemoryTurnProgressEventStore();
         var leases = new InMemoryLeaseCoordinator(timeProvider);
 
         // These tests never exercise the tool-dispatch path (their content is always "hello" or the
@@ -75,8 +93,9 @@ public class TurnProcessingCoordinatorTests
         var coordinator = new TurnProcessingCoordinator(
             inbox,
             resultStore,
+            progressStore,
             leases,
-            modelBoundary ?? new ScriptedModelBoundary(),
+            new ProgressObservingModelBoundary(modelBoundary ?? new ScriptedModelBoundary(), progressStore),
             executionContextFactory,
             new ConfirmationProposalLifecycle(new InMemoryConfirmationProposalStore()),
             toolDispatcher,
@@ -104,6 +123,42 @@ public class TurnProcessingCoordinatorTests
         var delivery = Assert.Single(deliveries.Deliveries);
         Assert.Equal(turn.TurnId, delivery.TurnId);
         Assert.Equal(DeliveryStatus.Pending, delivery.Status);
+    }
+
+    [Fact]
+    public async Task Processing_publishes_one_fixed_processing_event_before_the_first_model_call()
+    {
+        var timeProvider = new FakeTimeProvider(Now);
+        var progressStore = new InMemoryTurnProgressEventStore();
+        var (coordinator, inbox, _, _, _, _) = CreateCoordinator(timeProvider, progressStore: progressStore);
+        var turn = TestTurns.Text("native-1", SomeParticipant, "conversation-1", "hello", null, Now, null);
+        await inbox.AcceptAsync(turn, CancellationToken.None);
+
+        await coordinator.ProcessPendingAsync(CancellationToken.None);
+
+        var progressEvent = Assert.Single(await progressStore.ReadAsync(turn.TurnId));
+        Assert.Equal(TurnEventSequence.Processing, progressEvent.Sequence);
+        Assert.Equal(TurnEventKind.Processing, progressEvent.Kind);
+        Assert.Equal(Now, progressEvent.OccurredAt);
+        Assert.True(progressStore.ModelWasCalled);
+        Assert.True(progressStore.WasAppendedBeforeFirstModelCall);
+    }
+
+    [Fact]
+    public async Task Retrying_after_terminal_recording_fails_keeps_one_processing_event()
+    {
+        var timeProvider = new FakeTimeProvider(Now);
+        var progressStore = new InMemoryTurnProgressEventStore();
+        var (coordinator, inbox, _, _, resultStore, _) = CreateCoordinator(timeProvider, progressStore: progressStore);
+        var turn = TestTurns.Text("native-1", SomeParticipant, "conversation-1", "hello", null, Now, null);
+        await inbox.AcceptAsync(turn, CancellationToken.None);
+        resultStore.FailNextRecord = true;
+
+        Assert.Equal(0, await coordinator.ProcessPendingAsync(CancellationToken.None));
+        Assert.Equal(1, await coordinator.ProcessPendingAsync(CancellationToken.None));
+
+        var progressEvent = Assert.Single(await progressStore.ReadAsync(turn.TurnId));
+        Assert.Equal(TurnEventSequence.Processing, progressEvent.Sequence);
     }
 
     [Fact]
