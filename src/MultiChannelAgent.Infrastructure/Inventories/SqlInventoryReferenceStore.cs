@@ -69,4 +69,68 @@ public sealed class SqlInventoryReferenceStore(MultiChannelAgentDbContext db) : 
             .Where(l => l.InventoryId == inventoryId.Value && l.Id == locationId.Value && l.RetiredAt == null)
             .Select(l => l.Name)
             .FirstOrDefaultAsync(cancellationToken);
+
+    /// <summary>
+    /// One query for every distinct term Initial Import names, joining active <c>UnitTerms</c> to
+    /// their active owning <c>Units</c>. The <c>Contains</c> call is wrapped in <see cref="EF.Parameter{T}"/>
+    /// so it always translates to <see cref="ParameterTranslationMode.Parameter"/> - one array-like
+    /// query parameter unnested by the database (<c>OPENJSON</c> on SQL Server, <c>json_each</c> on
+    /// SQLite) - regardless of whatever <see cref="ParameterTranslationMode"/> the host configures as
+    /// its default. EF Core 10 defaults that global setting to
+    /// <see cref="ParameterTranslationMode.MultipleParameters"/> - one SQL parameter per term - which
+    /// is exactly the per-term cost this batching exists to remove, and which SQL Server's roughly
+    /// 2,100-parameter ceiling would outright reject for a 5,000-term file. Forcing
+    /// <see cref="ParameterTranslationMode.Parameter"/> here keeps this one round trip, and one
+    /// parameter, safe on SQL Server at the full 5,000-row bound, independent of any global default.
+    /// </summary>
+    public async Task<IReadOnlyDictionary<string, ResolvedUnitReference>> ResolveUnitsAsync(
+        InventoryId inventoryId, IReadOnlyCollection<string> normalizedTerms, CancellationToken cancellationToken)
+    {
+        if (normalizedTerms.Count == 0)
+        {
+            return new Dictionary<string, ResolvedUnitReference>(StringComparer.Ordinal);
+        }
+
+        var rows = await db.UnitTerms
+            .AsNoTracking()
+            .Where(t =>
+                t.InventoryId == inventoryId.Value
+                && t.RetiredAt == null
+                && EF.Parameter(normalizedTerms).Contains(t.NormalizedTerm))
+            .Join(
+                db.Units.AsNoTracking().Where(u => u.InventoryId == inventoryId.Value && u.RetiredAt == null),
+                t => t.UnitId,
+                u => u.Id,
+                (t, u) => new { t.NormalizedTerm, UnitId = u.Id, u.CanonicalName })
+            .ToListAsync(cancellationToken);
+
+        return rows.ToDictionary(
+            row => row.NormalizedTerm,
+            row => new ResolvedUnitReference(new UnitId(row.UnitId), row.CanonicalName),
+            StringComparer.Ordinal);
+    }
+
+    /// <summary>One query for every distinct Location name Initial Import names, active only. See <see cref="ResolveUnitsAsync"/> for why the collection is wrapped in <see cref="EF.Parameter{T}"/>.</summary>
+    public async Task<IReadOnlyDictionary<string, ResolvedLocationReference>> ResolveLocationsAsync(
+        InventoryId inventoryId, IReadOnlyCollection<string> normalizedNames, CancellationToken cancellationToken)
+    {
+        if (normalizedNames.Count == 0)
+        {
+            return new Dictionary<string, ResolvedLocationReference>(StringComparer.Ordinal);
+        }
+
+        var rows = await db.Locations
+            .AsNoTracking()
+            .Where(l =>
+                l.InventoryId == inventoryId.Value
+                && l.RetiredAt == null
+                && EF.Parameter(normalizedNames).Contains(l.NormalizedName))
+            .Select(l => new { l.NormalizedName, l.Id, l.Name })
+            .ToListAsync(cancellationToken);
+
+        return rows.ToDictionary(
+            row => row.NormalizedName,
+            row => new ResolvedLocationReference(new LocationId(row.Id), row.Name),
+            StringComparer.Ordinal);
+    }
 }

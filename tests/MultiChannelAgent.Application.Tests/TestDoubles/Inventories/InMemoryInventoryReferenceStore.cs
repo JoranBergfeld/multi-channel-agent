@@ -34,6 +34,17 @@ public sealed class InMemoryInventoryReferenceStore : IInventoryReferenceStore
     /// <summary>How many times a Location's display name was looked up. See <see cref="UnitCanonicalNameLookupCount"/>.</summary>
     public int LocationNameLookupCount { get; private set; }
 
+    /// <summary>
+    /// How many times <see cref="ResolveUnitsAsync"/> actually reached this store - not how many
+    /// terms it resolved - so a caller's claim of "one batch call for a whole file" can be proven. An
+    /// empty request never increments this: it is answered without reaching the store at all, exactly
+    /// like the real one skips the database.
+    /// </summary>
+    public int UnitBatchCallCount { get; private set; }
+
+    /// <summary>How many times <see cref="ResolveLocationsAsync"/> actually reached this store. See <see cref="UnitBatchCallCount"/>.</summary>
+    public int LocationBatchCallCount { get; private set; }
+
     /// <summary>Withdraws a Unit from resolution exactly as retiring it does in SQL: it becomes as unknown as one that never existed.</summary>
     public void RetireUnit(InventoryId inventoryId, UnitId unitId) => _retiredUnits.Add((inventoryId, unitId));
 
@@ -114,5 +125,55 @@ public sealed class InMemoryInventoryReferenceStore : IInventoryReferenceStore
                 && !_retiredLocations.Contains((inventoryId, resolved))
                     ? resolved
                     : null);
+    }
+
+    public Task<IReadOnlyDictionary<string, ResolvedUnitReference>> ResolveUnitsAsync(
+        InventoryId inventoryId, IReadOnlyCollection<string> normalizedTerms, CancellationToken cancellationToken)
+    {
+        if (normalizedTerms.Count == 0)
+        {
+            return Task.FromResult<IReadOnlyDictionary<string, ResolvedUnitReference>>(
+                new Dictionary<string, ResolvedUnitReference>(StringComparer.Ordinal));
+        }
+
+        UnitBatchCallCount++;
+
+        var result = new Dictionary<string, ResolvedUnitReference>(StringComparer.Ordinal);
+        foreach (var term in normalizedTerms)
+        {
+            if (_unitTerms.TryGetValue((inventoryId, term), out var unitId)
+                && !_retiredUnits.Contains((inventoryId, unitId))
+                && _unitCanonicalNames.TryGetValue((inventoryId, unitId), out var canonicalName))
+            {
+                result[term] = new ResolvedUnitReference(unitId, canonicalName);
+            }
+        }
+
+        return Task.FromResult<IReadOnlyDictionary<string, ResolvedUnitReference>>(result);
+    }
+
+    public Task<IReadOnlyDictionary<string, ResolvedLocationReference>> ResolveLocationsAsync(
+        InventoryId inventoryId, IReadOnlyCollection<string> normalizedNames, CancellationToken cancellationToken)
+    {
+        if (normalizedNames.Count == 0)
+        {
+            return Task.FromResult<IReadOnlyDictionary<string, ResolvedLocationReference>>(
+                new Dictionary<string, ResolvedLocationReference>(StringComparer.Ordinal));
+        }
+
+        LocationBatchCallCount++;
+
+        var result = new Dictionary<string, ResolvedLocationReference>(StringComparer.Ordinal);
+        foreach (var name in normalizedNames)
+        {
+            if (_locationNames.TryGetValue((inventoryId, name), out var locationId)
+                && !_retiredLocations.Contains((inventoryId, locationId))
+                && _locationDisplayNames.TryGetValue((inventoryId, locationId), out var displayName))
+            {
+                result[name] = new ResolvedLocationReference(locationId, displayName);
+            }
+        }
+
+        return Task.FromResult<IReadOnlyDictionary<string, ResolvedLocationReference>>(result);
     }
 }

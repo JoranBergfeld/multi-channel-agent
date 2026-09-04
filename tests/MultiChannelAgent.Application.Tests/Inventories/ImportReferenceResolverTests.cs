@@ -156,11 +156,12 @@ public class ImportReferenceResolverTests
 
         Assert.Empty(result.Errors);
         Assert.Equal(50, result.Rows.Count);
-        Assert.Equal(1, _references.UnitResolutionCount);
 
-        // Identity resolution being cached is not enough on its own: a refactor could still cache only
-        // the UnitId and make one display-name round trip per row. This proves both are bounded.
-        Assert.Equal(1, _references.UnitCanonicalNameLookupCount);
+        // The import path never makes a per-term round trip at all any more - not even a cached one -
+        // it resolves every distinct term of a whole file in one batch call.
+        Assert.Equal(0, _references.UnitResolutionCount);
+        Assert.Equal(0, _references.UnitCanonicalNameLookupCount);
+        Assert.Equal(1, _references.UnitBatchCallCount);
     }
 
     [Fact]
@@ -175,8 +176,9 @@ public class ImportReferenceResolverTests
 
         Assert.Empty(result.Errors);
         Assert.Equal(50, result.Rows.Count);
-        Assert.Equal(1, _references.LocationResolutionCount);
-        Assert.Equal(1, _references.LocationNameLookupCount);
+        Assert.Equal(0, _references.LocationResolutionCount);
+        Assert.Equal(0, _references.LocationNameLookupCount);
+        Assert.Equal(1, _references.LocationBatchCallCount);
     }
 
     [Fact]
@@ -188,7 +190,8 @@ public class ImportReferenceResolverTests
         var result = await ResolveAsync(rows);
 
         Assert.Equal(50, result.Errors.Count);
-        Assert.Equal(1, _references.UnitResolutionCount);
+        Assert.Equal(0, _references.UnitResolutionCount);
+        Assert.Equal(1, _references.UnitBatchCallCount);
 
         // The resolver's own suggestion cache must also collapse the same normalized term to one
         // lookup, not just the reference-identity cache: a file naming one unknown Unit five thousand
@@ -207,7 +210,8 @@ public class ImportReferenceResolverTests
         var result = await ResolveAsync(rows);
 
         Assert.Equal(50, result.Errors.Count);
-        Assert.Equal(1, _references.LocationResolutionCount);
+        Assert.Equal(0, _references.LocationResolutionCount);
+        Assert.Equal(1, _references.LocationBatchCallCount);
         Assert.Equal(1, _catalog.SuggestionCount);
     }
 
@@ -222,8 +226,9 @@ public class ImportReferenceResolverTests
 
         Assert.Empty(result.Errors);
         Assert.Equal(4, result.Rows.Count);
-        Assert.Equal(1, _references.UnitResolutionCount);
-        Assert.Equal(1, _references.UnitCanonicalNameLookupCount);
+        Assert.Equal(0, _references.UnitResolutionCount);
+        Assert.Equal(0, _references.UnitCanonicalNameLookupCount);
+        Assert.Equal(1, _references.UnitBatchCallCount);
     }
 
     [Fact]
@@ -237,8 +242,9 @@ public class ImportReferenceResolverTests
 
         Assert.Empty(result.Errors);
         Assert.Equal(4, result.Rows.Count);
-        Assert.Equal(1, _references.LocationResolutionCount);
-        Assert.Equal(1, _references.LocationNameLookupCount);
+        Assert.Equal(0, _references.LocationResolutionCount);
+        Assert.Equal(0, _references.LocationNameLookupCount);
+        Assert.Equal(1, _references.LocationBatchCallCount);
     }
 
     [Fact]
@@ -287,6 +293,76 @@ public class ImportReferenceResolverTests
         var row = Assert.Single(result.Rows);
         Assert.Equal(3, row.LineNumber);
         Assert.Equal(_eachId, row.UnitId);
+    }
+
+    [Fact]
+    public async Task Five_thousand_distinct_valid_Units_and_Locations_resolve_in_at_most_one_batch_call_each()
+    {
+        var rows = new ImportRow[5_000];
+        for (var index = 0; index < rows.Length; index++)
+        {
+            var unitId = new UnitId(Guid.NewGuid());
+            var locationId = new LocationId(Guid.NewGuid());
+            var unitName = $"Unit {index}";
+            var locationName = $"Location {index}";
+
+            _references.AddUnit(_inventoryId, unitId, unitName);
+            _references.AddLocation(_inventoryId, locationId, locationName);
+
+            rows[index] = Row(index + 2, unitTerm: unitName, locationName: locationName);
+        }
+
+        var result = await ResolveAsync(rows);
+
+        Assert.Empty(result.Errors);
+        Assert.Equal(5_000, result.Rows.Count);
+
+        // The root-cause fix: one batch call resolves a whole file's distinct terms, not one round
+        // trip per distinct term - so a valid 5,000-row file with 5,000 distinct Units and Locations
+        // costs two calls total, not up to 10,000.
+        Assert.True(_references.UnitBatchCallCount <= 1);
+        Assert.True(_references.LocationBatchCallCount <= 1);
+        Assert.Equal(1, _references.UnitBatchCallCount);
+        Assert.Equal(1, _references.LocationBatchCallCount);
+
+        // No per-term call, cached or otherwise, is ever made from the import path any more.
+        Assert.Equal(0, _references.UnitResolutionCount);
+        Assert.Equal(0, _references.LocationResolutionCount);
+        Assert.Equal(0, _references.UnitCanonicalNameLookupCount);
+        Assert.Equal(0, _references.LocationNameLookupCount);
+    }
+
+    [Fact]
+    public async Task Five_thousand_distinct_unknown_Units_and_Locations_resolve_in_at_most_one_batch_call_each()
+    {
+        var rows = Enumerable.Range(0, 5_000)
+            .Select(index => Row(index + 2, unitTerm: $"unknown-unit-{index}", locationName: $"unknown-location-{index}"))
+            .ToArray();
+
+        var result = await ResolveAsync(suggestionBudget: 0, rows);
+
+        Assert.Empty(result.Rows);
+        Assert.Equal(10_000, result.Errors.Count);
+
+        Assert.True(_references.UnitBatchCallCount <= 1);
+        Assert.True(_references.LocationBatchCallCount <= 1);
+        Assert.Equal(1, _references.UnitBatchCallCount);
+        Assert.Equal(1, _references.LocationBatchCallCount);
+        Assert.Equal(0, _references.UnitResolutionCount);
+        Assert.Equal(0, _references.LocationResolutionCount);
+    }
+
+    [Fact]
+    public async Task An_empty_Location_set_across_the_whole_file_never_reaches_the_Location_batch()
+    {
+        var rows = Enumerable.Range(0, 50).Select(index => Row(index + 2, locationName: null)).ToArray();
+
+        var result = await ResolveAsync(rows);
+
+        Assert.Empty(result.Errors);
+        Assert.Equal(50, result.Rows.Count);
+        Assert.Equal(1, _references.UnitBatchCallCount);
+        Assert.Equal(0, _references.LocationBatchCallCount);
     }
 
     [Fact]

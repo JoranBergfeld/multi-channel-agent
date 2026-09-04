@@ -32,13 +32,14 @@ public sealed record ImportResolutionResult(IReadOnlyList<ResolvedImportRow> Row
 /// implicitly" - and creating one here would be an unreviewed reference-administration act by a
 /// workflow nobody asked to administer references.
 ///
-/// Each distinct term is resolved once and cached for the life of one validation, so a five-thousand
-/// row file with three Units performs three lookups - and a negative result is cached too, so a
-/// five-thousand row file naming one unknown Unit performs one lookup, not five thousand. The cache
-/// key is <see cref="NameNormalization.Normalize"/>, the same fold the underlying store itself
-/// resolves by, so "each", " each ", and "EACH" share one entry rather than three: a raw
-/// case-insensitive key would still miss whenever rows disagree only on internal whitespace. The
-/// cache never outlives the call, so it can never serve a reference that was retired since.
+/// Every row's Unit term and Location name is folded to <see cref="NameNormalization.Normalize"/> and
+/// deduplicated up front, so "each", " each ", and "EACH" collapse to one entry rather than three, and
+/// identity resolution itself is at most one batch call per kind for the whole file - via
+/// <see cref="IInventoryReferenceStore.ResolveUnitsAsync"/> and
+/// <see cref="IInventoryReferenceStore.ResolveLocationsAsync"/> - not one round trip (or two, counting
+/// the display-name lookup) per distinct term. A five-thousand-row file with five thousand distinct
+/// Units used to cost up to ten thousand round trips even with per-term caching; it now costs one.
+/// Neither map outlives the call, so neither can ever serve a reference that was retired since.
 ///
 /// Suggestions are bounded separately from resolution itself: <paramref name="suggestionBudget" />
 /// (see <see cref="ResolveAsync"/>) caps how many distinct unknown terms may ever query
@@ -63,8 +64,28 @@ public sealed class ImportReferenceResolver(IInventoryReferenceStore references,
         ArgumentOutOfRangeException.ThrowIfNegative(suggestionBudget);
         cancellationToken.ThrowIfCancellationRequested();
 
-        var units = new Dictionary<string, (UnitId Id, string CanonicalName)?>(StringComparer.Ordinal);
-        var locations = new Dictionary<string, (LocationId Id, string Name)?>(StringComparer.Ordinal);
+        // Every distinct term/name a whole file names, up front, so identity resolution itself is at
+        // most one batch call per kind - the fix for the root cause this type used to have: per-distinct-
+        // term caching still cost one round trip (two, counting the display-name lookup) per distinct
+        // term, which a 5,000-row file of 5,000 distinct Units turns into up to 10,000 round trips.
+        var unitTerms = new HashSet<string>(StringComparer.Ordinal);
+        var locationNames = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var row in rows)
+        {
+            unitTerms.Add(NameNormalization.Normalize(row.UnitTerm));
+            if (row.LocationName is { } locationName)
+            {
+                locationNames.Add(NameNormalization.Normalize(locationName));
+            }
+        }
+
+        var units = unitTerms.Count == 0
+            ? EmptyUnitMap
+            : await references.ResolveUnitsAsync(inventoryId, unitTerms, cancellationToken);
+        var locations = locationNames.Count == 0
+            ? EmptyLocationMap
+            : await references.ResolveLocationsAsync(inventoryId, locationNames, cancellationToken);
+
         var suggestions = new Dictionary<(ReferenceKind Kind, string Normalized), IReadOnlyList<string>>();
         var budget = new SuggestionBudget(suggestionBudget);
 
@@ -75,17 +96,16 @@ public sealed class ImportReferenceResolver(IInventoryReferenceStore references,
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            var unit = await ResolveUnitAsync(inventoryId, row.UnitTerm, units, cancellationToken);
+            units.TryGetValue(NameNormalization.Normalize(row.UnitTerm), out var unit);
 
             // Location is always checked when the file names one, whatever the Unit's outcome: a row
             // with both an unknown Unit and an unknown Location must report both, so one pass over the
             // file fixes it rather than the Unit first and the Location on a second attempt.
-            (LocationId Id, string Name)? location = null;
+            ResolvedLocationReference? location = null;
             var locationUnknown = false;
             if (row.LocationName is { } locationName)
             {
-                location = await ResolveLocationAsync(inventoryId, locationName, locations, cancellationToken);
-                locationUnknown = location is null;
+                locationUnknown = !locations.TryGetValue(NameNormalization.Normalize(locationName), out location);
             }
 
             if (unit is null)
@@ -113,8 +133,8 @@ public sealed class ImportReferenceResolver(IInventoryReferenceStore references,
                 Name = row.Name,
                 NormalizedName = row.NormalizedName,
                 Quantity = row.Quantity,
-                UnitId = unit.Value.Id,
-                UnitCanonicalName = unit.Value.CanonicalName,
+                UnitId = unit.Id,
+                UnitCanonicalName = unit.CanonicalName,
                 LocationId = location?.Id,
                 LocationName = location?.Name,
                 Note = row.Note,
@@ -124,53 +144,11 @@ public sealed class ImportReferenceResolver(IInventoryReferenceStore references,
         return new ImportResolutionResult(resolved, errors);
     }
 
-    private async Task<(UnitId Id, string CanonicalName)?> ResolveUnitAsync(
-        InventoryId inventoryId,
-        string term,
-        Dictionary<string, (UnitId Id, string CanonicalName)?> cache,
-        CancellationToken cancellationToken)
-    {
-        var key = NameNormalization.Normalize(term);
-        if (cache.TryGetValue(key, out var cached))
-        {
-            return cached;
-        }
+    private static readonly IReadOnlyDictionary<string, ResolvedUnitReference> EmptyUnitMap =
+        new Dictionary<string, ResolvedUnitReference>(StringComparer.Ordinal);
 
-        (UnitId Id, string CanonicalName)? resolved = null;
-
-        if (await references.ResolveUnitAsync(inventoryId, term, cancellationToken) is { } unitId
-            && await references.FindUnitCanonicalNameAsync(inventoryId, unitId, cancellationToken) is { } canonicalName)
-        {
-            resolved = (unitId, canonicalName);
-        }
-
-        cache[key] = resolved;
-        return resolved;
-    }
-
-    private async Task<(LocationId Id, string Name)?> ResolveLocationAsync(
-        InventoryId inventoryId,
-        string name,
-        Dictionary<string, (LocationId Id, string Name)?> cache,
-        CancellationToken cancellationToken)
-    {
-        var key = NameNormalization.Normalize(name);
-        if (cache.TryGetValue(key, out var cached))
-        {
-            return cached;
-        }
-
-        (LocationId Id, string Name)? resolved = null;
-
-        if (await references.ResolveLocationAsync(inventoryId, name, cancellationToken) is { } locationId
-            && await references.FindLocationNameAsync(inventoryId, locationId, cancellationToken) is { } displayName)
-        {
-            resolved = (locationId, displayName);
-        }
-
-        cache[key] = resolved;
-        return resolved;
-    }
+    private static readonly IReadOnlyDictionary<string, ResolvedLocationReference> EmptyLocationMap =
+        new Dictionary<string, ResolvedLocationReference>(StringComparer.Ordinal);
 
     private async Task<ImportReferenceError> UnknownAsync(
         InventoryId inventoryId,
