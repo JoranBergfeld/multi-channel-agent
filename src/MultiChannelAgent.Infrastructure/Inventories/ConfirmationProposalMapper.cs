@@ -72,7 +72,9 @@ internal static class ConfirmationProposalMapper
             proposal.ExpectedAbsences.Select(a => new AbsenceDto(a.NormalizedName, a.UnitId.Value, a.LocationId?.Value)).ToList(), Options),
         CreatedAt = proposal.CreatedAt,
         ExpiresAt = proposal.ExpiresAt,
+        ExpiresAtTicks = proposal.ExpiresAt.UtcTicks,
         SettledAt = null,
+        SettledAtTicks = null,
     };
 
     public static ConfirmationProposal ToDomain(ConfirmationProposalEntity entity)

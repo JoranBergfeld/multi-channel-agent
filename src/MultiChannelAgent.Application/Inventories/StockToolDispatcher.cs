@@ -61,6 +61,13 @@ public sealed class StockToolDispatcher(
                 Domain.Inventories.StockMutationKind.Add, proposal, context, inventoryId, now, cancellationToken),
             RemoveStockToolName => await DispatchMutationAsync(
                 Domain.Inventories.StockMutationKind.Remove, proposal, context, inventoryId, now, cancellationToken),
+            // A Set to zero clears stock, which #31 could only refuse because it had nowhere to put a
+            // proposal. It is decided exactly like any other change, so it takes the change-set path
+            // and comes back as an exact proposal; every other Set keeps the shipped single-mutation
+            // path and its own ledger.
+            SetStockToolName when IsClearingSet(proposal.UntrustedArgs) => await DispatchChangeSetAsync(
+                SingleChange(Domain.Inventories.StockMutationKind.Set, proposal.UntrustedArgs),
+                proposal, context, inventoryId, now, cancellationToken),
             SetStockToolName => await DispatchMutationAsync(
                 Domain.Inventories.StockMutationKind.Set, proposal, context, inventoryId, now, cancellationToken),
             MoveStockToolName => await DispatchChangeSetAsync(
@@ -417,6 +424,15 @@ public sealed class StockToolDispatcher(
         public static NarrowingHintsPayload From(StockNarrowingHints hints) =>
             new(hints.Units, hints.Locations, hints.IncludesUnlocated);
     }
+    /// <summary>
+    /// Whether this Set asks for zero - the one Set that ends up with an empty Stock Entry and so has
+    /// to be confirmed. An unparseable amount is not a clearing Set: it is a malformed one, and the
+    /// shipped path already answers it exactly.
+    /// </summary>
+    private static bool IsClearingSet(IReadOnlyDictionary<string, string> untrustedArgs) =>
+        Domain.Inventories.Quantity.TryParseInvariant(untrustedArgs.GetValueOrDefault("quantity"), out var amount)
+        && !amount.IsOnHand;
+
     /// <summary>
     /// Reads one change from a single-change tool's untrusted arguments. Every value is untrusted
     /// text - a name, an amount, exact Unit/Location references, a destination, a new name. None of

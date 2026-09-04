@@ -37,6 +37,17 @@ public sealed class ConfirmationProposalEntity
 
     public DateTimeOffset ExpiresAt { get; set; }
 
+    /// <summary>
+    /// <see cref="ExpiresAt"/> as UTC ticks. The expiry sweep compares and orders by it, and a
+    /// DateTimeOffset is not comparable on every relational provider this model runs on, so the same
+    /// instant is also kept in a form every provider can compare. It is written once, at insert, from
+    /// that very value.
+    /// </summary>
+    public long ExpiresAtTicks { get; set; }
+
     /// <summary>When it left <c>Pending</c>; null while it is still pending. Retention is measured from here.</summary>
     public DateTimeOffset? SettledAt { get; set; }
+
+    /// <summary><see cref="SettledAt"/> as UTC ticks, for the same reason as <see cref="ExpiresAtTicks"/>.</summary>
+    public long? SettledAtTicks { get; set; }
 }

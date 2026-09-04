@@ -37,9 +37,10 @@ public sealed class ConfirmationProposalEntityConfiguration : IEntityTypeConfigu
         // A token can never back two proposals, whatever else goes wrong.
         builder.HasIndex(e => e.TokenHash).IsUnique();
 
-        // Supports the expiry sweep (pending rows past their lifetime) and the retention sweep.
-        builder.HasIndex(e => new { e.Status, e.ExpiresAt });
-        builder.HasIndex(e => e.SettledAt);
+        // Supports the expiry sweep (pending rows past their lifetime) and the retention sweep. Both
+        // index the tick columns, because those are what the sweeps actually compare and order by.
+        builder.HasIndex(e => new { e.Status, e.ExpiresAtTicks });
+        builder.HasIndex(e => e.SettledAtTicks);
 
         builder.HasOne<InventoryEntity>()
             .WithMany()

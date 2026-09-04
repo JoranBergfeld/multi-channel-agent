@@ -99,6 +99,9 @@ namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
                     b.Property<DateTimeOffset>("ExpiresAt")
                         .HasColumnType("datetimeoffset");
 
+                    b.Property<long>("ExpiresAtTicks")
+                        .HasColumnType("bigint");
+
                     b.Property<Guid>("InventoryId")
                         .HasColumnType("uniqueidentifier");
 
@@ -110,6 +113,9 @@ namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
 
                     b.Property<DateTimeOffset?>("SettledAt")
                         .HasColumnType("datetimeoffset");
+
+                    b.Property<long?>("SettledAtTicks")
+                        .HasColumnType("bigint");
 
                     b.Property<string>("Status")
                         .IsRequired()
@@ -125,7 +131,7 @@ namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
 
                     b.HasIndex("InventoryId");
 
-                    b.HasIndex("SettledAt");
+                    b.HasIndex("SettledAtTicks");
 
                     b.HasIndex("TokenHash")
                         .IsUnique();
@@ -134,7 +140,7 @@ namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
                         .IsUnique()
                         .HasFilter("Status = 'Pending'");
 
-                    b.HasIndex("Status", "ExpiresAt");
+                    b.HasIndex("Status", "ExpiresAtTicks");
 
                     b.ToTable("ConfirmationProposals", (string)null);
                 });

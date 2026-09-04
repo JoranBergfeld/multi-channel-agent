@@ -27,7 +27,9 @@ namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
                     ExpectedAbsencesJson = table.Column<string>(type: "nvarchar(max)", nullable: false),
                     CreatedAt = table.Column<DateTimeOffset>(type: "datetimeoffset", nullable: false),
                     ExpiresAt = table.Column<DateTimeOffset>(type: "datetimeoffset", nullable: false),
-                    SettledAt = table.Column<DateTimeOffset>(type: "datetimeoffset", nullable: true)
+                    ExpiresAtTicks = table.Column<long>(type: "bigint", nullable: false),
+                    SettledAt = table.Column<DateTimeOffset>(type: "datetimeoffset", nullable: true),
+                    SettledAtTicks = table.Column<long>(type: "bigint", nullable: true)
                 },
                 constraints: table =>
                 {
@@ -53,14 +55,14 @@ namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
                 filter: "Status = 'Pending'");
 
             migrationBuilder.CreateIndex(
-                name: "IX_ConfirmationProposals_SettledAt",
+                name: "IX_ConfirmationProposals_SettledAtTicks",
                 table: "ConfirmationProposals",
-                column: "SettledAt");
+                column: "SettledAtTicks");
 
             migrationBuilder.CreateIndex(
-                name: "IX_ConfirmationProposals_Status_ExpiresAt",
+                name: "IX_ConfirmationProposals_Status_ExpiresAtTicks",
                 table: "ConfirmationProposals",
-                columns: new[] { "Status", "ExpiresAt" });
+                columns: new[] { "Status", "ExpiresAtTicks" });
 
             migrationBuilder.CreateIndex(
                 name: "IX_ConfirmationProposals_TokenHash",

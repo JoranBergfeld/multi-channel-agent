@@ -45,7 +45,8 @@ public sealed class SqlConfirmationProposalStore(MultiChannelAgentDbContext db) 
             .ExecuteUpdateAsync(
                 setters => setters
                     .SetProperty(p => p.Status, nameof(ProposalStatus.Superseded))
-                    .SetProperty(p => p.SettledAt, now),
+                    .SetProperty(p => p.SettledAt, now)
+                    .SetProperty(p => p.SettledAtTicks, now.UtcTicks),
                 cancellationToken);
 
         db.ConfirmationProposals.Add(ConfirmationProposalMapper.ToEntity(proposal));
@@ -63,7 +64,10 @@ public sealed class SqlConfirmationProposalStore(MultiChannelAgentDbContext db) 
         var settled = await db.ConfirmationProposals
             .Where(p => p.ProposalId == proposalId.Value && p.Status == PendingStatus)
             .ExecuteUpdateAsync(
-                setters => setters.SetProperty(p => p.Status, status.ToString()).SetProperty(p => p.SettledAt, settledAt),
+                setters => setters
+                    .SetProperty(p => p.Status, status.ToString())
+                    .SetProperty(p => p.SettledAt, settledAt)
+                    .SetProperty(p => p.SettledAtTicks, settledAt.UtcTicks),
                 cancellationToken);
 
         return settled == 1;
@@ -91,30 +95,62 @@ public sealed class SqlConfirmationProposalStore(MultiChannelAgentDbContext db) 
                 && p.ChannelConversationId == channelConversationId
                 && p.Status == PendingStatus)
             .ExecuteUpdateAsync(
-                setters => setters.SetProperty(p => p.Status, status.ToString()).SetProperty(p => p.SettledAt, now),
+                setters => setters
+                    .SetProperty(p => p.Status, status.ToString())
+                    .SetProperty(p => p.SettledAt, now)
+                    .SetProperty(p => p.SettledAtTicks, now.UtcTicks),
                 cancellationToken);
 
     public async Task<int> ExpirePendingBeforeAsync(DateTimeOffset now, int maxRows, CancellationToken cancellationToken)
     {
-        var expiring = db.ConfirmationProposals
-            .Where(p => p.Status == PendingStatus && p.ExpiresAt <= now)
-            .OrderBy(p => p.ExpiresAt)
-            .Take(maxRows);
+        var nowTicks = now.UtcTicks;
 
-        return await expiring.ExecuteUpdateAsync(
-            setters => setters
-                .SetProperty(p => p.Status, nameof(ProposalStatus.Expired))
-                .SetProperty(p => p.SettledAt, now),
-            cancellationToken);
+        // The bounded set is selected first so one pass can never turn into an unbounded update, and
+        // the update itself runs as a single set-based statement rather than by loading proposals.
+        // This is also the portable shape: ordering and bounding inside ExecuteUpdate is not
+        // translatable on every provider.
+        var expiringIds = await db.ConfirmationProposals
+            .AsNoTracking()
+            .Where(p => p.Status == PendingStatus && p.ExpiresAtTicks <= nowTicks)
+            .OrderBy(p => p.ExpiresAtTicks)
+            .Take(maxRows)
+            .Select(p => p.ProposalId)
+            .ToListAsync(cancellationToken);
+
+        if (expiringIds.Count == 0)
+        {
+            return 0;
+        }
+
+        return await db.ConfirmationProposals
+            .Where(p => expiringIds.Contains(p.ProposalId) && p.Status == PendingStatus)
+            .ExecuteUpdateAsync(
+                setters => setters
+                    .SetProperty(p => p.Status, nameof(ProposalStatus.Expired))
+                    .SetProperty(p => p.SettledAt, now)
+                    .SetProperty(p => p.SettledAtTicks, now.UtcTicks),
+                cancellationToken);
     }
 
     public async Task<int> DeleteSettledBeforeAsync(DateTimeOffset cutoff, int maxRows, CancellationToken cancellationToken)
     {
-        var deletable = db.ConfirmationProposals
-            .Where(p => p.SettledAt != null && p.SettledAt <= cutoff)
-            .OrderBy(p => p.SettledAt)
-            .Take(maxRows);
+        var cutoffTicks = cutoff.UtcTicks;
 
-        return await deletable.ExecuteDeleteAsync(cancellationToken);
+        var deletableIds = await db.ConfirmationProposals
+            .AsNoTracking()
+            .Where(p => p.SettledAtTicks != null && p.SettledAtTicks <= cutoffTicks)
+            .OrderBy(p => p.SettledAtTicks)
+            .Take(maxRows)
+            .Select(p => p.ProposalId)
+            .ToListAsync(cancellationToken);
+
+        if (deletableIds.Count == 0)
+        {
+            return 0;
+        }
+
+        return await db.ConfirmationProposals
+            .Where(p => deletableIds.Contains(p.ProposalId))
+            .ExecuteDeleteAsync(cancellationToken);
     }
 }
