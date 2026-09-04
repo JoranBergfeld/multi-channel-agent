@@ -54,6 +54,12 @@ public sealed class MultiChannelAgentDbContext(DbContextOptions<MultiChannelAgen
 
     public DbSet<StockChangeSetEffectEntity> StockChangeSetEffects => Set<StockChangeSetEffectEntity>();
 
+    public DbSet<ImportProposalEntity> ImportProposals => Set<ImportProposalEntity>();
+
+    public DbSet<ImportUploadEntity> ImportUploads => Set<ImportUploadEntity>();
+
+    public DbSet<ImportOperationEntity> ImportOperations => Set<ImportOperationEntity>();
+
     public DbSet<FoundryConversationBindingEntity> FoundryConversationBindings => Set<FoundryConversationBindingEntity>();
 
     /// <summary>
