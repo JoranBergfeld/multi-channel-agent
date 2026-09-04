@@ -21,8 +21,11 @@ public sealed record UnitCatalogRecord(
     /// terms created together share a creation instant, so no store can honestly claim to return them
     /// "in the order they were added". Deciding it once, here, is what makes one Unit read identically
     /// whichever provider answered.
+    ///
+    /// Get-only on purpose: an <c>init</c> accessor would let <c>with { Terms = ... }</c> put an
+    /// unordered set back, which is the one way this invariant could be lost after construction.
     /// </summary>
-    public IReadOnlyList<UnitTerm> Terms { get; init; } =
+    public IReadOnlyList<UnitTerm> Terms { get; } =
     [
         .. Terms
             .OrderByDescending(term => term.IsCanonical)

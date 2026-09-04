@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 using MultiChannelAgent.Application.Inventories;
 using MultiChannelAgent.Domain.Inventories;
 using MultiChannelAgent.Infrastructure.Persistence;
@@ -115,6 +116,41 @@ public sealed class SqlStockMutationStore(MultiChannelAgentDbContext db) : IStoc
 
     private async Task<StockMutationStoreResult> CreateAsync(StockMutationCommand command, CancellationToken cancellationToken)
     {
+        // An explicit transaction, because this write assigns references and must hold them open until
+        // it commits. Everything staged below already committed as one transaction; making it explicit
+        // changes nothing about that and adds the isolation the reference locks need.
+        await using var transaction = await db.Database.BeginTransactionAsync(
+            AssignedReferenceLocks.Isolation, cancellationToken);
+
+        try
+        {
+            return await CreateWithinTransactionAsync(command, transaction, cancellationToken);
+        }
+        catch
+        {
+            // Every fault leaves the same debris, and this DbContext serves a whole batch of Turns.
+            await db.AbandonAsync(transaction);
+            throw;
+        }
+    }
+
+    private async Task<StockMutationStoreResult> CreateWithinTransactionAsync(
+        StockMutationCommand command, IDbContextTransaction transaction, CancellationToken cancellationToken)
+    {
+        // Before any Stock is staged: the Unit and Location this create assigns must still be active,
+        // and must stay active until this commits. The caller resolved them while planning, which may
+        // have been long enough ago for a Retire to have happened since.
+        if (!await AssignedReferenceLocks.TryHoldActiveAsync(
+                db,
+                command.InventoryId,
+                command.NewEntryUnitId is { } unitId ? [unitId] : [],
+                command.NewEntryLocationId is { } locationId ? [locationId] : [],
+                cancellationToken))
+        {
+            await db.AbandonAsync(transaction);
+            return new StockMutationStoreResult(StockMutationStoreOutcome.StateChanged, null);
+        }
+
         // The domain factory validates and normalizes the name and Note, so persistence never sees a
         // value the domain would have refused.
         var entry = StockEntry.Create(
@@ -158,6 +194,7 @@ public sealed class SqlStockMutationStore(MultiChannelAgentDbContext db) : IStoc
         try
         {
             await db.SaveChangesAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
         }
         catch (DbUpdateException)
         {
@@ -165,7 +202,7 @@ public sealed class SqlStockMutationStore(MultiChannelAgentDbContext db) : IStoc
             // Stock Entry first makes this insert fail. Classify that as the state having changed only
             // when the equivalent row genuinely now exists; any other failure is a real fault and must
             // keep propagating rather than being reported as a routine conflict.
-            db.ChangeTracker.Clear();
+            await db.AbandonAsync(transaction);
 
             // The competing writer may have been this very operation, applied by another replica
             // between the lookup above and this save. Re-report what it recorded rather than treating

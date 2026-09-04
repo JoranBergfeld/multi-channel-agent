@@ -63,7 +63,8 @@ public sealed class SqlStockChangeSetStore(MultiChannelAgentDbContext db) : ISto
             return new StockChangeSetStoreResult(StockChangeSetStoreOutcome.AlreadyApplied, already);
         }
 
-        await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+        await using var transaction = await db.Database.BeginTransactionAsync(
+            AssignedReferenceLocks.Isolation, cancellationToken);
 
         try
         {
@@ -86,7 +87,17 @@ public sealed class SqlStockChangeSetStore(MultiChannelAgentDbContext db) : ISto
                 }
             }
 
-            // 2. Lock and verify every touched row, in one globally agreed order. Each statement both
+            // 2. Lock and verify every Unit and Location this set's final states reference, before any
+            //    Stock row is touched, in the order SqlReferenceAdministrationStore uses. A proposal
+            //    may have been reviewed minutes ago; a Retire since then must stop it here rather than
+            //    let it create or place Stock at a reference that no longer exists.
+            if (!await AssignedReferenceLocks.TryHoldActiveAsync(
+                    db, command.InventoryId, ReferencedUnitIds(command), ReferencedLocationIds(command), cancellationToken))
+            {
+                return await RolledBackConflictAsync(transaction);
+            }
+
+            // 3. Lock and verify every touched row, in one globally agreed order. Each statement both
             //    takes the row's exclusive lock and asserts the version the proposal was decided
             //    against, so a row that moved since stops the whole set here.
             foreach (var expected in command.ExpectedVersions.OrderBy(v => v.StockEntryId.Value.ToString("D"), StringComparer.Ordinal))
@@ -105,7 +116,7 @@ public sealed class SqlStockChangeSetStore(MultiChannelAgentDbContext db) : ISto
                 }
             }
 
-            // 3. Verify every expected absence. The Equivalent Stock unique indexes are the real
+            // 4. Verify every expected absence. The Equivalent Stock unique indexes are the real
             //    guarantee; this check turns the common case into a clean conflict rather than an
             //    exception.
             foreach (var absence in command.ExpectedAbsences)
@@ -116,7 +127,7 @@ public sealed class SqlStockChangeSetStore(MultiChannelAgentDbContext db) : ISto
                 }
             }
 
-            // 4. Apply the effects in the order the Participant reviewed.
+            // 5. Apply the effects in the order the Participant reviewed.
             var effects = new List<RecordedStockChangeEffect>(command.Changes.Count);
             foreach (var change in command.Changes.OrderBy(change => change.Order))
             {
@@ -129,7 +140,7 @@ public sealed class SqlStockChangeSetStore(MultiChannelAgentDbContext db) : ISto
                 effects.Add(applied);
             }
 
-            // 5. Ledger, effects, and one minimal semantic audit fact per change.
+            // 6. Ledger, effects, and one minimal semantic audit fact per change.
             db.StockChangeSetOperations.Add(new StockChangeSetOperationEntity
             {
                 OperationId = command.OperationId.Value,
@@ -365,6 +376,24 @@ public sealed class SqlStockChangeSetStore(MultiChannelAgentDbContext db) : ISto
 
         return deleted == 1;
     }
+
+    /// <summary>
+    /// Every Unit a change set's states reference, including the ones only an expected absence names.
+    /// Quantity-only changes contribute their own Stock Entry's Unit too, which costs one read and
+    /// keeps the protocol one rule rather than a per-effect exception list.
+    /// </summary>
+    private static IEnumerable<UnitId> ReferencedUnitIds(StockChangeSetCommand command) =>
+        command.Changes
+            .SelectMany(change => new[] { (UnitId?)change.Source.UnitId, change.Destination?.UnitId })
+            .Concat(command.ExpectedAbsences.Select(absence => (UnitId?)absence.UnitId))
+            .OfType<UnitId>();
+
+    /// <summary>Every Location a change set's states reference. Unlocated is the absence of one, so it contributes nothing.</summary>
+    private static IEnumerable<LocationId> ReferencedLocationIds(StockChangeSetCommand command) =>
+        command.Changes
+            .SelectMany(change => new[] { change.Source.LocationId, change.Destination?.LocationId })
+            .Concat(command.ExpectedAbsences.Select(absence => absence.LocationId))
+            .OfType<LocationId>();
 
     private async Task<StockChangeSetStoreResult> RolledBackConflictAsync(IDbContextTransaction transaction)
     {
