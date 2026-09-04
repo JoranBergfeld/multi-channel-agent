@@ -18,7 +18,10 @@ public sealed record InventorySelectionResult(InventorySelectionOutcome Outcome,
 /// itself, and a Participant who is not (or no longer) a member gets the same non-disclosing outcome
 /// whether the Inventory exists or not.
 /// </summary>
-public sealed class InventorySelectionService(InventoryAuthorizationService authorizationService, IActiveInventorySelectionStore selectionStore)
+public sealed class InventorySelectionService(
+    InventoryAuthorizationService authorizationService,
+    IActiveInventorySelectionStore selectionStore,
+    IConfirmationProposalStore proposalStore)
 {
     public async Task<InventorySelectionResult> SelectAsync(
         ParticipantId participantId,
@@ -32,6 +35,16 @@ public sealed class InventorySelectionService(InventoryAuthorizationService auth
         if (authorization.Outcome != InventoryAuthorizationOutcome.Authorized)
         {
             return new InventorySelectionResult(InventorySelectionOutcome.NotAuthorized, null);
+        }
+
+        // An explicit switch changes what "confirm" would mean in this conversation, so whatever was
+        // pending stops being confirmable. Re-selecting the Inventory that is already active changes
+        // nothing and must not throw the Participant's own proposal away.
+        var previous = await selectionStore.FindAsync(participantId, channelConversationId, cancellationToken);
+        if (previous is not null && previous.InventoryId != inventoryId)
+        {
+            await proposalStore.InvalidatePendingAsync(
+                participantId, channelConversationId, ProposalStatus.InventorySwitched, now, cancellationToken);
         }
 
         await selectionStore.UpsertAsync(

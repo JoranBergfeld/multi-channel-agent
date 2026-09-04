@@ -81,6 +81,7 @@ public static class ServiceCollectionExtensions
         services.AddScoped<StockChangeResolver>();
         services.AddScoped<StockChangeSetService>();
         services.AddScoped<StockConfirmationService>();
+        services.AddScoped<ConfirmationProposalLifecycle>();
 
         return services;
     }

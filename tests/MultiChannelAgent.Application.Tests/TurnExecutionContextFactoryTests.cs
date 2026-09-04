@@ -20,7 +20,7 @@ public class TurnExecutionContextFactoryTests
         var selectionStore = new InMemoryActiveInventorySelectionStore();
         var auditStore = new InMemoryInventoryAuthorizationAuditStore(selectionStore);
         var authorizationService = new InventoryAuthorizationService(inventoryStore, auditStore);
-        var selectionService = new InventorySelectionService(authorizationService, selectionStore);
+        var selectionService = new InventorySelectionService(authorizationService, selectionStore, new InMemoryConfirmationProposalStore());
         var bindingStore = new InMemoryFoundryConversationBindingStore();
 
         return (new TurnExecutionContextFactory(bindingStore, selectionService), inventoryStore, selectionStore);
