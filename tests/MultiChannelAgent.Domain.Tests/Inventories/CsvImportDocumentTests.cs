@@ -232,4 +232,31 @@ public class CsvImportDocumentTests
 
         Assert.Equal(ImportErrorCode.TooManyRows, Assert.Single(Read(builder.ToString()).Errors).Code);
     }
+
+    [Fact]
+    public void A_file_far_beyond_the_row_bound_is_refused_without_materializing_every_record()
+    {
+        // A file of nothing but blank lines is within the byte cap yet holds roughly two million
+        // one-byte records - far more than MaxSourceRows. Reading it must stop once the bound is
+        // crossed rather than build a CsvImportRecord and a List<string> for every one of them: the
+        // gap between "a few megabytes" and "hundreds of megabytes" is the row bound doing its job.
+        var builder = new StringBuilder(Header).Append('\n');
+        while (builder.Length < ImportContract.MaxUploadBytes - 1)
+        {
+            builder.Append('\n');
+        }
+
+        var bytes = Encoding.UTF8.GetBytes(builder.ToString());
+        Assert.True(bytes.Length <= ImportContract.MaxUploadBytes);
+
+        var allocatedBefore = GC.GetAllocatedBytesForCurrentThread();
+        var result = CsvImportDocument.Read(bytes);
+        var allocated = GC.GetAllocatedBytesForCurrentThread() - allocatedBefore;
+
+        Assert.Equal(ImportErrorCode.TooManyRows, Assert.Single(result.Errors).Code);
+        Assert.Null(result.Document);
+        Assert.True(
+            allocated < 10 * 1024 * 1024,
+            $"expected an allocation bounded by MaxSourceRows, but reading allocated {allocated:N0} bytes");
+    }
 }

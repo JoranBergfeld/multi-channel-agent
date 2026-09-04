@@ -75,11 +75,6 @@ public static class CsvImportDocument
             return Failed(ImportErrorCode.EmptyFile, lineNumber: 0, columnIndex: null);
         }
 
-        if (rawRecords.Count - 1 > ImportContract.MaxSourceRows)
-        {
-            return Failed(ImportErrorCode.TooManyRows, lineNumber: 0, columnIndex: null);
-        }
-
         var records = new List<CsvImportRecord>(rawRecords.Count - 1);
         var errors = new List<ImportRowError>();
 
@@ -224,6 +219,17 @@ public static class CsvImportDocument
                 fields.Add(field.ToString());
                 field.Clear();
                 records.Add(new CsvImportRecord(recordLine, fields));
+
+                // The header is one record, so the data-row bound is crossed the instant the file
+                // holds more than MaxSourceRows + 1 records in total. Stop right here: a file that
+                // only gets bigger from here must not be split, and every unread byte after this
+                // point never becomes a CsvImportRecord or a List<string> nobody was going to keep.
+                if (records.Count > ImportContract.MaxSourceRows + 1)
+                {
+                    error = new ImportRowError(ImportErrorCode.TooManyRows, 0, null);
+                    return false;
+                }
+
                 fields = new List<string>(ImportContract.Headers.Count);
                 closedQuote = false;
                 started = false;
@@ -262,6 +268,12 @@ public static class CsvImportDocument
         {
             fields.Add(field.ToString());
             records.Add(new CsvImportRecord(recordLine, fields));
+
+            if (records.Count > ImportContract.MaxSourceRows + 1)
+            {
+                error = new ImportRowError(ImportErrorCode.TooManyRows, 0, null);
+                return false;
+            }
         }
 
         return true;
