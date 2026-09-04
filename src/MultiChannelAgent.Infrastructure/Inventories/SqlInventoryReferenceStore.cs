@@ -91,12 +91,16 @@ public sealed class SqlInventoryReferenceStore(MultiChannelAgentDbContext db) : 
             return new Dictionary<string, ResolvedUnitReference>(StringComparer.Ordinal);
         }
 
+        var ordinalCollation = db.Database.IsSqlServer()
+            ? MultiChannelAgentDbContext.OrdinalSqlServerCollation
+            : "BINARY";
         var rows = await db.UnitTerms
             .AsNoTracking()
             .Where(t =>
                 t.InventoryId == inventoryId.Value
                 && t.RetiredAt == null
-                && EF.Parameter(normalizedTerms).Contains(t.NormalizedTerm))
+                && EF.Parameter(normalizedTerms).Contains(
+                    EF.Functions.Collate(t.NormalizedTerm, ordinalCollation)))
             .Join(
                 db.Units.AsNoTracking().Where(u => u.InventoryId == inventoryId.Value && u.RetiredAt == null),
                 t => t.UnitId,
@@ -119,12 +123,16 @@ public sealed class SqlInventoryReferenceStore(MultiChannelAgentDbContext db) : 
             return new Dictionary<string, ResolvedLocationReference>(StringComparer.Ordinal);
         }
 
+        var ordinalCollation = db.Database.IsSqlServer()
+            ? MultiChannelAgentDbContext.OrdinalSqlServerCollation
+            : "BINARY";
         var rows = await db.Locations
             .AsNoTracking()
             .Where(l =>
                 l.InventoryId == inventoryId.Value
                 && l.RetiredAt == null
-                && EF.Parameter(normalizedNames).Contains(l.NormalizedName))
+                && EF.Parameter(normalizedNames).Contains(
+                    EF.Functions.Collate(l.NormalizedName, ordinalCollation)))
             .Select(l => new { l.NormalizedName, l.Id, l.Name })
             .ToListAsync(cancellationToken);
 

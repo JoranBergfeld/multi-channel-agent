@@ -21,6 +21,8 @@ namespace MultiChannelAgent.IntegrationTests.Inventories;
 /// </summary>
 public sealed class SqlInventoryReferenceStoreBatchTests : IDisposable
 {
+    private const string OrdinalSqliteCollation = "BINARY";
+
     private readonly SqliteConnection _keepAliveConnection;
     private readonly string _connectionString;
     private readonly List<string> _executedCommands = [];
@@ -56,6 +58,7 @@ public sealed class SqlInventoryReferenceStoreBatchTests : IDisposable
             CancellationToken.None);
 
         Assert.Single(_executedCommands);
+        Assert.Contains($"COLLATE {OrdinalSqliteCollation}", _executedCommands[0]);
         Assert.Equal(4, result.Count);
         Assert.Equal(new ResolvedUnitReference(new UnitId(_eachId), "each"), result["each"]);
         Assert.Equal(new ResolvedUnitReference(new UnitId(boxId), "Cardboard Box"), result["bx"]);
@@ -118,6 +121,7 @@ public sealed class SqlInventoryReferenceStoreBatchTests : IDisposable
 
         Assert.Single(_executedCommands);
         Assert.Contains("json_each", _executedCommands[0]);
+        Assert.Contains($"COLLATE {OrdinalSqliteCollation}", _executedCommands[0]);
         Assert.Equal(2, result.Count);
         Assert.Equal(new ResolvedLocationReference(new LocationId(shelfId), "Shelf A"), result["shelf a"]);
         Assert.Equal(new ResolvedLocationReference(new LocationId(bayId), "Bay 9"), result["bay 9"]);

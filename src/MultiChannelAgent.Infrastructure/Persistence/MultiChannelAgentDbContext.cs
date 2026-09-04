@@ -83,7 +83,7 @@ public sealed class MultiChannelAgentDbContext(DbContextOptions<MultiChannelAgen
     /// <see cref="string.CompareOrdinal"/>. SQLite already compares text binarily by default, so it
     /// needs nothing here.
     /// </summary>
-    private const string OrdinalSqlServerCollation = "Latin1_General_100_BIN2";
+    internal const string OrdinalSqlServerCollation = "Latin1_General_100_BIN2";
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
