@@ -82,7 +82,7 @@ public sealed class SqlStockChangeSetStore(MultiChannelAgentDbContext db) : ISto
 
                 if (consumed != 1)
                 {
-                    return await RolledBackConflictAsync(transaction, cancellationToken);
+                    return await RolledBackConflictAsync(transaction);
                 }
             }
 
@@ -101,7 +101,7 @@ public sealed class SqlStockChangeSetStore(MultiChannelAgentDbContext db) : ISto
 
                 if (locked != 1)
                 {
-                    return await RolledBackConflictAsync(transaction, cancellationToken);
+                    return await RolledBackConflictAsync(transaction);
                 }
             }
 
@@ -112,7 +112,7 @@ public sealed class SqlStockChangeSetStore(MultiChannelAgentDbContext db) : ISto
             {
                 if (await EquivalentExistsAsync(command.InventoryId, absence, cancellationToken))
                 {
-                    return await RolledBackConflictAsync(transaction, cancellationToken);
+                    return await RolledBackConflictAsync(transaction);
                 }
             }
 
@@ -123,7 +123,7 @@ public sealed class SqlStockChangeSetStore(MultiChannelAgentDbContext db) : ISto
                 var applied = await ApplyChangeAsync(command, change, cancellationToken);
                 if (applied is null)
                 {
-                    return await RolledBackConflictAsync(transaction, cancellationToken);
+                    return await RolledBackConflictAsync(transaction);
                 }
 
                 effects.Add(applied);
@@ -165,8 +165,7 @@ public sealed class SqlStockChangeSetStore(MultiChannelAgentDbContext db) : ISto
         }
         catch (DbUpdateException exception)
         {
-            await transaction.RollbackAsync(cancellationToken);
-            db.ChangeTracker.Clear();
+            await AbandonAsync(transaction);
 
             // A competing writer may have been this very operation, applied by another replica. Its
             // ledger row is the authoritative record of what happened, so converge on re-reporting it
@@ -186,6 +185,37 @@ public sealed class SqlStockChangeSetStore(MultiChannelAgentDbContext db) : ISto
 
             throw;
         }
+        catch
+        {
+            // Every other fault leaves exactly the same debris, and several are reachable: a guarded
+            // ExecuteUpdate/ExecuteDelete that violates a unique index raises the provider's own
+            // exception rather than a DbUpdateException, and a cancellation can arrive between staging
+            // an insert and saving it. The transaction would roll back on dispose either way, but the
+            // ChangeTracker would not - so the fault is abandoned properly here and then propagates
+            // unchanged, because nothing has been established that would justify calling it a
+            // conflict.
+            await AbandonAsync(transaction);
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Ends a doomed attempt so it leaves nothing behind in either the database or this process.
+    ///
+    /// Clearing the ChangeTracker is the half that is easy to forget and expensive to miss: by the
+    /// time a change set fails it may already have staged inserts (a <c>Created</c> change, or a
+    /// <c>Split</c>'s destination), and this DbContext is scoped to a whole batch of Turns. Rolling
+    /// back without clearing would leave those Added entities waiting for the next Turn's
+    /// <c>SaveChangesAsync</c> to flush Stock nobody ever confirmed.
+    ///
+    /// It is cleared first, and the rollback deliberately does not observe the caller's
+    /// CancellationToken: cleanup that is itself cancellable is not cleanup, and a cancelled rollback
+    /// here would replace the fault being reported with a less useful one.
+    /// </summary>
+    private async Task AbandonAsync(IDbContextTransaction transaction)
+    {
+        db.ChangeTracker.Clear();
+        await transaction.RollbackAsync(CancellationToken.None);
     }
 
     /// <summary>
@@ -355,10 +385,9 @@ public sealed class SqlStockChangeSetStore(MultiChannelAgentDbContext db) : ISto
         return deleted == 1;
     }
 
-    private static async Task<StockChangeSetStoreResult> RolledBackConflictAsync(
-        IDbContextTransaction transaction, CancellationToken cancellationToken)
+    private async Task<StockChangeSetStoreResult> RolledBackConflictAsync(IDbContextTransaction transaction)
     {
-        await transaction.RollbackAsync(cancellationToken);
+        await AbandonAsync(transaction);
 
         return new StockChangeSetStoreResult(StockChangeSetStoreOutcome.Conflict, null);
     }
