@@ -19,6 +19,7 @@ public sealed class ConfirmationProposalEntityConfiguration : IEntityTypeConfigu
         builder.Property(e => e.TokenHash).HasMaxLength(ConfirmationToken.HashTextLength).IsRequired();
         builder.Property(e => e.ChannelConversationId).HasMaxLength(InboundTurn.MaxChannelConversationIdLength).IsRequired();
         builder.Property(e => e.Status).HasMaxLength(32).IsRequired();
+        builder.Property(e => e.Kind).HasMaxLength(32).IsRequired();
 
         // Unbounded on purpose: the contents are bounded by ConfirmationProposal.MaxChanges, not by a
         // character count, and nvarchar(n) cannot express the ceiling that bound implies.

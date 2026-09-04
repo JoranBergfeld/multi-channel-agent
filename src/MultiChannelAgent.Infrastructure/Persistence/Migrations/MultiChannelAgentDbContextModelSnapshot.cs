@@ -92,6 +92,12 @@ namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
                         .IsRequired()
                         .HasColumnType("nvarchar(max)");
 
+                    b.Property<string>("ExpectedReferenceVersionsJson")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("ExpectedTermAbsencesJson")
+                        .HasColumnType("nvarchar(max)");
+
                     b.Property<string>("ExpectedVersionsJson")
                         .IsRequired()
                         .HasColumnType("nvarchar(max)");
@@ -105,11 +111,19 @@ namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
                     b.Property<Guid>("InventoryId")
                         .HasColumnType("uniqueidentifier");
 
+                    b.Property<string>("Kind")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("nvarchar(32)");
+
                     b.Property<Guid>("ParticipantId")
                         .HasColumnType("uniqueidentifier");
 
                     b.Property<Guid>("ProposedInTurnId")
                         .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("ReferenceChangesJson")
+                        .HasColumnType("nvarchar(max)");
 
                     b.Property<DateTimeOffset?>("SettledAt")
                         .HasColumnType("datetimeoffset");
@@ -143,6 +157,25 @@ namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
                     b.HasIndex("Status", "ExpiresAtTicks");
 
                     b.ToTable("ConfirmationProposals", (string)null);
+                });
+
+            modelBuilder.Entity("MultiChannelAgent.Infrastructure.Persistence.Entities.ConfirmationProposalReferenceEntity", b =>
+                {
+                    b.Property<Guid>("ProposalId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("ReferenceKind")
+                        .HasMaxLength(16)
+                        .HasColumnType("nvarchar(16)");
+
+                    b.Property<Guid>("ReferenceId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.HasKey("ProposalId", "ReferenceKind", "ReferenceId");
+
+                    b.HasIndex("ReferenceKind", "ReferenceId");
+
+                    b.ToTable("ConfirmationProposalReferences", (string)null);
                 });
 
             modelBuilder.Entity("MultiChannelAgent.Infrastructure.Persistence.Entities.DeliveryEntity", b =>
@@ -429,6 +462,9 @@ namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uniqueidentifier");
 
+                    b.Property<Guid>("ConcurrencyStamp")
+                        .HasColumnType("uniqueidentifier");
+
                     b.Property<DateTimeOffset>("CreatedAt")
                         .HasColumnType("datetimeoffset");
 
@@ -446,10 +482,16 @@ namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
                         .HasColumnType("nvarchar(200)")
                         .UseCollation("Latin1_General_100_BIN2");
 
+                    b.Property<DateTimeOffset?>("RetiredAt")
+                        .HasColumnType("datetimeoffset");
+
                     b.HasKey("Id");
 
                     b.HasIndex("InventoryId", "NormalizedName")
-                        .IsUnique();
+                        .IsUnique()
+                        .HasFilter("RetiredAt IS NULL");
+
+                    b.HasIndex("InventoryId", "RetiredAt");
 
                     b.ToTable("Locations", (string)null);
                 });
@@ -556,6 +598,87 @@ namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
                     b.HasIndex("IsActive");
 
                     b.ToTable("Participants", (string)null);
+                });
+
+            modelBuilder.Entity("MultiChannelAgent.Infrastructure.Persistence.Entities.ReferenceEffectEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("Alias")
+                        .HasMaxLength(100)
+                        .HasColumnType("nvarchar(100)");
+
+                    b.Property<string>("AliasesJson")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("Kind")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("nvarchar(32)");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.Property<string>("NewName")
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.Property<Guid>("OperationId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<int>("Order")
+                        .HasColumnType("int");
+
+                    b.Property<Guid>("ReferenceId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("ReferenceKind")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("nvarchar(16)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("OperationId", "Order")
+                        .IsUnique();
+
+                    b.ToTable("ReferenceEffects", (string)null);
+                });
+
+            modelBuilder.Entity("MultiChannelAgent.Infrastructure.Persistence.Entities.ReferenceOperationEntity", b =>
+                {
+                    b.Property<Guid>("OperationId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTimeOffset>("AppliedAt")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<Guid>("ConfirmedByTurnId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("InventoryId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid?>("ProposalId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.HasKey("OperationId");
+
+                    b.HasIndex("AppliedAt");
+
+                    b.HasIndex("ProposalId")
+                        .IsUnique()
+                        .HasFilter("ProposalId IS NOT NULL");
+
+                    b.HasIndex("InventoryId", "ConfirmedByTurnId")
+                        .IsUnique();
+
+                    b.ToTable("ReferenceOperations", (string)null);
                 });
 
             modelBuilder.Entity("MultiChannelAgent.Infrastructure.Persistence.Entities.StockChangeSetEffectEntity", b =>
@@ -813,6 +936,9 @@ namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
                         .HasMaxLength(100)
                         .HasColumnType("nvarchar(100)");
 
+                    b.Property<Guid>("ConcurrencyStamp")
+                        .HasColumnType("uniqueidentifier");
+
                     b.Property<DateTimeOffset>("CreatedAt")
                         .HasColumnType("datetimeoffset");
 
@@ -828,9 +954,14 @@ namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
                         .HasColumnType("nvarchar(100)")
                         .UseCollation("Latin1_General_100_BIN2");
 
+                    b.Property<DateTimeOffset?>("RetiredAt")
+                        .HasColumnType("datetimeoffset");
+
                     b.HasKey("Id");
 
                     b.HasIndex("InventoryId");
+
+                    b.HasIndex("InventoryId", "RetiredAt");
 
                     b.ToTable("Units", (string)null);
                 });
@@ -850,10 +981,17 @@ namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
                     b.Property<bool>("IsCanonical")
                         .HasColumnType("bit");
 
+                    b.Property<bool>("IsReserved")
+                        .HasColumnType("bit");
+
                     b.Property<string>("NormalizedTerm")
                         .IsRequired()
                         .HasMaxLength(100)
-                        .HasColumnType("nvarchar(100)");
+                        .HasColumnType("nvarchar(100)")
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<DateTimeOffset?>("RetiredAt")
+                        .HasColumnType("datetimeoffset");
 
                     b.Property<string>("Term")
                         .IsRequired()
@@ -866,9 +1004,10 @@ namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
                     b.HasKey("Id");
 
                     b.HasIndex("InventoryId", "NormalizedTerm")
-                        .IsUnique();
+                        .IsUnique()
+                        .HasFilter("RetiredAt IS NULL");
 
-                    b.HasIndex("InventoryId", "UnitId");
+                    b.HasIndex("InventoryId", "UnitId", "RetiredAt");
 
                     b.ToTable("UnitTerms", (string)null);
                 });
@@ -887,6 +1026,15 @@ namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
                     b.HasOne("MultiChannelAgent.Infrastructure.Persistence.Entities.InventoryEntity", null)
                         .WithMany()
                         .HasForeignKey("InventoryId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("MultiChannelAgent.Infrastructure.Persistence.Entities.ConfirmationProposalReferenceEntity", b =>
+                {
+                    b.HasOne("MultiChannelAgent.Infrastructure.Persistence.Entities.ConfirmationProposalEntity", null)
+                        .WithMany()
+                        .HasForeignKey("ProposalId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
                 });
@@ -956,6 +1104,24 @@ namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
                     b.HasOne("MultiChannelAgent.Infrastructure.Persistence.Entities.InboxEntryEntity", null)
                         .WithOne()
                         .HasForeignKey("MultiChannelAgent.Infrastructure.Persistence.Entities.OutcomeEntity", "TurnId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("MultiChannelAgent.Infrastructure.Persistence.Entities.ReferenceEffectEntity", b =>
+                {
+                    b.HasOne("MultiChannelAgent.Infrastructure.Persistence.Entities.ReferenceOperationEntity", null)
+                        .WithMany()
+                        .HasForeignKey("OperationId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("MultiChannelAgent.Infrastructure.Persistence.Entities.ReferenceOperationEntity", b =>
+                {
+                    b.HasOne("MultiChannelAgent.Infrastructure.Persistence.Entities.InventoryEntity", null)
+                        .WithMany()
+                        .HasForeignKey("InventoryId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
                 });

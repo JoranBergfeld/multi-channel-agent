@@ -20,7 +20,7 @@ public sealed class StockToolDispatcher(
     StockFindingService findingService,
     StockMutationService mutationService,
     StockChangeSetService changeSetService,
-    StockConfirmationService confirmationService) : IToolDispatcher
+    InventoryConfirmationService confirmationService) : IToolDispatcher
 {
     public const string ListStockToolName = "list_stock";
     public const string FindStockToolName = "find_stock";
@@ -33,6 +33,22 @@ public sealed class StockToolDispatcher(
     public const string ApplyStockChangesToolName = "apply_stock_changes";
     public const string ConfirmToolName = "confirm_inventory_operation";
     public const string RejectToolName = "reject_inventory_operation";
+
+    /// <summary>The exact tools this dispatcher owns, including the two conversation-wide confirmation tools it has always executed.</summary>
+    public static readonly IReadOnlyList<string> ToolNames =
+    [
+        ListStockToolName,
+        FindStockToolName,
+        AddStockToolName,
+        RemoveStockToolName,
+        SetStockToolName,
+        MoveStockToolName,
+        RenameStockToolName,
+        ForgetStockToolName,
+        ApplyStockChangesToolName,
+        ConfirmToolName,
+        RejectToolName,
+    ];
 
     /// <summary>
     /// The channel-neutral response part every answered read leaves behind. It names the conversation
@@ -566,18 +582,27 @@ public sealed class StockToolDispatcher(
         return ToDecision(result);
     }
 
-    private static ModelDecision ToDecision(StockConfirmationResult result) => result.Kind switch
+    private static ModelDecision ToDecision(InventoryConfirmationResult result) => result.Kind switch
     {
-        StockConfirmationResultKind.Completed => Completed(
+        InventoryConfirmationResultKind.Completed when result.Applied is { } applied => Completed(
             "completed",
-            SummarizeChanges(result.Applied!),
-            JsonSerializer.Serialize(new StockChangesPayload(1, "stock_changes", result.Applied!.Changes), PayloadOptions)),
-        StockConfirmationResultKind.Rejected => Semantic(
+            SummarizeChanges(applied),
+            JsonSerializer.Serialize(new StockChangesPayload(1, "stock_changes", applied.Changes), PayloadOptions)),
+
+        // The Participant confirmed the one thing pending in this conversation, and it turned out to
+        // be an administration proposal. The answer is shaped by the dispatcher that owns that
+        // vocabulary, so `reference_changes` is built in exactly one place.
+        InventoryConfirmationResultKind.Completed when result.AppliedReferences is { } appliedReferences =>
+            ReferenceToolDispatcher.AppliedChanges(appliedReferences),
+
+        InventoryConfirmationResultKind.Completed => Semantic(
+            OutcomeCategory.Completed, "completed", "That change was applied."),
+        InventoryConfirmationResultKind.Rejected => Semantic(
             OutcomeCategory.Completed, "rejected", "That change was not made, and nothing was changed."),
-        StockConfirmationResultKind.NotFound => Semantic(
+        InventoryConfirmationResultKind.NotFound => Semantic(
             OutcomeCategory.NotFound, result.Code, "There is nothing waiting for your confirmation here."),
-        StockConfirmationResultKind.Conflict => Semantic(OutcomeCategory.Conflict, result.Code, ConfirmationConflictSummary(result.Code)),
-        StockConfirmationResultKind.Invalid => Semantic(OutcomeCategory.Invalid, result.Code, InvalidConfirmationSummary(result.Code)),
+        InventoryConfirmationResultKind.Conflict => Semantic(OutcomeCategory.Conflict, result.Code, ConfirmationConflictSummary(result.Code)),
+        InventoryConfirmationResultKind.Invalid => Semantic(OutcomeCategory.Invalid, result.Code, InvalidConfirmationSummary(result.Code)),
         _ => Semantic(OutcomeCategory.Forbidden, "forbidden", "That request could not be completed."),
     };
 

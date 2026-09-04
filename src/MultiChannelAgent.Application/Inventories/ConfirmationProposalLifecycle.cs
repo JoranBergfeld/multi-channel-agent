@@ -10,7 +10,7 @@ namespace MultiChannelAgent.Application.Inventories;
 /// time any tool could reach it.
 ///
 /// Rejection, replacement, expiry, and execution conflicts are handled where they happen -
-/// <see cref="StockConfirmationService"/>, <see cref="IConfirmationProposalStore.StoreAsync"/>, and
+/// <see cref="InventoryConfirmationService"/>, <see cref="IConfirmationProposalStore.StoreAsync"/>, and
 /// the change-set store - because each of those already holds the context needed to decide.
 /// </summary>
 public sealed class ConfirmationProposalLifecycle(IConfirmationProposalStore proposalStore)

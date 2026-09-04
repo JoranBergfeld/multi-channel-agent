@@ -34,6 +34,17 @@ public sealed class ScriptedModelBoundary : IModelBoundary
     private const string RejectCommand = "reject";
     private const string RenameStockToolName = "rename_stock";
 
+    private const string ListUnitsCommand = "list units";
+    private const string ListLocationsCommand = "list locations";
+    private const string CreateUnitCommand = "create unit";
+    private const string CreateLocationCommand = "create location";
+    private const string RenameUnitCommand = "rename unit";
+    private const string RenameLocationCommand = "rename location";
+    private const string AddAliasCommand = "add alias";
+    private const string RemoveAliasCommand = "remove alias";
+    private const string RetireUnitCommand = "retire unit";
+    private const string RetireLocationCommand = "retire location";
+
     /// <summary>The mutation commands this boundary recognizes, each mapped to the bounded tool it proposes.</summary>
     private static readonly (string Command, string ToolName)[] MutationCommands =
     [
@@ -75,6 +86,16 @@ public sealed class ScriptedModelBoundary : IModelBoundary
         if (TryProposeList(content, out var listProposal))
         {
             return Task.FromResult(listProposal!);
+        }
+
+        if (TryProposeReferenceRead(content, out var referenceReadProposal))
+        {
+            return Task.FromResult(referenceReadProposal!);
+        }
+
+        if (TryProposeReferenceAdministration(content, out var administrationProposal))
+        {
+            return Task.FromResult(administrationProposal!);
         }
 
         // Longest command words first: "add stock"/"remove stock"/"set stock" each name a whole
@@ -187,6 +208,126 @@ public sealed class ScriptedModelBoundary : IModelBoundary
         return true;
     }
 
+    /// <summary>Parses <c>list units [page size N] [after CURSOR]</c> and its Location twin.</summary>
+    private static bool TryProposeReferenceRead(string content, out ModelProposal? proposal)
+    {
+        proposal = null;
+
+        foreach (var (command, toolName) in ((string, string)[])
+                 [(ListUnitsCommand, "list_units"), (ListLocationsCommand, "list_locations")])
+        {
+            if (!StartsWithCommand(content, command, out var remainder)
+                || !ConversationalClauses.TryParse(remainder, out var clauses))
+            {
+                continue;
+            }
+
+            var args = new Dictionary<string, string>();
+            CopyValue(clauses, "page size", args, "pageSize");
+            CopyValue(clauses, "after", args, "cursor");
+
+            proposal = ModelProposal.Tool(toolName, args);
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Parses the eight mutating administration commands into one homogeneous single-element
+    /// <c>changes</c> array. Every value is untrusted text: the tool fixes the kind, and the
+    /// deterministic services resolve and bound everything else. Identity never comes from here.
+    /// </summary>
+    private static bool TryProposeReferenceAdministration(string content, out ModelProposal? proposal)
+    {
+        proposal = null;
+
+        // Longest command words first, so "create location" is never read as "create" plus a
+        // reference that happens to start with "location".
+        foreach (var (command, toolName, build) in AdministrationCommands)
+        {
+            if (!StartsWithCommand(content, command, out var remainder) || remainder.Length == 0)
+            {
+                continue;
+            }
+
+            var subject = remainder;
+            IReadOnlyDictionary<string, string> clauses = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+            var clauseStart = FindFirstClauseIndex(remainder);
+            if (clauseStart >= 0)
+            {
+                subject = remainder[..clauseStart].Trim();
+                if (!ConversationalClauses.TryParse(remainder[clauseStart..], out clauses))
+                {
+                    return false;
+                }
+            }
+
+            if (subject.Length == 0)
+            {
+                return false;
+            }
+
+            if (build(subject, clauses) is not { } element)
+            {
+                return false;
+            }
+
+            proposal = ModelProposal.Tool(toolName, new Dictionary<string, string> { ["changes"] = $"[{element}]" });
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>The eight mutating commands, each with the tool it proposes and how to shape its one element.</summary>
+    private static readonly (string Command, string ToolName, Func<string, IReadOnlyDictionary<string, string>, string?> Build)[]
+        AdministrationCommands =
+    [
+        (CreateLocationCommand, "create_locations", static (subject, _) => Element(("name", subject))),
+        (CreateUnitCommand, "create_units", static (subject, clauses) => clauses.TryGetValue("aliases", out var aliases)
+            ? Element(("name", subject), ("aliases", aliases))
+            : Element(("name", subject))),
+        (RenameLocationCommand, "rename_locations", static (subject, clauses) => clauses.TryGetValue("to", out var newName)
+            ? Element(("location", subject), ("newName", newName))
+            : null),
+        (RenameUnitCommand, "rename_units", static (subject, clauses) => clauses.TryGetValue("to", out var newName)
+            ? Element(("unit", subject), ("newName", newName))
+            : null),
+
+        // "add alias cartons to unit Cardboard Box": the subject is the alias, and the Unit arrives as
+        // a "to unit" clause.
+        (AddAliasCommand, "add_unit_aliases", static (subject, clauses) => UnitOf(clauses) is { } unit
+            ? Element(("unit", unit), ("alias", subject))
+            : null),
+
+        // "remove alias cartons from unit Cardboard Box": the same shape with "from unit".
+        (RemoveAliasCommand, "remove_unit_aliases", static (subject, clauses) => UnitOf(clauses) is { } unit
+            ? Element(("unit", unit), ("alias", subject))
+            : null),
+        (RetireLocationCommand, "retire_locations", static (subject, _) => Element(("location", subject))),
+        (RetireUnitCommand, "retire_units", static (subject, _) => Element(("unit", subject))),
+    ];
+
+    /// <summary>Reads the Unit an alias change names, however the sentence reached it.</summary>
+    private static string? UnitOf(IReadOnlyDictionary<string, string> clauses)
+    {
+        foreach (var clause in (string[])["unit", "to unit", "from unit"])
+        {
+            if (clauses.TryGetValue(clause, out var unit))
+            {
+                return unit;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>Builds one JSON object of untrusted string values, in the order given.</summary>
+    private static string Element(params (string Name, string Value)[] properties) =>
+        $"{{{string.Join(",", properties.Select(p => $"{JsonSerializer.Serialize(p.Name)}:{JsonSerializer.Serialize(p.Value)}"))}}}";
+
     /// <summary>
     /// Where a reference stops and its clauses begin. Only a clause keyword standing as its own word
     /// can start them, so a reference that merely contains one of those words (a "unit heater", say)
@@ -196,7 +337,9 @@ public sealed class ScriptedModelBoundary : IModelBoundary
     {
         var earliest = -1;
 
-        foreach (var clause in (string[])[" unit ", " in ", " unlocated", " quantity ", " note ", " to unlocated", " to ", " all"])
+        foreach (var clause in (string[])
+                 [" unit ", " in ", " unlocated", " quantity ", " note ", " to unlocated", " to unit ", " to ", " all",
+                  " aliases ", " from unit "])
         {
             var index = reference.IndexOf(clause, StringComparison.OrdinalIgnoreCase);
             if (index >= 0 && (earliest < 0 || index < earliest))

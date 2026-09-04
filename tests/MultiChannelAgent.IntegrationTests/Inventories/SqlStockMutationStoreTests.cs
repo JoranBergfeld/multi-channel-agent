@@ -1,3 +1,5 @@
+using Microsoft.EntityFrameworkCore.Diagnostics;
+using System.Data.Common;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using MultiChannelAgent.Application.Inventories;
@@ -222,8 +224,13 @@ public sealed class SqlStockMutationStoreTests : IDisposable
     public async Task A_create_that_loses_the_race_to_its_own_twin_converges_on_the_recorded_effect()
     {
         var command = CreateCommand();
-        using var db = CreateContext();
-        ApplyOnceFromACompetingWriterDuring(db, command);
+
+        // The create path holds its references open in an explicit transaction, so the competitor is
+        // run at the other end of the same window instead: right after this context's ledger lookup
+        // has found nothing, and before it opens that transaction. The branch under test is unchanged -
+        // the save still fails on Equivalent Stock uniqueness and still has to converge - and a second
+        // connection is no longer asked to write while this one holds the database.
+        using var db = CreateContext(new ApplyOnceAfterTheLedgerLookupInterceptor(() => ApplyFromACompetingWriter(command)));
 
         var result = await new SqlStockMutationStore(db).ApplyAsync(command, CancellationToken.None);
 
@@ -279,10 +286,53 @@ public sealed class SqlStockMutationStoreTests : IDisposable
             }
 
             applied = true;
-
-            using var competitor = CreateContext();
-            new SqlStockMutationStore(competitor).ApplyAsync(command, CancellationToken.None).GetAwaiter().GetResult();
+            ApplyFromACompetingWriter(command);
         };
+    }
+
+    /// <summary>Applies <paramref name="command"/> from its own connection, as another replica would.</summary>
+    private void ApplyFromACompetingWriter(StockMutationCommand command)
+    {
+        using var competitor = CreateContext();
+        new SqlStockMutationStore(competitor).ApplyAsync(command, CancellationToken.None).GetAwaiter().GetResult();
+    }
+
+    /// <summary>
+    /// Fires once, immediately after the first query this context runs - which is the store's own
+    /// ledger lookup - and therefore before it opens any transaction. That is precisely the window a
+    /// competing replica has to slip through, and it is deterministic rather than hoped for.
+    /// </summary>
+    private sealed class ApplyOnceAfterTheLedgerLookupInterceptor(Action apply) : DbCommandInterceptor
+    {
+        private bool _fired;
+
+        public override DbDataReader ReaderExecuted(
+            DbCommand command, CommandExecutedEventData eventData, DbDataReader result)
+        {
+            Fire();
+            return base.ReaderExecuted(command, eventData, result);
+        }
+
+        public override ValueTask<DbDataReader> ReaderExecutedAsync(
+            DbCommand command,
+            CommandExecutedEventData eventData,
+            DbDataReader result,
+            CancellationToken cancellationToken = default)
+        {
+            Fire();
+            return base.ReaderExecutedAsync(command, eventData, result, cancellationToken);
+        }
+
+        private void Fire()
+        {
+            if (_fired)
+            {
+                return;
+            }
+
+            _fired = true;
+            apply();
+        }
     }
 
     private StockMutationCommand CreateCommand(StockOperationId? operationId = null) => new()    {
@@ -383,6 +433,11 @@ public sealed class SqlStockMutationStoreTests : IDisposable
         return inventoryId;
     }
 
-    private MultiChannelAgentDbContext CreateContext() =>
-        new(new DbContextOptionsBuilder<MultiChannelAgentDbContext>().UseSqlite(_connectionString).Options);
+    private MultiChannelAgentDbContext CreateContext(IInterceptor? interceptor = null)
+    {
+        var options = new DbContextOptionsBuilder<MultiChannelAgentDbContext>().UseSqlite(_connectionString);
+
+        return new MultiChannelAgentDbContext(
+            (interceptor is null ? options : options.AddInterceptors(interceptor)).Options);
+    }
 }

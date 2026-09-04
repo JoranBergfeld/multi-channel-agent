@@ -21,5 +21,19 @@ public sealed class UnitTermEntity
 
     public bool IsCanonical { get; set; }
 
+    /// <summary>
+    /// True for the five terms the reserved `each` Unit is born with. Per-term rather than derived
+    /// from the Unit, so a fixed alias can never be removed while an alias a Participant later teaches
+    /// `each` stays removable.
+    /// </summary>
+    public bool IsReserved { get; set; }
+
+    /// <summary>
+    /// When this term left the active namespace, or null while it is active. Set for every term of a
+    /// Unit when that Unit is retired, and for one term when an alias is removed - the row remains
+    /// either way, so the audit trail and prior meaning survive.
+    /// </summary>
+    public DateTimeOffset? RetiredAt { get; set; }
+
     public DateTimeOffset CreatedAt { get; set; }
 }

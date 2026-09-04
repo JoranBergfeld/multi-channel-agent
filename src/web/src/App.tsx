@@ -8,6 +8,7 @@ import {
   type InventoryView,
 } from './sessionApi';
 import InventoryGovernance from './InventoryGovernance';
+import ReferenceWorkspace from './ReferenceWorkspace';
 import StockWorkspace from './StockWorkspace';
 import TurnTracer from './TurnTracer';
 
@@ -208,6 +209,10 @@ function App() {
 
       {bootstrap.activeInventoryId && (
         <StockWorkspace inventoryId={bootstrap.activeInventoryId} refetchToken={stockRefetchToken} />
+      )}
+
+      {bootstrap.activeInventoryId && (
+        <ReferenceWorkspace inventoryId={bootstrap.activeInventoryId} refetchToken={stockRefetchToken} />
       )}
     </main>
   );

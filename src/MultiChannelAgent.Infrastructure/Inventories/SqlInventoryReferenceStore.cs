@@ -20,7 +20,7 @@ public sealed class SqlInventoryReferenceStore(MultiChannelAgentDbContext db) : 
         {
             var byId = await db.Units
                 .AsNoTracking()
-                .AnyAsync(u => u.InventoryId == inventoryId.Value && u.Id == unitId, cancellationToken);
+                .AnyAsync(u => u.InventoryId == inventoryId.Value && u.Id == unitId && u.RetiredAt == null, cancellationToken);
 
             return byId ? new UnitId(unitId) : null;
         }
@@ -29,7 +29,8 @@ public sealed class SqlInventoryReferenceStore(MultiChannelAgentDbContext db) : 
         var term = await db.UnitTerms
             .AsNoTracking()
             .FirstOrDefaultAsync(
-                t => t.InventoryId == inventoryId.Value && t.NormalizedTerm == normalizedTerm, cancellationToken);
+                t => t.InventoryId == inventoryId.Value && t.NormalizedTerm == normalizedTerm && t.RetiredAt == null,
+                cancellationToken);
 
         return term is null ? null : new UnitId(term.UnitId);
     }
@@ -40,7 +41,7 @@ public sealed class SqlInventoryReferenceStore(MultiChannelAgentDbContext db) : 
         {
             var byId = await db.Locations
                 .AsNoTracking()
-                .AnyAsync(l => l.InventoryId == inventoryId.Value && l.Id == locationId, cancellationToken);
+                .AnyAsync(l => l.InventoryId == inventoryId.Value && l.Id == locationId && l.RetiredAt == null, cancellationToken);
 
             return byId ? new LocationId(locationId) : null;
         }
@@ -49,7 +50,8 @@ public sealed class SqlInventoryReferenceStore(MultiChannelAgentDbContext db) : 
         var location = await db.Locations
             .AsNoTracking()
             .FirstOrDefaultAsync(
-                l => l.InventoryId == inventoryId.Value && l.NormalizedName == normalizedName, cancellationToken);
+                l => l.InventoryId == inventoryId.Value && l.NormalizedName == normalizedName && l.RetiredAt == null,
+                cancellationToken);
 
         return location is null ? null : new LocationId(location.Id);
     }
@@ -57,14 +59,14 @@ public sealed class SqlInventoryReferenceStore(MultiChannelAgentDbContext db) : 
     public async Task<string?> FindUnitCanonicalNameAsync(InventoryId inventoryId, UnitId unitId, CancellationToken cancellationToken) =>
         await db.Units
             .AsNoTracking()
-            .Where(u => u.InventoryId == inventoryId.Value && u.Id == unitId.Value)
+            .Where(u => u.InventoryId == inventoryId.Value && u.Id == unitId.Value && u.RetiredAt == null)
             .Select(u => u.CanonicalName)
             .FirstOrDefaultAsync(cancellationToken);
 
     public async Task<string?> FindLocationNameAsync(InventoryId inventoryId, LocationId locationId, CancellationToken cancellationToken) =>
         await db.Locations
             .AsNoTracking()
-            .Where(l => l.InventoryId == inventoryId.Value && l.Id == locationId.Value)
+            .Where(l => l.InventoryId == inventoryId.Value && l.Id == locationId.Value && l.RetiredAt == null)
             .Select(l => l.Name)
             .FirstOrDefaultAsync(cancellationToken);
 }

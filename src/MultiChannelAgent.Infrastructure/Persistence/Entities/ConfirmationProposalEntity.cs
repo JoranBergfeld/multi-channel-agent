@@ -27,6 +27,18 @@ public sealed class ConfirmationProposalEntity
     /// <summary>The <c>ProposalStatus</c> as text, so the filtered unique index can be written in provider-neutral SQL.</summary>
     public required string Status { get; set; }
 
+    /// <summary>The <c>ProposalKind</c> as text: which of the two disjoint payloads this row carries.</summary>
+    public required string Kind { get; set; }
+
+    /// <summary>The exact proposed administration changes, serialized; null for a stock proposal.</summary>
+    public string? ReferenceChangesJson { get; set; }
+
+    /// <summary>The expected Unit and Location versions, serialized; null for a stock proposal.</summary>
+    public string? ExpectedReferenceVersionsJson { get; set; }
+
+    /// <summary>The normalized terms this proposal expects to still be free, serialized; null for a stock proposal.</summary>
+    public string? ExpectedTermAbsencesJson { get; set; }
+
     /// <summary>The exact proposed changes, serialized (see <c>ConfirmationProposalMapper</c>). What the Participant reviewed is what commits.</summary>
     public required string ChangesJson { get; set; }
 

@@ -15,10 +15,18 @@ public static partial class ConversationalClauses
     /// <summary>Clauses that stand alone; anything a caller writes after them belongs to the next clause.</summary>
     private static readonly string[] FlagClauses = ["including zero", "unlocated", "to unlocated", "all"];
 
-    // "to unlocated" precedes "to" and "unlocated" so a destination of "nowhere in particular" is
-    // read as its own flag rather than as a Location that happens to be called "unlocated".
+    // Longer phrases precede the shorter words they contain, so the more specific reading always
+    // wins: "to unlocated" before "to" and "unlocated", so a destination of "nowhere in particular"
+    // is read as its own flag rather than as a Location called "unlocated"; and "to unit"/"from unit"
+    // before "to" and "unit", so "add alias cartons to unit Cardboard Box" names one Unit rather than
+    // a "to" clause with nothing in it followed by a "unit" clause.
+    //
+    // "from" and "alias" are deliberately NOT clause words on their own. Every clause word ends a
+    // subject wherever it appears, so a bare "from" would silently truncate "Bolts from Germany" to
+    // "Bolts", and nothing in this grammar needs either word alone: an alias change says "to unit" or
+    // "from unit", and a Unit creation says "aliases".
     [GeneratedRegex(
-        @"\b(including zero|to unlocated|unlocated|named|unit|in|page size|after|quantity|note|to|all)\b",
+        @"\b(including zero|to unlocated|to unit|from unit|unlocated|named|unit|in|page size|after|quantity|note|aliases|to|all)\b",
         RegexOptions.IgnoreCase)]
     private static partial Regex ClauseScanner { get; }
 

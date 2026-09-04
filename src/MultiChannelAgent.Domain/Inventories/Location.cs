@@ -35,16 +35,22 @@ public sealed record Location
 
     public required DateTimeOffset CreatedAt { get; init; }
 
+    /// <summary>When this Location was withdrawn from matching and assignment, or null while it is active.</summary>
+    public DateTimeOffset? RetiredAt { get; init; }
+
+    /// <summary>Active Locations are the only ones that resolve, match, or appear in ordinary Lists. Unlocated stock is the absence of a reference and can never be retired.</summary>
+    public bool IsActive => RetiredAt is null;
+
     public static Location Create(InventoryId inventoryId, string? name, DateTimeOffset createdAt)
     {
-        var normalizedName = RequireWithinBounds(RequireNonBlank(name, nameof(name)), MaxNameLength, nameof(name));
+        var displayName = RequireWithinBounds(RequireNonBlank(name, nameof(name)), MaxNameLength, nameof(name));
 
         return new Location
         {
             Id = new LocationId(Guid.NewGuid()),
             InventoryId = inventoryId,
-            Name = normalizedName,
-            NormalizedName = NameNormalization.Normalize(normalizedName),
+            Name = displayName,
+            NormalizedName = NameNormalization.Normalize(displayName),
             CreatedAt = createdAt,
         };
     }
@@ -56,7 +62,7 @@ public sealed record Location
             throw new ArgumentException("Value must not be blank.", parameterName);
         }
 
-        return value.Trim();
+        return NameNormalization.Collapse(value);
     }
 
     private static string RequireWithinBounds(string value, int maxLength, string parameterName)

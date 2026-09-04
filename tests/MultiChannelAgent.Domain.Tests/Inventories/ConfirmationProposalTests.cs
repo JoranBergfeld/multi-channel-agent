@@ -200,4 +200,171 @@ public sealed class ConfirmationProposalTests
         Assert.Equal(id, change.SurvivingStockEntryId);
         Assert.Null(change.RetiredStockEntryId);
     }
+    private static ProposedReferenceChange RetireUnitChange(Guid unitId, int order = 1) => new()
+    {
+        Order = order,
+        Kind = ReferenceChangeKind.RetireUnit,
+        Target = new ProposedReferenceState(ReferenceKind.Unit, unitId, "Cardboard Box", "cardboard box", Reserved: false),
+    };
+
+    private static ProposedReferenceChange CreateLocationChange(Guid locationId, int order = 1) => new()
+    {
+        Order = order,
+        Kind = ReferenceChangeKind.CreateLocation,
+        Target = new ProposedReferenceState(ReferenceKind.Location, locationId, "Shelf A", "shelf a", Reserved: false),
+    };
+
+    private static ConfirmationProposal ReferenceProposal(
+        IReadOnlyList<ProposedReferenceChange> changes, IReadOnlyList<ExpectedReferenceVersion> versions) =>
+        ConfirmationProposal.CreateForReferences(
+            ConfirmationToken.HashOf(ConfirmationToken.Issue()),
+            new ParticipantId(Guid.NewGuid()),
+            "web-conversation-1",
+            new InventoryId(Guid.NewGuid()),
+            new Domain.Turns.TurnId(Guid.NewGuid()),
+            changes,
+            versions,
+            [],
+            DateTimeOffset.UnixEpoch);
+
+    [Fact]
+    public void A_reference_proposal_carries_its_changes_and_no_stock_at_all()
+    {
+        var unitId = Guid.NewGuid();
+
+        var proposal = ReferenceProposal(
+            [RetireUnitChange(unitId)],
+            [new ExpectedReferenceVersion(ReferenceKind.Unit, unitId, Guid.NewGuid())]);
+
+        Assert.Equal(ProposalKind.ReferenceAdministration, proposal.Kind);
+        Assert.Single(proposal.ReferenceChanges);
+        Assert.Empty(proposal.Changes);
+        Assert.Empty(proposal.ExpectedVersions);
+        Assert.Empty(proposal.ExpectedAbsences);
+    }
+
+    [Fact]
+    public void A_reference_proposal_shares_the_shipped_ten_minute_single_use_lifetime()
+    {
+        var unitId = Guid.NewGuid();
+
+        var proposal = ReferenceProposal(
+            [RetireUnitChange(unitId)],
+            [new ExpectedReferenceVersion(ReferenceKind.Unit, unitId, Guid.NewGuid())]);
+
+        Assert.Equal(proposal.CreatedAt.AddMinutes(ConfirmationProposal.LifetimeMinutes), proposal.ExpiresAt);
+        Assert.False(proposal.IsExpired(proposal.ExpiresAt.AddTicks(-1)));
+        Assert.True(proposal.IsExpired(proposal.ExpiresAt));
+    }
+
+    [Fact]
+    public void Every_existing_reference_a_proposal_touches_must_carry_an_expected_version()
+    {
+        var invalid = Assert.Throws<ArgumentException>(() => ReferenceProposal([RetireUnitChange(Guid.NewGuid())], []));
+
+        Assert.Equal("expectedReferenceVersions", invalid.ParamName);
+    }
+
+    [Fact]
+    public void A_reference_a_proposal_creates_needs_no_expected_version_because_it_does_not_exist_yet()
+    {
+        var proposal = ReferenceProposal([CreateLocationChange(Guid.NewGuid())], []);
+
+        Assert.Single(proposal.ReferenceChanges);
+    }
+
+    [Fact]
+    public void A_reference_proposal_must_carry_at_least_one_change() =>
+        Assert.Throws<ArgumentException>(() => ReferenceProposal([], []));
+
+    [Fact]
+    public void A_reference_proposal_must_not_exceed_the_reviewable_bound()
+    {
+        var changes = Enumerable
+            .Range(1, ConfirmationProposal.MaxChanges + 1)
+            .Select(order => CreateLocationChange(Guid.NewGuid(), order))
+            .ToList();
+
+        Assert.Throws<ArgumentException>(() => ReferenceProposal(changes, []));
+    }
+
+    [Fact]
+    public void Reference_change_order_must_be_unique()
+    {
+        var changes = new[] { CreateLocationChange(Guid.NewGuid()), CreateLocationChange(Guid.NewGuid()) };
+
+        Assert.Throws<ArgumentException>(() => ReferenceProposal(changes, []));
+    }
+
+    [Fact]
+    public void A_proposal_that_retires_anything_demands_the_Owner()
+    {
+        var unitId = Guid.NewGuid();
+
+        var retiring = ReferenceProposal(
+            [RetireUnitChange(unitId)],
+            [new ExpectedReferenceVersion(ReferenceKind.Unit, unitId, Guid.NewGuid())]);
+        var creating = ReferenceProposal([CreateLocationChange(Guid.NewGuid())], []);
+
+        Assert.Equal(MembershipRole.Owner, retiring.RequiredRole);
+        Assert.Equal(MembershipRole.Editor, creating.RequiredRole);
+    }
+
+    [Fact]
+    public void A_reference_proposal_names_every_identity_a_retirement_would_have_to_invalidate()
+    {
+        var unitId = Guid.NewGuid();
+        var locationId = Guid.NewGuid();
+
+        var proposal = ReferenceProposal(
+            [RetireUnitChange(unitId), CreateLocationChange(locationId, order: 2)],
+            [new ExpectedReferenceVersion(ReferenceKind.Unit, unitId, Guid.NewGuid())]);
+
+        Assert.Equal([new UnitId(unitId)], proposal.ReferencedUnitIds);
+        Assert.Equal([new LocationId(locationId)], proposal.ReferencedLocationIds);
+    }
+
+    [Fact]
+    public void A_reference_proposal_executes_under_its_own_ledger_identity()
+    {
+        var unitId = Guid.NewGuid();
+
+        var proposal = ReferenceProposal(
+            [RetireUnitChange(unitId)],
+            [new ExpectedReferenceVersion(ReferenceKind.Unit, unitId, Guid.NewGuid())]);
+
+        Assert.Equal(ReferenceOperationId.DeriveForProposal(proposal.Id), proposal.ReferenceExecutionOperationId);
+        Assert.NotEqual(proposal.ExecutionOperationId.Value, proposal.ReferenceExecutionOperationId.Value);
+    }
+    [Fact]
+    public void A_stock_proposal_is_still_a_stock_proposal_and_still_demands_only_an_Editor()
+    {
+        var proposal = ProposalWithOneChange();
+
+        Assert.Equal(ProposalKind.Stock, proposal.Kind);
+        Assert.Equal(MembershipRole.Editor, proposal.RequiredRole);
+        Assert.Empty(proposal.ReferenceChanges);
+        Assert.Empty(proposal.ExpectedReferenceVersions);
+        Assert.Empty(proposal.ExpectedTermAbsences);
+    }
+
+    [Fact]
+    public void A_stock_proposal_names_every_Unit_and_Location_it_depends_on()
+    {
+        var proposal = ProposalWithOneChange();
+        var change = proposal.Changes[0];
+
+        Assert.Contains(change.Source.UnitId, proposal.ReferencedUnitIds);
+        if (change.Source.LocationId is { } locationId)
+        {
+            Assert.Contains(locationId, proposal.ReferencedLocationIds);
+        }
+    }
+
+    private static ConfirmationProposal ProposalWithOneChange()
+    {
+        var id = new StockEntryId(Guid.NewGuid());
+
+        return Create([ForgetChange(id)], [new ExpectedEntryVersion(id, Guid.NewGuid())]);
+    }
 }

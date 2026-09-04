@@ -122,6 +122,85 @@ public sealed record ExpectedEntryVersion(StockEntryId StockEntryId, Guid Concur
 public sealed record ExpectedEquivalentStockAbsence(string NormalizedName, UnitId UnitId, LocationId? LocationId);
 
 /// <summary>
+/// Which kind of work one stored proposal describes. The two payloads are disjoint: a
+/// <see cref="Stock"/> proposal carries only stock changes, and a
+/// <see cref="ReferenceAdministration"/> proposal carries only reference changes. They share
+/// everything else - the single pending slot per Participant and ChannelConversation, the ten-minute
+/// single-use token, the binding predicate, and the whole status state machine - which is exactly
+/// what "one pending proposal across stock, import, and administration" means.
+/// </summary>
+public enum ProposalKind
+{
+    Stock,
+    ReferenceAdministration,
+}
+
+/// <summary>
+/// The exact reference one administration change acts on, as it stood when the proposal was made.
+/// For a change that <em>creates</em> a reference, <see cref="ReferenceId"/> is the identity the
+/// execution will mint - decided here, at proposal time - so confirming creates exactly the identity
+/// that was reviewed rather than a fresh one.
+/// </summary>
+public sealed record ProposedReferenceState(
+    ReferenceKind Kind, Guid ReferenceId, string Name, string NormalizedName, bool Reserved);
+
+/// <summary>
+/// One exactly-decided administration change. Which fields carry meaning is fixed by
+/// <see cref="Kind"/>; the executor switches on it and reads only those:
+///
+/// <list type="bullet">
+/// <item><c>CreateUnit</c>: <see cref="Terms"/> (canonical first, then aliases).</item>
+/// <item><c>RenameUnit</c> / <c>RenameLocation</c>: <see cref="NewName"/> and <see cref="NewNormalizedName"/>.</item>
+/// <item><c>AddUnitAlias</c> / <c>RemoveUnitAlias</c>: <see cref="Term"/>.</item>
+/// <item><c>CreateLocation</c>: nothing beyond <see cref="Target"/>, which already carries the name.</item>
+/// <item><c>RetireUnit</c> / <c>RetireLocation</c>: nothing beyond <see cref="Target"/>.</item>
+/// </list>
+/// </summary>
+public sealed record ProposedReferenceChange
+{
+    /// <summary>1-based position within the proposal. Execution follows it, so effects apply in the order the Participant reviewed.</summary>
+    public required int Order { get; init; }
+
+    public required ReferenceChangeKind Kind { get; init; }
+
+    public required ProposedReferenceState Target { get; init; }
+
+    /// <summary>The exact new display name; set only for <c>RenameUnit</c> and <c>RenameLocation</c>.</summary>
+    public string? NewName { get; init; }
+
+    /// <summary>The normalized form of <see cref="NewName"/>, computed once while planning so the executor never re-normalizes.</summary>
+    public string? NewNormalizedName { get; init; }
+
+    /// <summary>The single term an alias add establishes or an alias removal ends.</summary>
+    public UnitTerm? Term { get; init; }
+
+    /// <summary>The full ordered term set a Unit creation establishes, canonical first.</summary>
+    public IReadOnlyList<UnitTerm> Terms { get; init; } = [];
+
+    /// <summary>True when this change brings a reference into existence, so there is no version to pin and nothing to lock.</summary>
+    public bool CreatesReference =>
+        Kind is ReferenceChangeKind.CreateUnit or ReferenceChangeKind.CreateLocation;
+
+    /// <summary>True when this change withdraws a reference, which is what makes the whole proposal Owner-only and confirmable.</summary>
+    public bool RetiresReference => ReferenceAdministrationFacts.RequiresConfirmation(Kind);
+}
+
+/// <summary>
+/// The version one existing Unit or Location carried when the proposal was made. Execution refuses
+/// unless the row still carries it, so a proposal decided against a state nobody holds any more can
+/// never land - exactly as <see cref="ExpectedEntryVersion"/> does for a Stock Entry.
+/// </summary>
+public sealed record ExpectedReferenceVersion(ReferenceKind Kind, Guid ReferenceId, Guid ConcurrencyStamp);
+
+/// <summary>
+/// A normalized term - a Unit term or a Location name - the proposal expects to still be free,
+/// because it intends to claim it. Enforced at execution by the same filtered unique indexes that
+/// define the namespace, so a competing writer that claimed it first turns into a typed conflict
+/// rather than a duplicate.
+/// </summary>
+public sealed record ExpectedTermAbsence(ReferenceKind Kind, string NormalizedTerm);
+
+/// <summary>
 /// One exact, immutable, server-stored set of changes awaiting explicit confirmation, bound to the
 /// Participant, ChannelConversation, Inventory, and Turn that produced it, carrying the expected
 /// versions it was decided against and the hash of its single-use token.
@@ -156,6 +235,18 @@ public sealed record ConfirmationProposal
 
     public required IReadOnlyList<ExpectedEquivalentStockAbsence> ExpectedAbsences { get; init; }
 
+    /// <summary>Which payload this proposal carries. Set by the factory, never by a caller.</summary>
+    public required ProposalKind Kind { get; init; }
+
+    /// <summary>The exact administration changes; empty for a stock proposal.</summary>
+    public IReadOnlyList<ProposedReferenceChange> ReferenceChanges { get; init; } = [];
+
+    /// <summary>The versions every existing Unit and Location this proposal touches carried when it was made; empty for a stock proposal.</summary>
+    public IReadOnlyList<ExpectedReferenceVersion> ExpectedReferenceVersions { get; init; } = [];
+
+    /// <summary>The normalized terms this proposal expects to still be free; empty for a stock proposal.</summary>
+    public IReadOnlyList<ExpectedTermAbsence> ExpectedTermAbsences { get; init; } = [];
+
     public required DateTimeOffset CreatedAt { get; init; }
 
     /// <summary>
@@ -164,6 +255,46 @@ public sealed record ConfirmationProposal
     /// proposal exists and a re-driven confirmation cannot mint a second one.
     /// </summary>
     public StockOperationId ExecutionOperationId => StockOperationId.DeriveForProposal(Id);
+
+    /// <summary>
+    /// The reference ledger identity this proposal's execution is recorded under. Like
+    /// <see cref="ExecutionOperationId"/> it is derived from the proposal rather than from whichever
+    /// Turn confirms it, and its hash material is shaped so it can never equal a stock identity.
+    /// </summary>
+    public ReferenceOperationId ReferenceExecutionOperationId => ReferenceOperationId.DeriveForProposal(Id);
+
+    /// <summary>
+    /// The least Membership role a Participant must still hold to execute this proposal. Only a
+    /// Retire raises it, so every stock proposal reports Editor and the shipped confirmation path is
+    /// unchanged by this ticket.
+    /// </summary>
+    public MembershipRole RequiredRole => ReferenceChanges.Any(change => change.RetiresReference)
+        ? MembershipRole.Owner
+        : MembershipRole.Editor;
+
+    /// <summary>
+    /// Every Unit this proposal depends on. Retiring one of them must settle this proposal, because
+    /// what it describes could no longer be applied - and that is true of a stock proposal that would
+    /// create stock at a Unit just as much as of an administration proposal that would rename one.
+    /// </summary>
+    public IReadOnlyList<UnitId> ReferencedUnitIds =>
+    [
+        .. StockReferenceDependencies.UnitsOf(Changes, ExpectedAbsences)
+            .Concat(ReferenceChanges
+                .Where(change => change.Target.Kind == ReferenceKind.Unit)
+                .Select(change => new UnitId(change.Target.ReferenceId)))
+            .Distinct(),
+    ];
+
+    /// <summary>Every Location this proposal depends on. See <see cref="ReferencedUnitIds"/>.</summary>
+    public IReadOnlyList<LocationId> ReferencedLocationIds =>
+    [
+        .. StockReferenceDependencies.LocationsOf(Changes, ExpectedAbsences)
+            .Concat(ReferenceChanges
+                .Where(change => change.Target.Kind == ReferenceKind.Location)
+                .Select(change => new LocationId(change.Target.ReferenceId)))
+            .Distinct(),
+    ];
 
     public DateTimeOffset ExpiresAt => CreatedAt.AddMinutes(LifetimeMinutes);
 
@@ -231,9 +362,80 @@ public sealed record ConfirmationProposal
             ChannelConversationId = channelConversationId.Trim(),
             InventoryId = inventoryId,
             ProposedInTurnId = proposedInTurnId,
+            Kind = ProposalKind.Stock,
             Changes = changes.OrderBy(change => change.Order).ToList(),
             ExpectedVersions = expectedVersions.ToList(),
             ExpectedAbsences = expectedAbsences.ToList(),
+            CreatedAt = createdAt,
+        };
+    }
+
+    /// <summary>
+    /// Creates a reference administration proposal. It enforces the exact parallel of every rule
+    /// <see cref="Create"/> enforces for stock - non-empty, bounded by <see cref="MaxChanges"/>,
+    /// unique order, and an expected version for every <em>existing</em> reference it touches - over
+    /// its own inputs, and passes no stock at all, so no stock invariant is relaxed or bypassed.
+    /// </summary>
+    public static ConfirmationProposal CreateForReferences(
+        ConfirmationTokenHash tokenHash,
+        ParticipantId participantId,
+        string? channelConversationId,
+        InventoryId inventoryId,
+        TurnId proposedInTurnId,
+        IReadOnlyList<ProposedReferenceChange> referenceChanges,
+        IReadOnlyList<ExpectedReferenceVersion> expectedReferenceVersions,
+        IReadOnlyList<ExpectedTermAbsence> expectedTermAbsences,
+        DateTimeOffset createdAt)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(channelConversationId);
+        ArgumentNullException.ThrowIfNull(referenceChanges);
+        ArgumentNullException.ThrowIfNull(expectedReferenceVersions);
+        ArgumentNullException.ThrowIfNull(expectedTermAbsences);
+
+        if (referenceChanges.Count == 0)
+        {
+            throw new ArgumentException("A proposal must carry at least one change.", nameof(referenceChanges));
+        }
+
+        if (referenceChanges.Count > MaxChanges)
+        {
+            throw new ArgumentException($"A proposal must not carry more than {MaxChanges} changes.", nameof(referenceChanges));
+        }
+
+        if (referenceChanges.Select(change => change.Order).Distinct().Count() != referenceChanges.Count)
+        {
+            throw new ArgumentException("Change order must be unique within a proposal.", nameof(referenceChanges));
+        }
+
+        // Every reference that already exists must be pinned to the version this proposal was decided
+        // against. A reference this proposal creates has no version to pin: its safety comes from an
+        // expected term absence and the filtered uniqueness index.
+        var versioned = expectedReferenceVersions.Select(version => (version.Kind, version.ReferenceId)).ToHashSet();
+        foreach (var change in referenceChanges.Where(change => !change.CreatesReference))
+        {
+            if (!versioned.Contains((change.Target.Kind, change.Target.ReferenceId)))
+            {
+                throw new ArgumentException(
+                    "Every existing Unit or Location a proposal touches must carry an expected version.",
+                    nameof(expectedReferenceVersions));
+            }
+        }
+
+        return new ConfirmationProposal
+        {
+            Id = ProposalId.NewId(),
+            TokenHash = tokenHash,
+            ParticipantId = participantId,
+            ChannelConversationId = channelConversationId.Trim(),
+            InventoryId = inventoryId,
+            ProposedInTurnId = proposedInTurnId,
+            Kind = ProposalKind.ReferenceAdministration,
+            Changes = [],
+            ExpectedVersions = [],
+            ExpectedAbsences = [],
+            ReferenceChanges = referenceChanges.OrderBy(change => change.Order).ToList(),
+            ExpectedReferenceVersions = expectedReferenceVersions.ToList(),
+            ExpectedTermAbsences = expectedTermAbsences.ToList(),
             CreatedAt = createdAt,
         };
     }

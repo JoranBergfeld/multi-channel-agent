@@ -69,4 +69,17 @@ public interface IConfirmationProposalStore
     /// as "unknown proposal".
     /// </summary>
     Task<int> DeleteSettledBeforeAsync(DateTimeOffset cutoff, int maxRows, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Settles every Pending proposal in this Inventory that depends on this Unit or Location,
+    /// returning how many moved. Retiring a reference must invalidate them - including stock
+    /// mutation proposals, which would otherwise create or move stock at a reference that no longer
+    /// exists - and it must happen in the same transaction that applied the retirement.
+    /// </summary>
+    Task<int> InvalidateReferencingAsync(
+        InventoryId inventoryId,
+        ReferenceKind kind,
+        Guid referenceId,
+        DateTimeOffset now,
+        CancellationToken cancellationToken);
 }

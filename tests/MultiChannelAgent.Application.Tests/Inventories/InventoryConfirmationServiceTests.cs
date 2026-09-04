@@ -6,10 +6,11 @@ using MultiChannelAgent.Domain.Turns;
 
 namespace MultiChannelAgent.Application.Tests.Inventories;
 
-public sealed class StockConfirmationServiceTests
+public sealed class InventoryConfirmationServiceTests
 {
     private static readonly ParticipantId Editor = new(Guid.Parse("11111111-1111-1111-1111-111111111111"));
     private static readonly ParticipantId Viewer = new(Guid.Parse("22222222-2222-2222-2222-222222222222"));
+    private static readonly ParticipantId Owner = new(Guid.Parse("33333333-3333-3333-3333-333333333333"));
     private static readonly InventoryId SomeInventory = new(Guid.Parse("44444444-4444-4444-4444-444444444444"));
     private static readonly InventoryId AnotherInventory = new(Guid.Parse("bbbbbbbb-4444-4444-4444-444444444444"));
     private static readonly UnitId EachUnit = new(Guid.Parse("55555555-5555-5555-5555-555555555555"));
@@ -20,7 +21,7 @@ public sealed class StockConfirmationServiceTests
 
     private sealed record Harness(
         StockChangeSetService ChangeSets,
-        StockConfirmationService Confirmations,
+        InventoryConfirmationService Confirmations,
         InMemoryStockStore StockStore,
         InMemoryConfirmationProposalStore ProposalStore,
         InMemoryStockChangeSetStore ChangeSetStore);
@@ -46,7 +47,8 @@ public sealed class StockConfirmationServiceTests
         return new Harness(
             new StockChangeSetService(
                 new StockChangeResolver(stockStore, referenceStore), changeSetStore, proposalStore, authorizationService),
-            new StockConfirmationService(proposalStore, changeSetStore, authorizationService),
+            new InventoryConfirmationService(
+                proposalStore, changeSetStore, new InMemoryReferenceAdministrationStore(proposalStore), authorizationService),
             stockStore,
             proposalStore,
             changeSetStore);
@@ -96,7 +98,7 @@ public sealed class StockConfirmationServiceTests
         return (result.Proposal!.Token, source, destination);
     }
 
-    private static Task<StockConfirmationResult> ConfirmAsync(
+    private static Task<InventoryConfirmationResult> ConfirmAsync(
         Harness harness,
         string? token,
         DirectConfirmationEvidence evidence = DirectConfirmationEvidence.Confirmed,
@@ -115,7 +117,7 @@ public sealed class StockConfirmationServiceTests
             now ?? Now,
             CancellationToken.None);
 
-    private static Task<StockConfirmationResult> RejectAsync(
+    private static Task<InventoryConfirmationResult> RejectAsync(
         Harness harness,
         string? token,
         DirectConfirmationEvidence evidence = DirectConfirmationEvidence.Rejected,
@@ -139,7 +141,7 @@ public sealed class StockConfirmationServiceTests
 
         var result = await ConfirmAsync(harness, token);
 
-        Assert.Equal(StockConfirmationResultKind.Completed, result.Kind);
+        Assert.Equal(InventoryConfirmationResultKind.Completed, result.Kind);
         var change = Assert.Single(result.Applied!.Changes);
         Assert.Equal("merged", change.Effect);
         Assert.Equal(destination.Id.ToString(), change.SurvivingStockEntryId);
@@ -156,11 +158,11 @@ public sealed class StockConfirmationServiceTests
         var harness = CreateHarness();
         var (token, _, _) = await ProposeMergeAsync(harness);
 
-        Assert.Equal(StockConfirmationResultKind.Completed, (await ConfirmAsync(harness, token)).Kind);
+        Assert.Equal(InventoryConfirmationResultKind.Completed, (await ConfirmAsync(harness, token)).Kind);
 
         var second = await ConfirmAsync(harness, token);
 
-        Assert.Equal(StockConfirmationResultKind.NotFound, second.Kind);
+        Assert.Equal(InventoryConfirmationResultKind.NotFound, second.Kind);
         Assert.Equal("proposal_not_found", second.Code);
         Assert.Single(harness.ChangeSetStore.AuditFacts);
     }
@@ -174,7 +176,7 @@ public sealed class StockConfirmationServiceTests
 
         var result = await ConfirmAsync(harness, token, DirectConfirmationEvidence.None);
 
-        Assert.Equal(StockConfirmationResultKind.Invalid, result.Kind);
+        Assert.Equal(InventoryConfirmationResultKind.Invalid, result.Kind);
         Assert.Equal("confirmation_evidence_missing", result.Code);
         Assert.Empty(harness.ChangeSetStore.AuditFacts);
         Assert.Equal("10", harness.StockStore.Find(SomeInventory, source.Id)!.Quantity.ToInvariantText());
@@ -190,7 +192,7 @@ public sealed class StockConfirmationServiceTests
 
         var result = await ConfirmAsync(harness, ConfirmationToken.Issue());
 
-        Assert.Equal(StockConfirmationResultKind.Invalid, result.Kind);
+        Assert.Equal(InventoryConfirmationResultKind.Invalid, result.Kind);
         Assert.Equal("proposal_token_mismatch", result.Code);
         Assert.Empty(harness.ChangeSetStore.AuditFacts);
         Assert.Equal("10", harness.StockStore.Find(SomeInventory, source.Id)!.Quantity.ToInvariantText());
@@ -205,7 +207,7 @@ public sealed class StockConfirmationServiceTests
 
         var result = await ConfirmAsync(harness, "not-a-token");
 
-        Assert.Equal(StockConfirmationResultKind.Invalid, result.Kind);
+        Assert.Equal(InventoryConfirmationResultKind.Invalid, result.Kind);
         Assert.Equal("proposal_token_mismatch", result.Code);
         Assert.Empty(harness.ChangeSetStore.AuditFacts);
         Assert.Equal("10", harness.StockStore.Find(SomeInventory, source.Id)!.Quantity.ToInvariantText());
@@ -220,7 +222,7 @@ public sealed class StockConfirmationServiceTests
 
         var result = await ConfirmAsync(harness, token, now: Now.AddMinutes(10));
 
-        Assert.Equal(StockConfirmationResultKind.Conflict, result.Kind);
+        Assert.Equal(InventoryConfirmationResultKind.Conflict, result.Kind);
         Assert.Equal("proposal_expired", result.Code);
         Assert.Empty(harness.ChangeSetStore.AuditFacts);
         Assert.Equal("10", harness.StockStore.Find(SomeInventory, source.Id)!.Quantity.ToInvariantText());
@@ -235,7 +237,7 @@ public sealed class StockConfirmationServiceTests
 
         var result = await ConfirmAsync(harness, token, inventoryId: AnotherInventory);
 
-        Assert.Equal(StockConfirmationResultKind.NotFound, result.Kind);
+        Assert.Equal(InventoryConfirmationResultKind.NotFound, result.Kind);
         Assert.Equal("proposal_not_found", result.Code);
         Assert.Empty(harness.ChangeSetStore.AuditFacts);
         Assert.Equal("10", harness.StockStore.Find(SomeInventory, source.Id)!.Quantity.ToInvariantText());
@@ -249,7 +251,7 @@ public sealed class StockConfirmationServiceTests
 
         var result = await ConfirmAsync(harness, token, conversation: "conversation-2");
 
-        Assert.Equal(StockConfirmationResultKind.NotFound, result.Kind);
+        Assert.Equal(InventoryConfirmationResultKind.NotFound, result.Kind);
         Assert.Equal("proposal_not_found", result.Code);
         Assert.Empty(harness.ChangeSetStore.AuditFacts);
         Assert.Equal("10", harness.StockStore.Find(SomeInventory, source.Id)!.Quantity.ToInvariantText());
@@ -274,12 +276,12 @@ public sealed class StockConfirmationServiceTests
 
         var result = await ConfirmAsync(harness, stale);
 
-        Assert.Equal(StockConfirmationResultKind.Invalid, result.Kind);
+        Assert.Equal(InventoryConfirmationResultKind.Invalid, result.Kind);
         Assert.Equal("proposal_token_mismatch", result.Code);
         Assert.Equal("10", harness.StockStore.Find(SomeInventory, source.Id)!.Quantity.ToInvariantText());
 
         // The replacement is the only thing "confirm" can now mean, and it still works.
-        Assert.Equal(StockConfirmationResultKind.Completed, (await ConfirmAsync(harness, replacement.Proposal!.Token)).Kind);
+        Assert.Equal(InventoryConfirmationResultKind.Completed, (await ConfirmAsync(harness, replacement.Proposal!.Token)).Kind);
         Assert.Null(harness.StockStore.Find(SomeInventory, empty.Id));
     }
 
@@ -293,7 +295,7 @@ public sealed class StockConfirmationServiceTests
 
         var result = await ConfirmAsync(harness, token);
 
-        Assert.Equal(StockConfirmationResultKind.Conflict, result.Kind);
+        Assert.Equal(InventoryConfirmationResultKind.Conflict, result.Kind);
         Assert.Equal("state_changed", result.Code);
         Assert.Empty(harness.ChangeSetStore.AuditFacts);
         Assert.Equal("10", harness.StockStore.Find(SomeInventory, source.Id)!.Quantity.ToInvariantText());
@@ -310,7 +312,7 @@ public sealed class StockConfirmationServiceTests
 
         var result = await RejectAsync(harness, token);
 
-        Assert.Equal(StockConfirmationResultKind.Rejected, result.Kind);
+        Assert.Equal(InventoryConfirmationResultKind.Rejected, result.Kind);
         Assert.Equal("rejected", result.Code);
         Assert.Empty(harness.ChangeSetStore.AuditFacts);
         Assert.Equal("10", harness.StockStore.Find(SomeInventory, source.Id)!.Quantity.ToInvariantText());
@@ -318,7 +320,7 @@ public sealed class StockConfirmationServiceTests
         Assert.Equal(ProposalStatus.Rejected, await harness.ProposalStore.FindStatusAsync(pendingId, CancellationToken.None));
 
         // A rejected proposal can never later be confirmed.
-        Assert.Equal(StockConfirmationResultKind.NotFound, (await ConfirmAsync(harness, token)).Kind);
+        Assert.Equal(InventoryConfirmationResultKind.NotFound, (await ConfirmAsync(harness, token)).Kind);
     }
 
     [Fact]
@@ -330,7 +332,7 @@ public sealed class StockConfirmationServiceTests
 
         var result = await RejectAsync(harness, token, DirectConfirmationEvidence.None);
 
-        Assert.Equal(StockConfirmationResultKind.Invalid, result.Kind);
+        Assert.Equal(InventoryConfirmationResultKind.Invalid, result.Kind);
         Assert.Equal("rejection_evidence_missing", result.Code);
         Assert.Equal(ProposalStatus.Pending, await harness.ProposalStore.FindStatusAsync(pendingId, CancellationToken.None));
     }
@@ -342,7 +344,7 @@ public sealed class StockConfirmationServiceTests
 
         var result = await RejectAsync(harness, token: null);
 
-        Assert.Equal(StockConfirmationResultKind.NotFound, result.Kind);
+        Assert.Equal(InventoryConfirmationResultKind.NotFound, result.Kind);
         Assert.Equal("proposal_not_found", result.Code);
     }
 
@@ -355,9 +357,9 @@ public sealed class StockConfirmationServiceTests
         var confirmation = await ConfirmAsync(harness, token, participantId: Viewer);
         var rejection = await RejectAsync(harness, token, participantId: Viewer);
 
-        Assert.Equal(StockConfirmationResultKind.Forbidden, confirmation.Kind);
+        Assert.Equal(InventoryConfirmationResultKind.Forbidden, confirmation.Kind);
         Assert.Equal("forbidden", confirmation.Code);
-        Assert.Equal(StockConfirmationResultKind.Forbidden, rejection.Kind);
+        Assert.Equal(InventoryConfirmationResultKind.Forbidden, rejection.Kind);
         Assert.Null(confirmation.Applied);
         Assert.Empty(harness.ChangeSetStore.AuditFacts);
         Assert.Equal("10", harness.StockStore.Find(SomeInventory, source.Id)!.Quantity.ToInvariantText());
@@ -371,17 +373,208 @@ public sealed class StockConfirmationServiceTests
         var turnId = TurnId.NewId();
 
         var first = await ConfirmAsync(harness, token, turnId: turnId);
-        Assert.Equal(StockConfirmationResultKind.Completed, first.Kind);
+        Assert.Equal(InventoryConfirmationResultKind.Completed, first.Kind);
 
         // The same Turn, re-driven after a crash between the mutation and its Outcome. The proposal
         // has been consumed, so only the ledger can answer - and it must, rather than re-executing.
         var replay = await ConfirmAsync(harness, token, turnId: turnId);
 
-        Assert.Equal(StockConfirmationResultKind.Completed, replay.Kind);
+        Assert.Equal(InventoryConfirmationResultKind.Completed, replay.Kind);
         Assert.Equal(
             first.Applied!.Changes.Select(change => change.SurvivingStockEntryId),
             replay.Applied!.Changes.Select(change => change.SurvivingStockEntryId));
         Assert.Single(harness.ChangeSetStore.AuditFacts);
         Assert.Equal("14", harness.StockStore.Find(SomeInventory, destination.Id)!.Quantity.ToInvariantText());
+    }
+    private sealed record ReferenceHarness(
+        InventoryConfirmationService Confirmations,
+        InMemoryConfirmationProposalStore ProposalStore,
+        InMemoryReferenceAdministrationStore AdministrationStore,
+        InMemoryInventoryAuthorizationAuditStore AuditStore);
+
+    /// <summary>
+    /// The same shape as <see cref="CreateHarness"/>, plus an Owner and the reference administration
+    /// store. It deliberately reuses the shipped identities and instant so a reference case and a
+    /// stock case are directly comparable.
+    /// </summary>
+    private static ReferenceHarness CreateReferenceHarness(MembershipRole role)
+    {
+        var inventoryStore = new InMemoryInventoryStore(_ => "Owner Name");
+        inventoryStore.GrantMembership(SomeInventory, Owner, role, Now);
+
+        var auditStore = new InMemoryInventoryAuthorizationAuditStore(new InMemoryActiveInventorySelectionStore());
+        var authorizationService = new InventoryAuthorizationService(inventoryStore, auditStore);
+
+        var stockStore = new InMemoryStockStore();
+        var proposalStore = new InMemoryConfirmationProposalStore();
+        var changeSetStore = new InMemoryStockChangeSetStore(stockStore, proposalStore);
+        var administrationStore = new InMemoryReferenceAdministrationStore(proposalStore);
+
+        return new ReferenceHarness(
+            new InventoryConfirmationService(proposalStore, changeSetStore, administrationStore, authorizationService),
+            proposalStore,
+            administrationStore,
+            auditStore);
+    }
+
+    /// <summary>Stores one pending Owner-only Retire proposal and returns it, its plaintext token, and the Unit it would retire.</summary>
+    private static async Task<(ConfirmationProposal Proposal, string Token, Guid UnitId)> StoreRetireProposalAsync(
+        ReferenceHarness harness)
+    {
+        var token = ConfirmationToken.Issue();
+        var unitId = Guid.NewGuid();
+
+        var proposal = ConfirmationProposal.CreateForReferences(
+            ConfirmationToken.HashOf(token),
+            Owner,
+            Conversation,
+            SomeInventory,
+            new TurnId(Guid.NewGuid()),
+            [
+                new ProposedReferenceChange
+                {
+                    Order = 1,
+                    Kind = ReferenceChangeKind.RetireUnit,
+                    Target = new ProposedReferenceState(
+                        ReferenceKind.Unit, unitId, "Cardboard Box", "cardboard box", Reserved: false),
+                },
+            ],
+            [new ExpectedReferenceVersion(ReferenceKind.Unit, unitId, Guid.NewGuid())],
+            [],
+            Now);
+
+        await harness.ProposalStore.StoreAsync(proposal, Now, CancellationToken.None);
+
+        return (proposal, token, unitId);
+    }
+
+    private static Task<InventoryConfirmationResult> ConfirmAsync(
+        ReferenceHarness harness, TurnId turnId, string? token, DirectConfirmationEvidence evidence) =>
+        harness.Confirmations.ConfirmAsync(
+            Owner, SomeInventory, turnId, token, evidence, Conversation, Now, CancellationToken.None);
+
+    [Fact]
+    public async Task An_Owner_confirming_a_Retire_executes_it_exactly_once()
+    {
+        var harness = CreateReferenceHarness(MembershipRole.Owner);
+        var (proposal, token, unitId) = await StoreRetireProposalAsync(harness);
+        var turnId = new TurnId(Guid.NewGuid());
+
+        var result = await ConfirmAsync(harness, turnId, token, DirectConfirmationEvidence.Confirmed);
+
+        Assert.Equal(InventoryConfirmationResultKind.Completed, result.Kind);
+        var change = Assert.Single(result.AppliedReferences!.Changes);
+        Assert.Equal("retire_unit", change.Operation);
+        Assert.Equal(unitId.ToString(), change.ReferenceId);
+        Assert.Equal("Unit:Retired", Assert.Single(harness.AdministrationStore.Audits).OutcomeCode);
+        Assert.Equal(
+            ProposalStatus.Confirmed,
+            await harness.ProposalStore.FindStatusAsync(proposal.Id, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task An_Editor_may_not_confirm_a_Retire_and_the_denial_is_audited()
+    {
+        var harness = CreateReferenceHarness(MembershipRole.Editor);
+        var (proposal, token, _) = await StoreRetireProposalAsync(harness);
+
+        var result = await ConfirmAsync(harness, new TurnId(Guid.NewGuid()), token, DirectConfirmationEvidence.Confirmed);
+
+        Assert.Equal(InventoryConfirmationResultKind.Forbidden, result.Kind);
+        Assert.Equal("forbidden", result.Code);
+        Assert.Empty(harness.AdministrationStore.Audits);
+        Assert.Contains(harness.AuditStore.RecordedFacts, fact => fact.OutcomeCode == "Denied:InsufficientRole");
+
+        // A denied confirmation must not burn the Participant's own pending work: lookup is
+        // per-Participant, nobody else can reach it, and it expires on its own in ten minutes.
+        Assert.Equal(
+            ProposalStatus.Pending,
+            await harness.ProposalStore.FindStatusAsync(proposal.Id, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task A_reference_proposal_still_needs_the_Participants_own_direct_confirmation()
+    {
+        var harness = CreateReferenceHarness(MembershipRole.Owner);
+        var (proposal, token, _) = await StoreRetireProposalAsync(harness);
+
+        var result = await ConfirmAsync(harness, new TurnId(Guid.NewGuid()), token, DirectConfirmationEvidence.None);
+
+        Assert.Equal(InventoryConfirmationResultKind.Invalid, result.Kind);
+        Assert.Equal("confirmation_evidence_missing", result.Code);
+        Assert.Empty(harness.AdministrationStore.Audits);
+        Assert.Equal(
+            ProposalStatus.Pending,
+            await harness.ProposalStore.FindStatusAsync(proposal.Id, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task A_reference_proposal_whose_reference_moved_underneath_it_conflicts_and_is_settled()
+    {
+        var harness = CreateReferenceHarness(MembershipRole.Owner);
+        var (proposal, token, unitId) = await StoreRetireProposalAsync(harness);
+        harness.AdministrationStore.SetVersion(ReferenceKind.Unit, unitId, Guid.NewGuid());
+
+        var result = await ConfirmAsync(harness, new TurnId(Guid.NewGuid()), token, DirectConfirmationEvidence.Confirmed);
+
+        Assert.Equal(InventoryConfirmationResultKind.Conflict, result.Kind);
+        Assert.Equal("state_changed", result.Code);
+        Assert.Equal(
+            ProposalStatus.Conflicted,
+            await harness.ProposalStore.FindStatusAsync(proposal.Id, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task A_confirmed_Retire_that_stock_now_references_changes_nothing()
+    {
+        var harness = CreateReferenceHarness(MembershipRole.Owner);
+        var (proposal, token, unitId) = await StoreRetireProposalAsync(harness);
+
+        // Stock was created against this Unit after the proposal was reviewed. Current state at
+        // execution is what decides, so the confirmation must fail rather than retire a used Unit.
+        harness.AdministrationStore.SetStockReferences(ReferenceKind.Unit, unitId, 1);
+
+        var result = await ConfirmAsync(harness, new TurnId(Guid.NewGuid()), token, DirectConfirmationEvidence.Confirmed);
+
+        Assert.Equal(InventoryConfirmationResultKind.Conflict, result.Kind);
+        Assert.Empty(harness.AdministrationStore.Audits);
+        Assert.Equal(
+            ProposalStatus.Conflicted,
+            await harness.ProposalStore.FindStatusAsync(proposal.Id, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task A_Turn_that_already_executed_a_reference_proposal_re_reports_it()
+    {
+        var harness = CreateReferenceHarness(MembershipRole.Owner);
+        var (_, token, _) = await StoreRetireProposalAsync(harness);
+        var turnId = new TurnId(Guid.NewGuid());
+
+        var first = await ConfirmAsync(harness, turnId, token, DirectConfirmationEvidence.Confirmed);
+        var replay = await ConfirmAsync(harness, turnId, token, DirectConfirmationEvidence.Confirmed);
+
+        Assert.Equal(InventoryConfirmationResultKind.Completed, first.Kind);
+        Assert.Equal(InventoryConfirmationResultKind.Completed, replay.Kind);
+        Assert.Equal(
+            first.AppliedReferences!.Changes[0].ReferenceId,
+            replay.AppliedReferences!.Changes[0].ReferenceId);
+        Assert.Single(harness.AdministrationStore.Audits);
+    }
+
+    [Fact]
+    public async Task Rejecting_a_reference_proposal_changes_nothing_at_all()
+    {
+        var harness = CreateReferenceHarness(MembershipRole.Owner);
+        var (proposal, token, _) = await StoreRetireProposalAsync(harness);
+
+        var result = await harness.Confirmations.RejectAsync(
+            Owner, SomeInventory, new TurnId(Guid.NewGuid()), token, DirectConfirmationEvidence.Rejected,
+            Conversation, Now, CancellationToken.None);
+
+        Assert.Equal(InventoryConfirmationResultKind.Rejected, result.Kind);
+        Assert.Empty(harness.AdministrationStore.Audits);
+        Assert.Equal(
+            ProposalStatus.Rejected,
+            await harness.ProposalStore.FindStatusAsync(proposal.Id, CancellationToken.None));
     }
 }

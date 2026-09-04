@@ -417,7 +417,7 @@ public sealed class SqlStockChangeSetStoreTests : SqlIntegrationTestBase
         var proposalId = await StoreProposalAsync([change], versions);
 
         // Both confirmations derive the same execution identity from the same proposal, exactly as
-        // StockConfirmationService does.
+        // InventoryConfirmationService does.
         var operationId = StockOperationId.DeriveForProposal(proposalId);
 
         using var first = NewContext();

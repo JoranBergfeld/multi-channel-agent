@@ -32,7 +32,12 @@ public static class ServiceCollectionExtensions
         services.AddScoped<IDeliverySender, LoggingDeliverySender>();
         services.AddSingleton(TimeProvider.System);
         services.AddScoped<IModelBoundary, ScriptedModelBoundary>();
-        services.AddScoped<IToolDispatcher, StockToolDispatcher>();
+        services.AddScoped<StockToolDispatcher>();
+        services.AddScoped<ReferenceToolDispatcher>();
+
+        // One registered dispatcher, which routes by an explicit closed set of tool names.
+        services.AddScoped<IToolDispatcher>(sp => new InventoryToolRouter(
+            sp.GetRequiredService<StockToolDispatcher>(), sp.GetRequiredService<ReferenceToolDispatcher>()));
         services.AddScoped<TurnAcceptanceService>();
         services.AddScoped<TurnProcessingCoordinator>();
         services.AddScoped<DeliveryDispatchCoordinator>();
@@ -53,6 +58,11 @@ public static class ServiceCollectionExtensions
         services.AddScoped<IInventoryReferenceStore, SqlInventoryReferenceStore>();
         services.AddScoped<IConfirmationProposalStore, SqlConfirmationProposalStore>();
         services.AddScoped<IStockChangeSetStore, SqlStockChangeSetStore>();
+        services.AddScoped<IReferenceCatalogStore, SqlReferenceCatalogStore>();
+        services.AddScoped<IReferenceAdministrationStore, SqlReferenceAdministrationStore>();
+        services.AddScoped<ReferenceChangeResolver>();
+        services.AddScoped<ReferenceAdministrationService>();
+        services.AddScoped<ReferenceListingService>();
 
         // Only ever constructed (and its TokenCredential only ever built/validated) the first time
         // something actually resolves ITenantMemberDirectory - which never happens for
@@ -80,7 +90,7 @@ public static class ServiceCollectionExtensions
         services.AddScoped<StockMutationService>();
         services.AddScoped<StockChangeResolver>();
         services.AddScoped<StockChangeSetService>();
-        services.AddScoped<StockConfirmationService>();
+        services.AddScoped<InventoryConfirmationService>();
         services.AddScoped<ConfirmationProposalLifecycle>();
         services.AddScoped<ConfirmationProposalCleanupCoordinator>();
 

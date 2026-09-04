@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using MultiChannelAgent.Application.Inventories;
 using MultiChannelAgent.Domain.Inventories;
 using MultiChannelAgent.Infrastructure.Persistence;
+using MultiChannelAgent.Infrastructure.Persistence.Entities;
 
 namespace MultiChannelAgent.Infrastructure.Inventories;
 
@@ -52,6 +53,29 @@ public sealed class SqlConfirmationProposalStore(MultiChannelAgentDbContext db) 
                     cancellationToken);
 
             db.ConfirmationProposals.Add(ConfirmationProposalMapper.ToEntity(proposal));
+
+            // Written in the same transaction as the proposal itself. A retire that ran between the
+            // two would otherwise miss a proposal that already existed, and that proposal would go on
+            // to be confirmable against a reference that no longer exists.
+            foreach (var unitId in proposal.ReferencedUnitIds)
+            {
+                db.ConfirmationProposalReferences.Add(new ConfirmationProposalReferenceEntity
+                {
+                    ProposalId = proposal.Id.Value,
+                    ReferenceKind = nameof(ReferenceKind.Unit),
+                    ReferenceId = unitId.Value,
+                });
+            }
+
+            foreach (var locationId in proposal.ReferencedLocationIds)
+            {
+                db.ConfirmationProposalReferences.Add(new ConfirmationProposalReferenceEntity
+                {
+                    ProposalId = proposal.Id.Value,
+                    ReferenceKind = nameof(ReferenceKind.Location),
+                    ReferenceId = locationId.Value,
+                });
+            }
             await db.SaveChangesAsync(cancellationToken);
             await transaction.CommitAsync(cancellationToken);
 
@@ -168,5 +192,44 @@ public sealed class SqlConfirmationProposalStore(MultiChannelAgentDbContext db) 
         return await db.ConfirmationProposals
             .Where(p => deletableIds.Contains(p.ProposalId))
             .ExecuteDeleteAsync(cancellationToken);
+    }
+
+    public async Task<int> InvalidateReferencingAsync(
+        InventoryId inventoryId,
+        ReferenceKind kind,
+        Guid referenceId,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        var kindText = kind.ToString();
+
+        // Selected first and then updated by identity: the two-statement shape is the portable one
+        // this store already uses for its sweeps, and it keeps the update a plain keyed statement
+        // rather than one carrying a correlated subquery every provider must translate.
+        var affected = await db.ConfirmationProposalReferences
+            .AsNoTracking()
+            .Where(r => r.ReferenceKind == kindText && r.ReferenceId == referenceId)
+            .Join(
+                db.ConfirmationProposals.AsNoTracking()
+                    .Where(p => p.InventoryId == inventoryId.Value && p.Status == PendingStatus),
+                reference => reference.ProposalId,
+                proposal => proposal.ProposalId,
+                (_, proposal) => proposal.ProposalId)
+            .Distinct()
+            .ToListAsync(cancellationToken);
+
+        if (affected.Count == 0)
+        {
+            return 0;
+        }
+
+        return await db.ConfirmationProposals
+            .Where(p => affected.Contains(p.ProposalId) && p.Status == PendingStatus)
+            .ExecuteUpdateAsync(
+                setters => setters
+                    .SetProperty(p => p.Status, nameof(ProposalStatus.Conflicted))
+                    .SetProperty(p => p.SettledAt, now)
+                    .SetProperty(p => p.SettledAtTicks, now.UtcTicks),
+                cancellationToken);
     }
 }

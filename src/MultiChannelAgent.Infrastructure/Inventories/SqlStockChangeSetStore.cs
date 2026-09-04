@@ -63,12 +63,33 @@ public sealed class SqlStockChangeSetStore(MultiChannelAgentDbContext db) : ISto
             return new StockChangeSetStoreResult(StockChangeSetStoreOutcome.AlreadyApplied, already);
         }
 
-        await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+        await using var transaction = await db.Database.BeginTransactionAsync(
+            AssignedReferenceLocks.Isolation, cancellationToken);
 
         try
         {
-            // 1. Consume the proposal, guarded. Doing this first means a losing confirmation stops
-            //    here, before it has touched any Stock at all.
+            // 1. Lock and verify every Unit and Location this set's final states reference, before
+            //    anything else this transaction will hold, and in the order
+            //    SqlReferenceAdministrationStore uses. A proposal may have been reviewed minutes ago;
+            //    a Retire since then must stop it here rather than let it create or place Stock at a
+            //    reference that no longer exists.
+            //
+            //    This comes before the proposal on purpose. A Retire takes the reference and only then
+            //    settles the pending proposals that referenced it, so consuming the proposal first
+            //    would leave each side holding exactly what the other waits for. Reference, then
+            //    proposal, then Stock rows is the one order both stores agree on - and reading a
+            //    reference writes nothing, so a losing confirmation still touches no data.
+            if (!await AssignedReferenceLocks.TryHoldActiveAsync(
+                    db,
+                    command.InventoryId,
+                    StockReferenceDependencies.UnitsOf(command.Changes, command.ExpectedAbsences),
+                    StockReferenceDependencies.LocationsOf(command.Changes, command.ExpectedAbsences),
+                    cancellationToken))
+            {
+                return await RolledBackConflictAsync(transaction);
+            }
+
+            // 2. Consume the proposal, guarded, so a losing confirmation stops before any Stock moves.
             if (command.ConsumesProposalId is { } proposalId)
             {
                 var consumed = await db.ConfirmationProposals
@@ -86,7 +107,7 @@ public sealed class SqlStockChangeSetStore(MultiChannelAgentDbContext db) : ISto
                 }
             }
 
-            // 2. Lock and verify every touched row, in one globally agreed order. Each statement both
+            // 3. Lock and verify every touched row, in one globally agreed order. Each statement both
             //    takes the row's exclusive lock and asserts the version the proposal was decided
             //    against, so a row that moved since stops the whole set here.
             foreach (var expected in command.ExpectedVersions.OrderBy(v => v.StockEntryId.Value.ToString("D"), StringComparer.Ordinal))
@@ -105,7 +126,7 @@ public sealed class SqlStockChangeSetStore(MultiChannelAgentDbContext db) : ISto
                 }
             }
 
-            // 3. Verify every expected absence. The Equivalent Stock unique indexes are the real
+            // 4. Verify every expected absence. The Equivalent Stock unique indexes are the real
             //    guarantee; this check turns the common case into a clean conflict rather than an
             //    exception.
             foreach (var absence in command.ExpectedAbsences)
@@ -116,7 +137,7 @@ public sealed class SqlStockChangeSetStore(MultiChannelAgentDbContext db) : ISto
                 }
             }
 
-            // 4. Apply the effects in the order the Participant reviewed.
+            // 5. Apply the effects in the order the Participant reviewed.
             var effects = new List<RecordedStockChangeEffect>(command.Changes.Count);
             foreach (var change in command.Changes.OrderBy(change => change.Order))
             {
@@ -129,7 +150,7 @@ public sealed class SqlStockChangeSetStore(MultiChannelAgentDbContext db) : ISto
                 effects.Add(applied);
             }
 
-            // 5. Ledger, effects, and one minimal semantic audit fact per change.
+            // 6. Ledger, effects, and one minimal semantic audit fact per change.
             db.StockChangeSetOperations.Add(new StockChangeSetOperationEntity
             {
                 OperationId = command.OperationId.Value,

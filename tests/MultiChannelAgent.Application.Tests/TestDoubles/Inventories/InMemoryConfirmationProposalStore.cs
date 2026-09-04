@@ -89,6 +89,39 @@ public sealed class InMemoryConfirmationProposalStore : IConfirmationProposalSto
         return Task.FromResult(deletable.Count);
     }
 
+    /// <summary>
+    /// Settles every pending proposal that references this Unit or Location, as retiring it must -
+    /// including a stock proposal, which could otherwise create or move stock at a reference that no
+    /// longer exists.
+    /// </summary>
+    public async Task<int> InvalidateReferencingAsync(
+        InventoryId inventoryId,
+        ReferenceKind kind,
+        Guid referenceId,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        var affected = _rows.Values
+            .Where(row => row.Status == ProposalStatus.Pending
+                && row.Proposal.InventoryId == inventoryId
+                && (kind == ReferenceKind.Unit
+                    ? row.Proposal.ReferencedUnitIds.Contains(new UnitId(referenceId))
+                    : row.Proposal.ReferencedLocationIds.Contains(new LocationId(referenceId))))
+            .Select(row => row.Proposal.Id)
+            .ToList();
+
+        var settled = 0;
+        foreach (var proposalId in affected)
+        {
+            if (await SettleAsync(proposalId, ProposalStatus.Conflicted, now, cancellationToken))
+            {
+                settled++;
+            }
+        }
+
+        return settled;
+    }
+
     private Row? FindPendingRow(ParticipantId participantId, string channelConversationId) => _rows.Values.SingleOrDefault(row =>
         row.Status == ProposalStatus.Pending
         && row.Proposal.ParticipantId == participantId

@@ -22,5 +22,16 @@ public sealed class UnitEntity
 
     public bool IsReserved { get; set; }
 
+    /// <summary>
+    /// Regenerated on every administrative write. It is what an <c>ExpectedReferenceVersion</c> pins,
+    /// so a proposal decided against a Unit nobody holds any more can never land. It is deliberately
+    /// not an EF concurrency token: every write to it goes through a guarded ExecuteUpdate rather than
+    /// the change tracker.
+    /// </summary>
+    public Guid ConcurrencyStamp { get; set; }
+
+    /// <summary>When this Unit was withdrawn from matching and assignment, or null while it is active. The row - and the identity - always remain.</summary>
+    public DateTimeOffset? RetiredAt { get; set; }
+
     public DateTimeOffset CreatedAt { get; set; }
 }

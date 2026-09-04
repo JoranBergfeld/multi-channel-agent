@@ -16,6 +16,14 @@ public sealed class InMemoryInventoryReferenceStore : IInventoryReferenceStore
     private readonly HashSet<(InventoryId, LocationId)> _locations = [];
     private readonly Dictionary<(InventoryId, UnitId), string> _unitCanonicalNames = [];
     private readonly Dictionary<(InventoryId, LocationId), string> _locationDisplayNames = [];
+    private readonly HashSet<(InventoryId, UnitId)> _retiredUnits = [];
+    private readonly HashSet<(InventoryId, LocationId)> _retiredLocations = [];
+
+    /// <summary>Withdraws a Unit from resolution exactly as retiring it does in SQL: it becomes as unknown as one that never existed.</summary>
+    public void RetireUnit(InventoryId inventoryId, UnitId unitId) => _retiredUnits.Add((inventoryId, unitId));
+
+    /// <summary>Withdraws a Location from resolution. See <see cref="RetireUnit"/>.</summary>
+    public void RetireLocation(InventoryId inventoryId, LocationId locationId) => _retiredLocations.Add((inventoryId, locationId));
 
     public void AddUnit(InventoryId inventoryId, UnitId unitId, params string[] terms)
     {
@@ -40,21 +48,27 @@ public sealed class InMemoryInventoryReferenceStore : IInventoryReferenceStore
     }
 
     public Task<string?> FindUnitCanonicalNameAsync(InventoryId inventoryId, UnitId unitId, CancellationToken cancellationToken) =>
-        Task.FromResult(_unitCanonicalNames.TryGetValue((inventoryId, unitId), out var name) ? name : null);
+        Task.FromResult(!_retiredUnits.Contains((inventoryId, unitId))
+            && _unitCanonicalNames.TryGetValue((inventoryId, unitId), out var name) ? name : null);
 
     public Task<string?> FindLocationNameAsync(InventoryId inventoryId, LocationId locationId, CancellationToken cancellationToken) =>
-        Task.FromResult(_locationDisplayNames.TryGetValue((inventoryId, locationId), out var name) ? name : null);
+        Task.FromResult(!_retiredLocations.Contains((inventoryId, locationId))
+            && _locationDisplayNames.TryGetValue((inventoryId, locationId), out var name) ? name : null);
 
     public Task<UnitId?> ResolveUnitAsync(InventoryId inventoryId, string reference, CancellationToken cancellationToken)
     {
         if (Guid.TryParse(reference, out var id))
         {
             var unitId = new UnitId(id);
-            return Task.FromResult<UnitId?>(_units.Contains((inventoryId, unitId)) ? unitId : null);
+            return Task.FromResult<UnitId?>(
+                _units.Contains((inventoryId, unitId)) && !_retiredUnits.Contains((inventoryId, unitId)) ? unitId : null);
         }
 
         return Task.FromResult<UnitId?>(
-            _unitTerms.TryGetValue((inventoryId, NameNormalization.Normalize(reference)), out var resolved) ? resolved : null);
+            _unitTerms.TryGetValue((inventoryId, NameNormalization.Normalize(reference)), out var resolved)
+                && !_retiredUnits.Contains((inventoryId, resolved))
+                    ? resolved
+                    : null);
     }
 
     public Task<LocationId?> ResolveLocationAsync(InventoryId inventoryId, string reference, CancellationToken cancellationToken)
@@ -62,10 +76,16 @@ public sealed class InMemoryInventoryReferenceStore : IInventoryReferenceStore
         if (Guid.TryParse(reference, out var id))
         {
             var locationId = new LocationId(id);
-            return Task.FromResult<LocationId?>(_locations.Contains((inventoryId, locationId)) ? locationId : null);
+            return Task.FromResult<LocationId?>(
+                _locations.Contains((inventoryId, locationId)) && !_retiredLocations.Contains((inventoryId, locationId))
+                    ? locationId
+                    : null);
         }
 
         return Task.FromResult<LocationId?>(
-            _locationNames.TryGetValue((inventoryId, NameNormalization.Normalize(reference)), out var resolved) ? resolved : null);
+            _locationNames.TryGetValue((inventoryId, NameNormalization.Normalize(reference)), out var resolved)
+                && !_retiredLocations.Contains((inventoryId, resolved))
+                    ? resolved
+                    : null);
     }
 }

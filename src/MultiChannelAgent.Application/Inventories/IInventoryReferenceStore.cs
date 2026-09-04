@@ -11,6 +11,11 @@ namespace MultiChannelAgent.Application.Inventories;
 /// Resolution is always scoped to one Inventory, so a reference can never reach across Inventory
 /// boundaries, and this store is only ever reached after the caller has been authorized for that
 /// Inventory.
+///
+/// Resolution is also <b>active-only</b>: a retired Unit, a retired term, and a retired Location all
+/// resolve to nothing, exactly like one that never existed. That is what makes "retired Units and
+/// Locations are excluded from matching" true for every caller at once - stock reads, stock
+/// mutations, and later Import - rather than a rule each of them has to remember.
 /// </summary>
 public interface IInventoryReferenceStore
 {

@@ -24,8 +24,16 @@ public sealed class UnitTermEntityConfiguration : IEntityTypeConfiguration<UnitT
             .HasPrincipalKey(e => new { e.InventoryId, e.Id })
             .OnDelete(DeleteBehavior.Cascade);
 
-        // Unit canonical names and aliases share one collision-free namespace within an Inventory:
-        // a term identifies at most one active Unit.
-        builder.HasIndex(e => new { e.InventoryId, e.NormalizedTerm }).IsUnique();
+        // Unit canonical names and aliases share one collision-free namespace within an Inventory: a
+        // term identifies at most one *active* Unit. Retiring a Unit retires its terms, which returns
+        // their names to the namespace while the rows - and the identity - remain, so the constraint
+        // is written over active rows only. The filter is plain unquoted SQL text, valid on both SQL
+        // Server and SQLite, exactly like the shipped Equivalent Stock filters.
+        builder.HasIndex(e => new { e.InventoryId, e.NormalizedTerm })
+            .IsUnique()
+            .HasFilter("RetiredAt IS NULL");
+
+        // Supports reading one Unit's own terms, which every alias change and every rename needs.
+        builder.HasIndex(e => new { e.InventoryId, e.UnitId, e.RetiredAt });
     }
 }
