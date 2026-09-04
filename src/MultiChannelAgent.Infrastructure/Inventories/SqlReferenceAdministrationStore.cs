@@ -26,11 +26,14 @@ namespace MultiChannelAgent.Infrastructure.Inventories;
 /// Three things here are deliberate rather than incidental:
 ///
 /// <list type="bullet">
-/// <item><b>Locking order.</b> The verify pass touches every row the set will write to in one
-/// globally agreed order - Units before Locations, then the ordinal text of the identity - with a
-/// single guarded UPDATE per row that both takes the row's exclusive lock and checks its expected
-/// version. Two concurrent sets over overlapping references therefore contend in the same order and
-/// one simply loses, instead of deadlocking halfway through.</item>
+/// <item><b>Locking order.</b> Reference, then proposal, then the writes - the same order
+/// <see cref="AssignedReferenceLocks"/> documents and <see cref="SqlStockChangeSetStore"/> follows,
+/// so the two stores genuinely share one. Within references it is Units before Locations, then the
+/// ordinal text of the identity, with a single guarded UPDATE per row that both takes the row's
+/// exclusive lock and checks its expected version. Taking the proposal first would be the one
+/// inversion available here, because this transaction later settles every other pending proposal that
+/// referenced what it retires: a confirmation holding its own proposal and waiting on a reference
+/// would be holding exactly what a competing Retire reaches for.</item>
 /// <item><b>Serializable for a Retire.</b> Under read-committed, a Stock Entry could be decided
 /// against an active Unit and inserted just after this transaction commits, leaving a retired Unit
 /// with stock referencing it. A Retire's conflict check is a range query, so serializable isolation
@@ -97,8 +100,29 @@ public sealed class SqlReferenceAdministrationStore(
 
         try
         {
-            // 1. Consume the proposal, guarded. Doing this first means a losing confirmation stops
-            //    here, before it has touched any reference data at all.
+            // 1. Lock and verify every touched reference first, in one globally agreed order. Each
+            //    statement both takes the row's exclusive lock and asserts the version the proposal was
+            //    decided against, so a reference that moved since stops the whole set here - and does
+            //    so before this proposal has been consumed, leaving it pending.
+            //
+            //    References come before the proposal for the same reason they do in
+            //    SqlStockChangeSetStore, and it is the same shared order: reference, then proposal,
+            //    then the writes. This transaction will later settle every other pending proposal that
+            //    referenced what it retires, so a confirmation that took its own proposal first would
+            //    hold exactly what a competing Retire is reaching for while waiting on the very
+            //    reference that Retire is holding.
+            foreach (var expected in command.ExpectedVersions
+                .OrderBy(version => version.Kind)
+                .ThenBy(version => version.ReferenceId.ToString("D"), StringComparer.Ordinal))
+            {
+                if (!await LockAndVerifyAsync(command.InventoryId, expected, cancellationToken))
+                {
+                    return await RolledBackConflictAsync(transaction);
+                }
+            }
+
+            // 2. Consume the proposal, guarded, so a losing confirmation stops before anything is
+            //    applied. Every write above it is rolled back with the rest if it does.
             if (command.ConsumesProposalId is { } proposalId)
             {
                 var consumed = await db.ConfirmationProposals
@@ -111,19 +135,6 @@ public sealed class SqlReferenceAdministrationStore(
                         cancellationToken);
 
                 if (consumed != 1)
-                {
-                    return await RolledBackConflictAsync(transaction);
-                }
-            }
-
-            // 2. Lock and verify every touched reference, in one globally agreed order. Each statement
-            //    both takes the row's exclusive lock and asserts the version the proposal was decided
-            //    against, so a reference that moved since stops the whole set here.
-            foreach (var expected in command.ExpectedVersions
-                .OrderBy(version => version.Kind)
-                .ThenBy(version => version.ReferenceId.ToString("D"), StringComparer.Ordinal))
-            {
-                if (!await LockAndVerifyAsync(command.InventoryId, expected, cancellationToken))
                 {
                     return await RolledBackConflictAsync(transaction);
                 }
@@ -166,7 +177,7 @@ public sealed class SqlReferenceAdministrationStore(
 
             // 6. Settle every *other* pending proposal that depended on something this set retired -
             //    stock proposals included. The proposal being confirmed right now cannot be caught by
-            //    this: step 1 already moved it out of Pending.
+            //    this: step 2 already moved it out of Pending.
             foreach (var retire in retires)
             {
                 await proposalStore.InvalidateReferencingAsync(
