@@ -458,4 +458,20 @@ public class ScriptedModelBoundaryTests
 
         Assert.Equal(ModelProposalKind.Direct, proposal.Kind);
     }
+
+    /// <summary>
+    /// The administration grammar must not narrow the stock grammar. A clause word ends a subject
+    /// wherever it appears, so "from" and "alias" are deliberately not clause words on their own -
+    /// otherwise a Stock Entry really called "Bolts from Germany" would be silently truncated.
+    /// </summary>
+    [Theory]
+    [InlineData("add stock Bolts from Germany quantity 5", "Bolts from Germany")]
+    [InlineData("add stock Alias Cards quantity 2", "Alias Cards")]
+    public async Task The_administration_grammar_never_swallows_part_of_a_Stock_Entry_name(string content, string expectedName)
+    {
+        var proposal = await ProposeAsync(content);
+
+        Assert.Equal("add_stock", proposal.ToolCall!.ToolName);
+        Assert.Equal(expectedName, proposal.ToolCall.UntrustedArgs["reference"]);
+    }
 }

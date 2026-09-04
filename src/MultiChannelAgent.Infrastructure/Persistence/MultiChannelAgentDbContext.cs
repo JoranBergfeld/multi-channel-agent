@@ -57,15 +57,22 @@ public sealed class MultiChannelAgentDbContext(DbContextOptions<MultiChannelAgen
     public DbSet<FoundryConversationBindingEntity> FoundryConversationBindings => Set<FoundryConversationBindingEntity>();
 
     /// <summary>
-    /// The columns Stock ordering and keyset pagination compare
-    /// (<see cref="Domain.Inventories.StockEntryOrderKey"/>). They must compare exactly as the domain
+    /// The columns Stock and reference ordering, keyset pagination, and uniqueness compare
+    /// (<see cref="Domain.Inventories.StockEntryOrderKey"/> and
+    /// <see cref="Domain.Inventories.ReferenceOrderKey"/>). They must compare exactly as the domain
     /// does - ordinally - so the database's order is the domain's order rather than a locale-dependent
     /// approximation of it.
+    ///
+    /// <c>UnitTerms.NormalizedTerm</c> belongs here for both reasons at once: the shared Unit term
+    /// namespace's filtered unique index is enforced against it, and bounded suggestions order by it.
+    /// Left on a default collation it would make the namespace accent-insensitive on SQL Server and
+    /// accent-sensitive on SQLite, and order suggestions differently on each.
     /// </summary>
     private static readonly (Type EntityType, string PropertyName)[] OrdinalOrderKeyColumns =
     [
         (typeof(StockEntryEntity), nameof(StockEntryEntity.NormalizedName)),
         (typeof(UnitEntity), nameof(UnitEntity.NormalizedCanonicalName)),
+        (typeof(UnitTermEntity), nameof(UnitTermEntity.NormalizedTerm)),
         (typeof(LocationEntity), nameof(LocationEntity.NormalizedName)),
     ];
 

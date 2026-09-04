@@ -1,5 +1,5 @@
+using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.DependencyInjection;
 using MultiChannelAgent.Application.Inventories;
 using MultiChannelAgent.Domain.Inventories;
 using MultiChannelAgent.Domain.Turns;
@@ -10,261 +10,298 @@ using MultiChannelAgent.Infrastructure.Persistence.Entities;
 namespace MultiChannelAgent.IntegrationTests.Inventories;
 
 /// <summary>
-/// A failed reference change set must never leave anything staged in the scope's change tracker
-/// for an unrelated later write to commit by accident.
+/// Fast, Docker-free regression coverage for the EF Core <c>ChangeTracker</c> contamination invariant
+/// behind <see cref="SqlReferenceAdministrationStore"/>, mirroring
+/// <see cref="SqlStockChangeSetStoreChangeTrackerIsolationTests"/>: a real relational engine is used -
+/// not a mock and not the InMemory provider, neither of which enforces the filtered uniqueness this
+/// depends on - to reproduce, in a single shared <see cref="MultiChannelAgentDbContext"/>, exactly the
+/// failure mode production exercises.
+///
+/// A reference change set stages its inserts - a created Unit, its terms, a created Location, the
+/// audits, and the ledger - on the <c>ChangeTracker</c> before later guarded statements run. One
+/// coordinator scope processes a whole batch of Turns through one DbContext, so a change set that
+/// ends in a conflict must leave nothing staged behind: the very next Turn's
+/// <c>SaveChangesAsync</c> in that same scope would otherwise flush reference data nobody asked for.
+///
+/// The invariant is provider-independent, so it is proven here rather than behind a Docker gate.
 /// </summary>
-public sealed class SqlReferenceAdministrationStoreChangeTrackerIsolationTests : SqlIntegrationTestBase
+public sealed class SqlReferenceAdministrationStoreChangeTrackerIsolationTests : IDisposable
 {
-    private MultiChannelAgentDbContext Db(IServiceScope scope) =>
-        scope.ServiceProvider.GetRequiredService<MultiChannelAgentDbContext>();
+    private static readonly DateTimeOffset Now = new(2026, 9, 4, 10, 0, 0, TimeSpan.Zero);
 
-    private async Task<(Guid InventoryId, Guid EachUnitId)> SeedInventoryAsync()
+    private readonly SqliteConnection _connection;
+    private readonly MultiChannelAgentDbContext _db;
+    private readonly Guid _inventoryId = Guid.NewGuid();
+    private readonly Guid _eachUnitId = Guid.NewGuid();
+    private readonly ParticipantId _actorId = new(Guid.NewGuid());
+
+    public SqlReferenceAdministrationStoreChangeTrackerIsolationTests()
     {
-        using var scope = Factory!.Services.CreateScope();
-        var db = Db(scope);
+        // An in-memory SQLite database only persists for the lifetime of one open connection, so it is
+        // kept open for the whole test and shared by every use below - just as one coordinator scope
+        // shares one DbContext, and one connection, across a whole batch of Turns in production.
+        _connection = new SqliteConnection("DataSource=:memory:");
+        _connection.Open();
 
-        var inventoryId = Guid.NewGuid();
-        var participantId = Guid.NewGuid();
+        _db = new MultiChannelAgentDbContext(
+            new DbContextOptionsBuilder<MultiChannelAgentDbContext>().UseSqlite(_connection).Options);
+        _db.Database.EnsureCreated();
 
-        db.Participants.Add(new ParticipantEntity
-        {
-            Id = participantId,
-            DisplayName = "Catalog Owner",
-            CreatedAt = DateTimeOffset.UnixEpoch,
-        });
-        db.Inventories.Add(new InventoryEntity
-        {
-            Id = inventoryId,
-            Name = "Catalog Warehouse",
-            NormalizedName = "catalog warehouse",
-            CreatedByParticipantId = participantId,
-            ClientRequestId = Guid.NewGuid().ToString(),
-            CreatedAt = DateTimeOffset.UnixEpoch,
-        });
-        db.Memberships.Add(new MembershipEntity
-        {
-            InventoryId = inventoryId,
-            ParticipantId = participantId,
-            Role = MembershipRole.Owner,
-            CreatedAt = DateTimeOffset.UnixEpoch,
-        });
-
-        var each = Unit.CreateReservedEach(new InventoryId(inventoryId), DateTimeOffset.UnixEpoch);
-        db.Units.Add(new UnitEntity
-        {
-            Id = each.Id.Value,
-            InventoryId = inventoryId,
-            CanonicalName = each.CanonicalName,
-            NormalizedCanonicalName = NameNormalization.Normalize(each.CanonicalName),
-            IsReserved = true,
-            ConcurrencyStamp = Guid.NewGuid(),
-            CreatedAt = DateTimeOffset.UnixEpoch,
-        });
-
-        foreach (var term in each.Terms())
-        {
-            db.UnitTerms.Add(new UnitTermEntity
-            {
-                Id = Guid.NewGuid(),
-                InventoryId = inventoryId,
-                UnitId = each.Id.Value,
-                Term = term.Term,
-                NormalizedTerm = term.NormalizedTerm,
-                IsCanonical = term.IsCanonical,
-                IsReserved = true,
-                CreatedAt = DateTimeOffset.UnixEpoch,
-            });
-        }
-
-        await db.SaveChangesAsync();
-
-        return (inventoryId, each.Id.Value);
+        Seed();
     }
 
-    private async Task<Guid> SeedUnitAsync(Guid inventoryId, string canonicalName, string[] aliases, bool retired = false)
+    public void Dispose()
     {
-        using var scope = Factory!.Services.CreateScope();
-        var db = Db(scope);
-
-        var unit = Unit.Create(new InventoryId(inventoryId), canonicalName, aliases, DateTimeOffset.UnixEpoch);
-        var retiredAt = retired ? (DateTimeOffset?)DateTimeOffset.UnixEpoch.AddDays(1) : null;
-
-        db.Units.Add(new UnitEntity
-        {
-            Id = unit.Id.Value,
-            InventoryId = inventoryId,
-            CanonicalName = unit.CanonicalName,
-            NormalizedCanonicalName = NameNormalization.Normalize(unit.CanonicalName),
-            IsReserved = false,
-            ConcurrencyStamp = Guid.NewGuid(),
-            CreatedAt = DateTimeOffset.UnixEpoch,
-            RetiredAt = retiredAt,
-        });
-
-        foreach (var term in unit.Terms())
-        {
-            db.UnitTerms.Add(new UnitTermEntity
-            {
-                Id = Guid.NewGuid(),
-                InventoryId = inventoryId,
-                UnitId = unit.Id.Value,
-                Term = term.Term,
-                NormalizedTerm = term.NormalizedTerm,
-                IsCanonical = term.IsCanonical,
-                IsReserved = false,
-                CreatedAt = DateTimeOffset.UnixEpoch,
-                RetiredAt = retiredAt,
-            });
-        }
-
-        await db.SaveChangesAsync();
-
-        return unit.Id.Value;
+        _db.Dispose();
+        _connection.Dispose();
     }
 
-    private async Task<Guid> SeedLocationAsync(Guid inventoryId, string name, bool retired = false)
+    [Fact]
+    public async Task A_change_set_whose_term_was_already_claimed_leaves_nothing_staged_in_the_shared_context()
     {
-        using var scope = Factory!.Services.CreateScope();
-        var db = Db(scope);
+        SeedUnit("Carton");
+        var store = Store();
 
-        var location = Location.Create(new InventoryId(inventoryId), name, DateTimeOffset.UnixEpoch);
-
-        db.Locations.Add(new LocationEntity
-        {
-            Id = location.Id.Value,
-            InventoryId = inventoryId,
-            Name = location.Name,
-            NormalizedName = location.NormalizedName,
-            ConcurrencyStamp = Guid.NewGuid(),
-            CreatedAt = DateTimeOffset.UnixEpoch,
-            RetiredAt = retired ? DateTimeOffset.UnixEpoch.AddDays(1) : null,
-        });
-
-        await db.SaveChangesAsync();
-
-        return location.Id.Value;
-    }
-
-    private async Task SeedStockAsync(Guid inventoryId, Guid unitId, Guid? locationId, string name)
-    {
-        using var scope = Factory!.Services.CreateScope();
-        var db = Db(scope);
-
-        db.StockEntries.Add(new StockEntryEntity
-        {
-            Id = Guid.NewGuid(),
-            InventoryId = inventoryId,
-            UnitId = unitId,
-            LocationId = locationId,
-            Name = name,
-            NormalizedName = NameNormalization.Normalize(name),
-            Quantity = 1m,
-            CreatedAt = DateTimeOffset.UnixEpoch,
-        });
-
-        await db.SaveChangesAsync();
-    }
-
-    private SqlReferenceAdministrationStore Store(IServiceScope scope) =>
-        new(Db(scope), new SqlConfirmationProposalStore(Db(scope)));
-
-    private static ReferenceChangeSetCommand Command(
-        Guid inventoryId,
-        Guid participantId,
-        Guid turnId,
-        IReadOnlyList<ProposedReferenceChange> changes,
-        IReadOnlyList<ExpectedReferenceVersion> versions,
-        IReadOnlyList<ExpectedTermAbsence> absences,
-        Guid? proposalId = null) => new()
-        {
-            OperationId = ReferenceOperationId.Derive(new TurnId(turnId), "reference_tool", 0),
-            InventoryId = new InventoryId(inventoryId),
-            ActorId = new ParticipantId(participantId),
-            ConfirmedByTurnId = new TurnId(turnId),
-            ConsumesProposalId = proposalId is { } id ? new ProposalId(id) : null,
-            Changes = changes,
-            ExpectedVersions = versions,
-            ExpectedTermAbsences = absences,
-            Now = DateTimeOffset.UnixEpoch,
-        };
-
-    private async Task<Guid> ParticipantIdAsync(Guid inventoryId)
-    {
-        using var scope = Factory!.Services.CreateScope();
-
-        return await Db(scope).Memberships
-            .AsNoTracking()
-            .Where(m => m.InventoryId == inventoryId)
-            .Select(m => m.ParticipantId)
-            .FirstAsync();
-    }
-
-    private async Task<(Guid Stamp, DateTimeOffset? RetiredAt)> UnitStateAsync(Guid unitId)
-    {
-        using var scope = Factory!.Services.CreateScope();
-        var row = await Db(scope).Units.AsNoTracking().FirstAsync(u => u.Id == unitId);
-
-        return (row.ConcurrencyStamp, row.RetiredAt);
-    }
-
-    private async Task<int> CountAuditsAsync(Guid inventoryId, string eventType)
-    {
-        using var scope = Factory!.Services.CreateScope();
-
-        return await Db(scope).InventoryAudits
-            .AsNoTracking()
-            .CountAsync(a => a.InventoryId == inventoryId && a.EventType == eventType);
-    }
-
-    [SkippableFact]
-    public async Task A_failed_change_set_leaves_nothing_staged_for_an_unrelated_write_to_commit()
-    {
-        Skip.IfNot(DockerAvailable, "Docker is not available in this environment; skipping the SQL-backed isolation proof.");
-
-        var (inventoryId, _) = await SeedInventoryAsync();
-        var participantId = await ParticipantIdAsync(inventoryId);
-        await SeedUnitAsync(inventoryId, "Carton", []);
-
-        using var scope = Factory!.Services.CreateScope();
-        var db = Db(scope);
-
-        // A create whose term was already claimed: it must fail, and it must leave the DbContext this
-        // whole batch of Turns shares completely clean.
-        var result = await new SqlReferenceAdministrationStore(db, new SqlConfirmationProposalStore(db)).ApplyAsync(
+        var result = await store.ApplyAsync(
             Command(
-                inventoryId,
-                participantId,
-                Guid.NewGuid(),
                 [
-                    new ProposedReferenceChange
-                    {
-                        Order = 1,
-                        Kind = ReferenceChangeKind.CreateUnit,
-                        Target = new ProposedReferenceState(ReferenceKind.Unit, Guid.NewGuid(), "Carton", "carton", false),
-                        Terms = [UnitTerm.Create("Carton", isCanonical: true, isReserved: false)],
-                    },
+                    CreateUnitChange(order: 1, "Carton"),
+                    CreateLocationChange(order: 2, "Shelf A"),
                 ],
-                [],
-                [new ExpectedTermAbsence(ReferenceKind.Unit, "carton")]),
+                absences: [new ExpectedTermAbsence(ReferenceKind.Unit, "carton")]),
             CancellationToken.None);
 
         Assert.Equal(ReferenceAdministrationStoreOutcome.Conflict, result.Outcome);
-        Assert.Empty(db.ChangeTracker.Entries());
+        Assert.Null(result.Recorded);
+        AssertNothingIsStaged();
+        await AssertNothingWasAppliedAsync();
 
-        // An unrelated save on the very same scope must not commit anything the failed set staged.
-        db.Locations.Add(new LocationEntity
+        // The very next write in this same scope must not flush what the abandoned set staged.
+        await SaveAnUnrelatedChangeAsync();
+        await AssertNothingWasAppliedAsync();
+    }
+
+    [Fact]
+    public async Task A_change_set_whose_version_moved_leaves_nothing_staged_in_the_shared_context()
+    {
+        var cartonId = SeedUnit("Carton");
+        var store = Store();
+
+        // A create is staged first, and only then does the guarded version check for the rename find a
+        // stamp nobody holds any more - so the staged create is exactly what must not survive.
+        var result = await store.ApplyAsync(
+            Command(
+                [
+                    CreateLocationChange(order: 1, "Shelf A"),
+                    RenameUnitChange(order: 2, cartonId, "Crate"),
+                ],
+                versions: [new ExpectedReferenceVersion(ReferenceKind.Unit, cartonId, Guid.NewGuid())]),
+            CancellationToken.None);
+
+        Assert.Equal(ReferenceAdministrationStoreOutcome.Conflict, result.Outcome);
+        AssertNothingIsStaged();
+        Assert.Equal("Carton", (await _db.Units.AsNoTracking().SingleAsync(u => u.Id == cartonId)).CanonicalName);
+        await AssertNothingWasAppliedAsync();
+
+        await SaveAnUnrelatedChangeAsync();
+        await AssertNothingWasAppliedAsync();
+    }
+
+    [Fact]
+    public async Task A_Retire_that_Stock_still_references_leaves_nothing_staged_in_the_shared_context()
+    {
+        var cartonId = SeedUnit("Carton");
+        SeedStock(cartonId);
+        var store = Store();
+
+        var result = await store.ApplyAsync(
+            Command(
+                [
+                    CreateLocationChange(order: 1, "Shelf A"),
+                    RetireUnitChange(order: 2, cartonId),
+                ],
+                versions: [new ExpectedReferenceVersion(ReferenceKind.Unit, cartonId, CurrentStampOf(cartonId))]),
+            CancellationToken.None);
+
+        Assert.Equal(ReferenceAdministrationStoreOutcome.Conflict, result.Outcome);
+        AssertNothingIsStaged();
+        Assert.Null((await _db.Units.AsNoTracking().SingleAsync(u => u.Id == cartonId)).RetiredAt);
+        await AssertNothingWasAppliedAsync();
+
+        await SaveAnUnrelatedChangeAsync();
+        await AssertNothingWasAppliedAsync();
+    }
+
+    private SqlReferenceAdministrationStore Store() => new(_db, new SqlConfirmationProposalStore(_db));
+
+    private void AssertNothingIsStaged() =>
+        Assert.DoesNotContain(_db.ChangeTracker.Entries(), entry => entry.State != EntityState.Unchanged);
+
+    /// <summary>Nothing this ticket's writer produces may exist: no new Location, no ledger, no audit.</summary>
+    private async Task AssertNothingWasAppliedAsync()
+    {
+        Assert.Empty(await _db.Locations.AsNoTracking().Where(l => l.NormalizedName == "shelf a").ToListAsync());
+        Assert.Empty(await _db.ReferenceOperations.AsNoTracking().ToListAsync());
+        Assert.Empty(await _db.ReferenceEffects.AsNoTracking().ToListAsync());
+        Assert.Empty(await _db.InventoryAudits.AsNoTracking().ToListAsync());
+    }
+
+    /// <summary>Stands in for the next Turn's result write in the same coordinator scope.</summary>
+    private async Task SaveAnUnrelatedChangeAsync()
+    {
+        _db.Locations.Add(new LocationEntity
         {
             Id = Guid.NewGuid(),
-            InventoryId = inventoryId,
-            Name = "Shelf A",
-            NormalizedName = "shelf a",
+            InventoryId = _inventoryId,
+            Name = "Shelf Z",
+            NormalizedName = "shelf z",
             ConcurrencyStamp = Guid.NewGuid(),
-            CreatedAt = DateTimeOffset.UnixEpoch,
+            CreatedAt = Now,
         });
-        await db.SaveChangesAsync();
 
-        Assert.Equal(1, await db.Units.AsNoTracking().CountAsync(u => u.NormalizedCanonicalName == "carton"));
-        Assert.Equal(0, await db.ReferenceOperations.AsNoTracking().CountAsync());
-        Assert.Equal(0, await db.InventoryAudits.AsNoTracking().CountAsync(a => a.EventType == nameof(AuditEventType.UnitCreated)));
+        await _db.SaveChangesAsync();
+        _db.ChangeTracker.Clear();
+    }
+
+    private ReferenceChangeSetCommand Command(
+        IReadOnlyList<ProposedReferenceChange> changes,
+        IReadOnlyList<ExpectedReferenceVersion>? versions = null,
+        IReadOnlyList<ExpectedTermAbsence>? absences = null) => new()
+        {
+            OperationId = new ReferenceOperationId(Guid.NewGuid()),
+            InventoryId = new InventoryId(_inventoryId),
+            ActorId = _actorId,
+            ConfirmedByTurnId = TurnId.NewId(),
+            ConsumesProposalId = null,
+            Changes = changes,
+            ExpectedVersions = versions ?? [],
+            ExpectedTermAbsences = absences ?? [],
+            Now = Now,
+        };
+
+    private static ProposedReferenceChange CreateUnitChange(int order, string name) => new()
+    {
+        Order = order,
+        Kind = ReferenceChangeKind.CreateUnit,
+        Target = new ProposedReferenceState(
+            ReferenceKind.Unit, Guid.NewGuid(), name, NameNormalization.Normalize(name), Reserved: false),
+        Terms = [UnitTerm.Create(name, isCanonical: true, isReserved: false)],
+    };
+
+    private static ProposedReferenceChange CreateLocationChange(int order, string name) => new()
+    {
+        Order = order,
+        Kind = ReferenceChangeKind.CreateLocation,
+        Target = new ProposedReferenceState(
+            ReferenceKind.Location, Guid.NewGuid(), name, NameNormalization.Normalize(name), Reserved: false),
+    };
+
+    private static ProposedReferenceChange RenameUnitChange(int order, Guid unitId, string newName) => new()
+    {
+        Order = order,
+        Kind = ReferenceChangeKind.RenameUnit,
+        Target = new ProposedReferenceState(ReferenceKind.Unit, unitId, "Carton", "carton", Reserved: false),
+        NewName = newName,
+        NewNormalizedName = NameNormalization.Normalize(newName),
+    };
+
+    private static ProposedReferenceChange RetireUnitChange(int order, Guid unitId) => new()
+    {
+        Order = order,
+        Kind = ReferenceChangeKind.RetireUnit,
+        Target = new ProposedReferenceState(ReferenceKind.Unit, unitId, "Carton", "carton", Reserved: false),
+    };
+
+    private Guid CurrentStampOf(Guid unitId) => _db.Units.AsNoTracking().Single(u => u.Id == unitId).ConcurrencyStamp;
+
+    private Guid SeedUnit(string canonicalName)
+    {
+        var unitId = Guid.NewGuid();
+
+        _db.Units.Add(new UnitEntity
+        {
+            Id = unitId,
+            InventoryId = _inventoryId,
+            CanonicalName = canonicalName,
+            NormalizedCanonicalName = NameNormalization.Normalize(canonicalName),
+            IsReserved = false,
+            ConcurrencyStamp = Guid.NewGuid(),
+            CreatedAt = Now,
+        });
+        _db.UnitTerms.Add(new UnitTermEntity
+        {
+            Id = Guid.NewGuid(),
+            InventoryId = _inventoryId,
+            UnitId = unitId,
+            Term = canonicalName,
+            NormalizedTerm = NameNormalization.Normalize(canonicalName),
+            IsCanonical = true,
+            IsReserved = false,
+            CreatedAt = Now,
+        });
+        _db.SaveChanges();
+        _db.ChangeTracker.Clear();
+
+        return unitId;
+    }
+
+    private void SeedStock(Guid unitId)
+    {
+        _db.StockEntries.Add(new StockEntryEntity
+        {
+            Id = Guid.NewGuid(),
+            InventoryId = _inventoryId,
+            UnitId = unitId,
+            Name = "Steel Bolts",
+            NormalizedName = "steel bolts",
+            Quantity = 1m,
+            CreatedAt = Now,
+        });
+        _db.SaveChanges();
+        _db.ChangeTracker.Clear();
+    }
+
+    private void Seed()
+    {
+        var participantId = Guid.NewGuid();
+        _db.Participants.Add(new ParticipantEntity
+        {
+            Id = participantId,
+            DisplayName = "Owner Person",
+            CreatedAt = Now,
+            UpdatedAt = Now,
+        });
+        _db.Inventories.Add(new InventoryEntity
+        {
+            Id = _inventoryId,
+            Name = "Warehouse",
+            NormalizedName = "warehouse",
+            CreatedByParticipantId = participantId,
+            ClientRequestId = "seed-1",
+            CreatedAt = Now,
+        });
+        _db.Units.Add(new UnitEntity
+        {
+            Id = _eachUnitId,
+            InventoryId = _inventoryId,
+            CanonicalName = "each",
+            NormalizedCanonicalName = "each",
+            IsReserved = true,
+            ConcurrencyStamp = Guid.NewGuid(),
+            CreatedAt = Now,
+        });
+        _db.UnitTerms.Add(new UnitTermEntity
+        {
+            Id = Guid.NewGuid(),
+            InventoryId = _inventoryId,
+            UnitId = _eachUnitId,
+            Term = "each",
+            NormalizedTerm = "each",
+            IsCanonical = true,
+            IsReserved = true,
+            CreatedAt = Now,
+        });
+        _db.SaveChanges();
+        _db.ChangeTracker.Clear();
     }
 }

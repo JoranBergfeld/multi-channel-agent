@@ -339,7 +339,7 @@ public sealed class ScriptedModelBoundary : IModelBoundary
 
         foreach (var clause in (string[])
                  [" unit ", " in ", " unlocated", " quantity ", " note ", " to unlocated", " to unit ", " to ", " all",
-                  " aliases ", " alias ", " from unit ", " from "])
+                  " aliases ", " from unit "])
         {
             var index = reference.IndexOf(clause, StringComparison.OrdinalIgnoreCase);
             if (index >= 0 && (earliest < 0 || index < earliest))

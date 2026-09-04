@@ -23,6 +23,21 @@ namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
                 name: "IX_Locations_InventoryId_NormalizedName",
                 table: "Locations");
 
+            // The shared Unit term namespace is enforced and ordered against this column, so it has to
+            // compare exactly as the domain does - ordinally. On a default SQL Server collation the
+            // namespace would be accent-insensitive here and accent-sensitive on SQLite, and bounded
+            // suggestions would come back in a different order on each.
+            migrationBuilder.AlterColumn<string>(
+                name: "NormalizedTerm",
+                table: "UnitTerms",
+                type: "nvarchar(100)",
+                maxLength: 100,
+                nullable: false,
+                collation: "Latin1_General_100_BIN2",
+                oldClrType: typeof(string),
+                oldType: "nvarchar(100)",
+                oldMaxLength: 100);
+
             migrationBuilder.AddColumn<bool>(
                 name: "IsReserved",
                 table: "UnitTerms",
@@ -230,6 +245,17 @@ namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
         /// <inheritdoc />
         protected override void Down(MigrationBuilder migrationBuilder)
         {
+            migrationBuilder.AlterColumn<string>(
+                name: "NormalizedTerm",
+                table: "UnitTerms",
+                type: "nvarchar(100)",
+                maxLength: 100,
+                nullable: false,
+                oldClrType: typeof(string),
+                oldType: "nvarchar(100)",
+                oldMaxLength: 100,
+                oldCollation: "Latin1_General_100_BIN2");
+
             migrationBuilder.DropTable(
                 name: "ConfirmationProposalReferences");
 
@@ -299,22 +325,25 @@ namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
                 name: "ReferenceChangesJson",
                 table: "ConfirmationProposals");
 
+            // Deliberately not unique. Retirement frees a name, so once anything has been retired and
+            // its name reused there are legitimately several rows sharing a normalized term - and
+            // recreating a unique index over them would fail after the RetiredAt column that told them
+            // apart has already been dropped, leaving a half-migrated schema.
             migrationBuilder.CreateIndex(
                 name: "IX_UnitTerms_InventoryId_NormalizedTerm",
                 table: "UnitTerms",
-                columns: new[] { "InventoryId", "NormalizedTerm" },
-                unique: true);
+                columns: new[] { "InventoryId", "NormalizedTerm" });
 
             migrationBuilder.CreateIndex(
                 name: "IX_UnitTerms_InventoryId_UnitId",
                 table: "UnitTerms",
                 columns: new[] { "InventoryId", "UnitId" });
 
+            // Not unique, for the same reason as IX_UnitTerms_InventoryId_NormalizedTerm above.
             migrationBuilder.CreateIndex(
                 name: "IX_Locations_InventoryId_NormalizedName",
                 table: "Locations",
-                columns: new[] { "InventoryId", "NormalizedName" },
-                unique: true);
+                columns: new[] { "InventoryId", "NormalizedName" });
         }
     }
 }

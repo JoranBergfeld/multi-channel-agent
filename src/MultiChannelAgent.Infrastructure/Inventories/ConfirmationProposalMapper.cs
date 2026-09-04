@@ -18,11 +18,22 @@ namespace MultiChannelAgent.Infrastructure.Inventories;
 internal static class ConfirmationProposalMapper
 {
     /// <summary>
-    /// Bumped by #33, which added the reference administration payload. A row this process cannot
-    /// read is refused, not guessed at - a proposal is only ever ten minutes old, so an unreadable
-    /// shape is a deployment mistake rather than a migration case.
+    /// Bumped by #33, which added the reference administration payload. Every proposal written from
+    /// now on says 2, so a process that predates #33 refuses one it could not fully understand.
     /// </summary>
     public const int SchemaVersion = 2;
+
+    /// <summary>
+    /// The stock payload shapes this process can read. Version 1 is still here on purpose: #33 added
+    /// its payload in separate, nullable columns and changed not one field of the stock envelope, so
+    /// a proposal stored moments before the deploy is perfectly readable.
+    ///
+    /// Refusing it would be worse than pedantic. <c>FindPendingAsync</c> runs once per Turn, before
+    /// the model is asked anything, so a proposal this mapper throws on would stall that whole
+    /// ChannelConversation until it expired. A row this process genuinely cannot read is still
+    /// refused rather than guessed at - that is what this set is for.
+    /// </summary>
+    private static readonly int[] ReadableSchemaVersions = [1, SchemaVersion];
 
     private sealed record UnitTermDto(string Term, string NormalizedTerm, bool IsCanonical, bool IsReserved);
 
@@ -135,7 +146,7 @@ internal static class ConfirmationProposalMapper
         var envelope = JsonSerializer.Deserialize<ChangesEnvelope>(entity.ChangesJson, Options)
             ?? throw new InvalidOperationException("A stored proposal carried no changes.");
 
-        if (envelope.Version != SchemaVersion)
+        if (!ReadableSchemaVersions.Contains(envelope.Version))
         {
             throw new InvalidOperationException($"A stored proposal uses unsupported schema version {envelope.Version}.");
         }

@@ -990,7 +990,8 @@ namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
                     b.Property<string>("NormalizedTerm")
                         .IsRequired()
                         .HasMaxLength(100)
-                        .HasColumnType("nvarchar(100)");
+                        .HasColumnType("nvarchar(100)")
+                        .UseCollation("Latin1_General_100_BIN2");
 
                     b.Property<DateTimeOffset?>("RetiredAt")
                         .HasColumnType("datetimeoffset");
