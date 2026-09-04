@@ -2953,7 +2953,7 @@ public sealed record UnitCatalogRecord(
     bool IsReserved,
     Guid ConcurrencyStamp)
 {
-    /// <summary>The Unit's aliases, in the order they were added - its canonical name is not one of them.</summary>
+    /// <summary>The Unit's aliases in the record's one deterministic display order - canonical first, then aliases ordinally by normalized form. Its canonical name is not one of them.</summary>
     public IReadOnlyList<string> Aliases => [.. Terms.Where(term => !term.IsCanonical).Select(term => term.Term)];
 }
 
