@@ -1,0 +1,42 @@
+namespace MultiChannelAgent.Infrastructure.Persistence.Entities;
+
+/// <summary>
+/// The durable row for one confirmation proposal. It carries the hash of its single-use token - never
+/// the token - its binding, its exact serialized contents, and its lifetime.
+///
+/// Only <see cref="Status"/> ever changes after insert, and only ever from <c>Pending</c> to a
+/// terminal value, which is what makes single use enforceable by a guarded update rather than by
+/// hoping two callers do not race.
+/// </summary>
+public sealed class ConfirmationProposalEntity
+{
+    public Guid ProposalId { get; set; }
+
+    /// <summary>SHA-256 of the token, as 64 lowercase hexadecimal characters. Unique, so a token can never back two proposals.</summary>
+    public required string TokenHash { get; set; }
+
+    public Guid ParticipantId { get; set; }
+
+    public required string ChannelConversationId { get; set; }
+
+    public Guid InventoryId { get; set; }
+
+    public Guid ProposedInTurnId { get; set; }
+
+    /// <summary>The <c>ProposalStatus</c> as text, so the filtered unique index can be written in provider-neutral SQL.</summary>
+    public required string Status { get; set; }
+
+    /// <summary>The exact proposed changes, serialized (see <c>ConfirmationProposalMapper</c>). What the Participant reviewed is what commits.</summary>
+    public required string ChangesJson { get; set; }
+
+    public required string ExpectedVersionsJson { get; set; }
+
+    public required string ExpectedAbsencesJson { get; set; }
+
+    public DateTimeOffset CreatedAt { get; set; }
+
+    public DateTimeOffset ExpiresAt { get; set; }
+
+    /// <summary>When it left <c>Pending</c>; null while it is still pending. Retention is measured from here.</summary>
+    public DateTimeOffset? SettledAt { get; set; }
+}

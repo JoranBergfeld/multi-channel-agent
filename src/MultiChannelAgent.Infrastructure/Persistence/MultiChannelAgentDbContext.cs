@@ -42,6 +42,8 @@ public sealed class MultiChannelAgentDbContext(DbContextOptions<MultiChannelAgen
 
     public DbSet<StockOperationEntity> StockOperations => Set<StockOperationEntity>();
 
+    public DbSet<ConfirmationProposalEntity> ConfirmationProposals => Set<ConfirmationProposalEntity>();
+
     public DbSet<FoundryConversationBindingEntity> FoundryConversationBindings => Set<FoundryConversationBindingEntity>();
 
     /// <summary>
