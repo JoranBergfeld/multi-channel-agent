@@ -6897,14 +6897,54 @@ and mount it inside the existing `bootstrap.activeInventoryId` block, after `Ref
 - [ ] **Step 4: Verify**
 
 Run: `npm --prefix src/web run build && npm --prefix src/web run lint`
-Expected: both succeed. The build type-checks every payload shape against `importApi.ts`.
+Expected: both succeed. The build type-checks this client's own use of the payload shapes - the
+declarations in `importApi.ts` are an assumption about the routes, not a runtime check of what comes
+back, so it is Task 16 that proves the routes actually answer in those shapes.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add src/web/src/importApi.ts src/web/src/InitialImport.tsx src/web/src/App.tsx
-git commit -m "feat(web): preview and confirm an Initial Import for #34"
+git commit -m "feat(web): preview and confirm the exact Initial Import for #34"
 ```
+
+### What the implementation changed, and why
+
+The shape above is what shipped; these are the places writing it against the routes Task 14 actually
+serves forced a different answer, recorded so the plan and the code do not disagree.
+
+- **Two different 400s arrive at `validate`.** The bounded error report carries `errors` as a list of
+  coded problems, but the answer to a missing or empty file part is a validation problem whose
+  `errors` is a *map keyed by part name* - and a rejected CSRF token is a 400 with no `errors` at all.
+  Rendering `problem.errors ?? []` into the error table would have thrown on a zero-byte file, which a
+  file picker will happily hand over. `validateImport` therefore only reports a list as a report, and
+  answers `'unreadable-upload'` otherwise.
+- **`confirm` and `reject` return a discriminated result, not `ImportCompleted | null` and `boolean`.**
+  The four refusals mean four different things to a Participant: a `404` says the import is settled
+  and its preview is stale, a `409` says the proposal was expired or overtaken and names which, a
+  `400` carrying `proposal_token_mismatch` deliberately leaves the proposal pending - so the reviewed
+  preview is worth keeping - and anything else is transient. Collapsing them would have made the
+  workflow either clear reviewed work it did not need to, or claim an import that never happened.
+- **The closed code sets are spelled in the client.** `ImportErrorCode` (the 23 the domain defines)
+  and `ImportConflictCode` key `Record`-typed prose maps, so a code the client knows about without a
+  sentence to render for it fails the build, and every outcome union is closed with an `assertNever`.
+  With no test runner in `src/web`, that compiler check is the only executable statement this task can
+  make about its own completeness.
+- **Cancelling clears only after the server settles the proposal.** Until the rejection is answered,
+  the preview *is* the pending import; a failed cancellation keeps it and its token so it can simply
+  be tried again. A failed confirmation keeps them too, because confirming the same proposal twice
+  re-reports what it did rather than importing twice - the retry is safe and still shows the count.
+- **Eligibility is re-read deliberately rather than guessed.** The component re-reads it whenever
+  `refetchToken` changes, and after any refusal that may have ended the workflow; a read that answers
+  after the effect was replaced is ignored, and a preview that is no longer confirmable is dropped as
+  soon as the server says the Inventory holds Stock - whatever put it there. The component is mounted
+  keyed by the Active Inventory, as `InventoryGovernance` already is, so switching Inventories starts
+  the workflow over instead of carrying one Inventory's preview into another.
+- **`credentials: 'include'`, matching every other client in `src/web`,** rather than `same-origin`:
+  identical behavior for these same-origin relative URLs, and one convention in the directory.
+- **Every async handler is `try`/`finally`.** A network failure or an unreadable body must not leave
+  the file control and both buttons disabled for the rest of the session, and each failure says what
+  is true about the Stock that was or was not created.
 
 ---
 
@@ -7250,7 +7290,7 @@ If nothing needed fixing, skip this commit rather than creating an empty one.
 | CSRF and authorization on every mutating route | Task 14 (`AntiforgeryEndpointFilter`, `ActiveTenantMember`) | `ImportEndpointsHttpTests.A_mutating_request_without_the_CSRF_token_is_refused` |
 | Concurrency and races handled | Task 10 (filtered unique index), Task 12 (`Serializable`, reference locks, guarded consume) | `SqlImportProposalStoreTests.A_second_pending_import_..._cannot_exist_at_all`, `SqlImportExecutionStoreConcurrencyTests` |
 | Migrations, indexes, and cascade paths | Task 10 (one migration, single cascade path per table) | `ImportRelationalModelTests`, `InitialImportSqlScenarioTests` (real migrations on a fresh database), Task 17 step 3 |
-| Web preview, error report, and confirmation | Task 15 | `npm run build` type-checking every payload shape, scenario steps 3, 5, and 9 through the same routes the client calls |
+| Web preview, error report, and confirmation | Task 15 | `npm run build` type-checking this client's use of every payload shape, scenario steps 3, 5, and 9 through the same routes the client calls |
 | No monetary budgets | No task adds one; Task 17 step 8 enforces it | Task 17 step 8 |
 
 ---
