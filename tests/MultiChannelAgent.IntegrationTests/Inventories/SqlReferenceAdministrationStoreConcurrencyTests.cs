@@ -309,68 +309,68 @@ public sealed class SqlReferenceAdministrationStoreConcurrencyTests : SqlIntegra
             using var scope = Factory!.Services.CreateScope();
             var db = Db(scope);
 
-            // Resolving the Unit and writing the Stock are one transaction on purpose. Resolution is
-            // active-only, so a Unit this race has already retired resolves to nothing and the
-            // mutation is reference_not_found - but only if the decision is still true when the write
-            // lands. Deciding in one transaction and writing in another would reintroduce exactly the
-            // phantom the Retire's Serializable range lock is here to prevent: the Retire could commit
-            // in between, and the write would then land on a Unit that no longer exists.
-            using var transaction = await db.Database.BeginTransactionAsync(
-                IsolationLevel.RepeatableRead, CancellationToken.None);
-
+            // Exactly the production shape: the Application layer resolves the Unit while planning,
+            // and the real store writes. Nothing here supplies a lock of its own - if the invariant
+            // holds, it is because SqlStockMutationStore holds it.
             var resolved = await new SqlInventoryReferenceStore(db).ResolveUnitAsync(
                 new InventoryId(inventoryId), boxId.ToString(), CancellationToken.None);
 
             if (resolved is null)
             {
-                await transaction.RollbackAsync(CancellationToken.None);
                 return;
             }
 
-            db.StockEntries.Add(new StockEntryEntity
-            {
-                Id = Guid.NewGuid(),
-                InventoryId = inventoryId,
-                UnitId = boxId,
-                LocationId = null,
-                Name = "Steel Bolts",
-                NormalizedName = "steel bolts",
-                Quantity = 1m,
-                CreatedAt = DateTimeOffset.UnixEpoch,
-            });
+            var result = await new SqlStockMutationStore(db).ApplyAsync(
+                new StockMutationCommand
+                {
+                    OperationId = StockOperationId.Derive(TurnId.NewId(), "add_stock", 0),
+                    InventoryId = new InventoryId(inventoryId),
+                    ActorId = new ParticipantId(participantId),
+                    Kind = StockMutationKind.Add,
+                    Amount = Quantity.Create(1m),
+                    ResultingQuantity = Quantity.Create(1m),
+                    NewEntryName = "Steel Bolts",
+                    NewEntryUnitId = resolved,
+                    NewEntryLocationId = null,
+                    NotePreserved = false,
+                    Now = DateTimeOffset.UnixEpoch,
+                },
+                CancellationToken.None);
 
-            await db.SaveChangesAsync(CancellationToken.None);
-            await transaction.CommitAsync(CancellationToken.None);
+            // Applied, or refused because the Unit went away underneath it. Never anything else.
+            Assert.Contains(
+                result.Outcome,
+                (StockMutationStoreOutcome[])[StockMutationStoreOutcome.Applied, StockMutationStoreOutcome.StateChanged]);
         }
 
         // Both sides run for real. Serializable makes the Retire's conflict re-check take a range lock
         // over the very Stock rows the other side is inserting into, so SQL Server may legitimately
         // pick one of them as a deadlock victim - that is the isolation level working, not a bug.
-        var victims = await Task.WhenAll(RunToleratingOneDeadlockAsync(RetireAsync), RunToleratingOneDeadlockAsync(AddStockAsync));
+        var outcomes = await Task.WhenAll(RunToleratingOneDeadlockAsync(RetireAsync), RunToleratingOneDeadlockAsync(AddStockAsync));
+        var (retireVictim, stockVictim) = (outcomes[0], outcomes[1]);
 
         Assert.True(
-            victims.Count(victim => victim is not null) <= 1,
+            retireVictim is null || stockVictim is null,
             "A deadlock has exactly one victim; both sides losing would mean something else went wrong.");
-
-        // The production contract for a raw deadlock: it is never laundered into a semantic answer.
-        // Nothing was applied and no ledger row exists, so the Turn reports a transient failure and the
-        // work stays retryable - which is exactly what the bounded retry below stands in for.
-        if (victims[0] is not null)
-        {
-            using var ledgerScope = Factory!.Services.CreateScope();
-            Assert.Null(await Store(ledgerScope).FindRecordedAsync(
-                new InventoryId(inventoryId), retireOperationId, CancellationToken.None));
-        }
 
         // One bounded retry of whichever side lost, on a fresh scope, so the race converges instead of
         // leaving the invariant decided by who happened to be picked. A retry must never deadlock
         // again - by now the other side has committed and there is nothing left to race with.
-        if (victims[0] is not null)
+        if (retireVictim is not null)
         {
+            // The production contract for a raw deadlock: it is never laundered into a semantic answer.
+            // Nothing was applied and no ledger row exists, so the Turn reports a transient failure and
+            // the work stays retryable - which is exactly what this retry stands in for.
+            using (var ledgerScope = Factory!.Services.CreateScope())
+            {
+                Assert.Null(await Store(ledgerScope).FindRecordedAsync(
+                    new InventoryId(inventoryId), retireOperationId, CancellationToken.None));
+            }
+
             await RetireAsync();
         }
 
-        if (victims[1] is not null)
+        if (stockVictim is not null)
         {
             await AddStockAsync();
         }
