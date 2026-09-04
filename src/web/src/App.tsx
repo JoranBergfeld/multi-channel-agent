@@ -227,7 +227,7 @@ function App() {
           inventoryId={bootstrap.activeInventoryId}
           csrfToken={session.csrfToken}
           refetchToken={stockRefetchToken}
-          onImported={() => setStockRefetchToken((token) => token + 1)}
+          onStockMayHaveChanged={() => setStockRefetchToken((token) => token + 1)}
         />
       )}
     </main>

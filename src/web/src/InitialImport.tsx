@@ -19,11 +19,17 @@ interface InitialImportProps {
   /** Bumped by the parent whenever Stock may have changed, to re-read whether importing is still offered. */
   refetchToken: number;
   /**
-   * Called exactly once, on each path where Stock here may have changed, so the workspace refetches:
-   * when an import completes, and when a cancellation is answered with a settled proposal - because
-   * that answer cannot rule out an import that was confirmed somewhere else.
+   * Called once, on each path where the server has just said Stock here is not what this workspace is
+   * showing, so it refetches: an import that completed, an Inventory the server says is no longer
+   * empty - when validating or when confirming meets `state_changed` - and either decision answered
+   * with a settled proposal, because neither 404 can rule out an import confirmed somewhere else.
+   *
+   * Deliberately not called where nothing the server said implies Stock moved: an ordinary
+   * cancellation, a token that did not match, an expired proposal, a file that was refused, or a
+   * request that failed. Nothing in the eligibility effect calls this either, so the refetch it asks
+   * for - which reaches this component back as a bumped `refetchToken` - cannot ask for another.
    */
-  onImported: () => void;
+  onStockMayHaveChanged: () => void;
 }
 
 /** What one in-flight request is doing, so a button can say so and no second one can start. */
@@ -32,8 +38,9 @@ type ImportAction = 'validating' | 'confirming' | 'cancelling';
 /**
  * The one sentence on screen, and where it came from, because the two are not superseded alike. A
  * background eligibility read's failure describes that read, so the next read that answers has
- * replaced it. A decision's result describes Stock that was or was not created, and has to outlive
- * the eligibility re-read that same decision deliberately asks for.
+ * replaced it, and a decision's result has not. A decision's result describes Stock that was or was
+ * not created, and has to outlive both the eligibility re-read that same decision deliberately asks
+ * for and a later read that could not be made at all.
  */
 type ImportAlert = { source: 'background' | 'action'; message: string };
 
@@ -89,6 +96,17 @@ const CONFLICT_MESSAGES: Record<ImportConflictCode, string> = {
 };
 
 /**
+ * What a 404 to either decision means, and all it means. The server settles a proposal and stops
+ * knowing it was ever pending, so "no pending import for you here" covers one cancelled in another
+ * tab, one that expired, one a newer upload superseded - and one that was confirmed elsewhere,
+ * whether this very proposal or the newer one that replaced it. Neither decision's reply tells those
+ * apart, so this sentence names them and claims none.
+ */
+const SETTLED_MESSAGE =
+  'That import is no longer pending - it may have been cancelled, it may have expired, or an import may ' +
+  'already have been confirmed here. The Inventory view has been refreshed to show what is here now.';
+
+/**
  * The signed-in Initial Import workflow: offered only while this Inventory has no Stock Entries, it
  * validates a chosen CSV file, shows either every actionable problem or the exact normalized Stock
  * Entries it would create, and creates them only on an explicit confirmation.
@@ -99,7 +117,7 @@ const CONFLICT_MESSAGES: Record<ImportConflictCode, string> = {
  * a control that stays disabled because a request failed, and never told an import happened, or did
  * not, without the server having said so.
  */
-function InitialImport({ inventoryId, csrfToken, refetchToken, onImported }: InitialImportProps) {
+function InitialImport({ inventoryId, csrfToken, refetchToken, onStockMayHaveChanged }: InitialImportProps) {
   const [eligible, setEligible] = useState<boolean | null>(null);
   const [validation, setValidation] = useState<ImportValidation | null>(null);
   const [busy, setBusy] = useState<ImportAction | null>(null);
@@ -167,11 +185,18 @@ function InitialImport({ inventoryId, csrfToken, refetchToken, onImported }: Ini
         // any reviewed preview, and the one-time token that only exists in it all stay exactly as
         // they were, and the next bump of refetchToken asks again.
         if (!ignored) {
-          setAlert(
-            backgroundAlert(
-              `Checking whether Initial Import is available failed: ${describeFailure(failure)} ` +
-                'Nothing was created, and any preview already on screen is untouched.',
-            ),
+          // A decision's result outranks this. A background read that failed knows nothing about
+          // what a confirmation or a cancellation was just told, so overwriting that answer with
+          // this one would replace the only report of what happened to this Participant's import
+          // with a sentence about a read nobody asked for. An earlier background failure it may
+          // replace: both describe the same re-check, and this is the newer one.
+          setAlert((current) =>
+            current?.source === 'action'
+              ? current
+              : backgroundAlert(
+                  `Checking whether Initial Import is available failed: ${describeFailure(failure)} ` +
+                    'Any preview already on screen is untouched.',
+                ),
           );
         }
       }
@@ -183,6 +208,36 @@ function InitialImport({ inventoryId, csrfToken, refetchToken, onImported }: Ini
     // refetchToken deliberately participates in this effect's dependency list purely to trigger the
     // re-read when it changes - its value itself is never read.
   }, [applyEligibility, readEligibility, refetchToken]);
+
+  /**
+   * What both decisions do with a 404, because it means the same thing to each: the proposal this
+   * page is holding a preview of is settled, and this reply will not say by what. So the preview and
+   * its spent one-time token go, the offer is re-read from the server rather than inferred, and the
+   * workspace is told Stock may have moved - because an import confirmed in another tab, of this
+   * proposal or of the one that superseded it, is one of the things this answer covers.
+   */
+  async function reportSettledProposal() {
+    setValidation(null);
+    setAlert(actionAlert(SETTLED_MESSAGE));
+    await refreshEligibility();
+    onStockMayHaveChanged();
+  }
+
+  /**
+   * What both decisions do with a 409: the proposal is settled server-side either way, so its
+   * preview can never be confirmed. Only one of the codes says anything about Stock - a changed
+   * state is the server reporting this Inventory stopped being empty, which is Stock this workspace
+   * was not showing - and an expired proposal created nothing, so it asks for no refetch.
+   */
+  async function reportConflict(code: ImportConflictCode) {
+    setValidation(null);
+    setAlert(actionAlert(CONFLICT_MESSAGES[code]));
+    await refreshEligibility();
+
+    if (code === 'state_changed') {
+      onStockMayHaveChanged();
+    }
+  }
 
   async function handleFile(event: React.ChangeEvent<HTMLInputElement>) {
     const input = event.target;
@@ -209,7 +264,11 @@ function InitialImport({ inventoryId, csrfToken, refetchToken, onImported }: Ini
       setValidation(result);
 
       if (result.kind === 'not-empty') {
+        // Validating creates nothing, but this refusal is the server saying this Inventory already
+        // holds Stock - and this file control is offered only while the last eligibility read said
+        // it had none, so the workspace beside it may still be showing that empty Inventory.
         await refreshEligibility();
+        onStockMayHaveChanged();
       }
     } catch (failure) {
       setAlert(
@@ -236,30 +295,22 @@ function InitialImport({ inventoryId, csrfToken, refetchToken, onImported }: Ini
 
           // This Inventory holds Stock now, so the workflow is over here. Saying so immediately keeps
           // the file control from being offered for the moment it takes the parent's refetch - which
-          // onImported triggers, and which re-reads this from the server - to come back and agree.
+          // onStockMayHaveChanged triggers, and which re-reads this from the server - to agree.
           setEligible(false);
-          onImported();
+          onStockMayHaveChanged();
           return;
 
         case 'conflict':
-          // The proposal is settled server-side either way, so its preview can never be confirmed.
-          setValidation(null);
-          setAlert(actionAlert(CONFLICT_MESSAGES[result.code]));
-          await refreshEligibility();
+          await reportConflict(result.code);
           return;
 
         case 'settled':
           // Confirming replays an import that already ran rather than refusing it - the server
-          // answers from its ledger before it looks for a pending proposal - so a 404 here means no
-          // confirmation of this proposal was ever recorded for this Participant. Saying nothing was
-          // created is reading that replay, not assuming anything about what a 404 leaves behind.
-          setValidation(null);
-          setAlert(
-            actionAlert(
-              'That import is no longer pending, and nothing was created. Choose the file again to start over.',
-            ),
-          );
-          await refreshEligibility();
+          // answers from its ledger before it looks for a pending proposal - but that ledger is
+          // keyed to *this* proposal, so this 404 says only that this proposal never ran. A newer
+          // upload that superseded it and was confirmed in another tab leaves exactly this answer
+          // behind, with the Stock it created already here, so this cannot claim nothing exists.
+          await reportSettledProposal();
           return;
 
         case 'token-mismatch':
@@ -308,27 +359,14 @@ function InitialImport({ inventoryId, csrfToken, refetchToken, onImported }: Ini
 
         case 'settled':
           // Cancelling, unlike confirming, does not replay anything: the server looks for a pending
-          // proposal and answers 404 when there is none. That one answer covers a cancellation in
-          // another tab, an expiry, a superseding upload - and an import that was confirmed
-          // elsewhere. Naming any of them, "nothing was created" included, would be inventing the
-          // one this reply deliberately does not distinguish. So the preview and its spent token go,
-          // the offer is re-read from the server rather than guessed, and the workspace refetches:
-          // if Stock was created somewhere else, this is where this page stops being wrong about it.
-          setValidation(null);
-          setAlert(
-            actionAlert(
-              'That import is no longer pending - it may have been cancelled, it may have expired, or it may ' +
-                'already have been confirmed. The Inventory view has been refreshed to show what is here now.',
-            ),
-          );
-          await refreshEligibility();
-          onImported();
+          // proposal and answers 404 when there is none. Neither reply distinguishes a cancellation
+          // in another tab, an expiry, a superseding upload, or an import that was confirmed
+          // elsewhere - so both are answered the same way, and neither invents which it was.
+          await reportSettledProposal();
           return;
 
         case 'conflict':
-          setValidation(null);
-          setAlert(actionAlert(CONFLICT_MESSAGES[result.code]));
-          await refreshEligibility();
+          await reportConflict(result.code);
           return;
 
         case 'token-mismatch':
