@@ -152,4 +152,33 @@ public class ImportMergePlanTests
 
         Assert.Equal(["Zinc", "Alpha"], plan.Entries.Select(entry => entry.Name));
     }
+
+    [Fact]
+    public void SourceLineNumbers_preserve_encounter_order_so_LineNumber_is_always_the_first_one()
+    {
+        // Synthetic rows arrive out of ascending order on purpose: real callers always supply ascending
+        // file order, but the merge itself must not depend on that to keep LineNumber and
+        // SourceLineNumbers[0] internally consistent.
+        var plan = ImportMergePlan.Create([Row(9, quantity: "1"), Row(2, quantity: "2"), Row(5, quantity: "3")]);
+
+        var entry = Assert.Single(plan.Entries);
+        Assert.Equal([9, 2, 5], entry.SourceLineNumbers);
+        Assert.Equal(9, entry.LineNumber);
+        Assert.Equal(entry.SourceLineNumbers[0], entry.LineNumber);
+    }
+
+    [Fact]
+    public void A_group_with_both_conflicting_Notes_and_an_overflowing_Quantity_reports_both_errors_together()
+    {
+        var huge = new string('9', Quantity.MaxIntegerDigits);
+        var plan = ImportMergePlan.Create([Row(2, quantity: huge, note: "A"), Row(3, quantity: huge, note: "B")]);
+
+        Assert.Equal(
+            [
+                (ImportErrorCode.ConflictingNotes, 3, ImportContract.NoteColumn),
+                (ImportErrorCode.QuantityOverflow, 2, ImportContract.QuantityColumn),
+            ],
+            plan.Errors.Select(error => (error.Code, error.LineNumber, error.ColumnIndex)));
+        Assert.Empty(plan.Entries);
+    }
 }

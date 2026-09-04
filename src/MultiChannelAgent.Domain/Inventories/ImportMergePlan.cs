@@ -35,6 +35,7 @@ public sealed record ImportEntry
     /// <summary>The first source line of the group, which is also the line whose display text and references survive.</summary>
     public required int LineNumber { get; init; }
 
+    /// <summary>Every contributing line, in the order the rows were encountered - so <c>SourceLineNumbers[0]</c> is always <see cref="LineNumber"/>.</summary>
     public required IReadOnlyList<int> SourceLineNumbers { get; init; }
 
     public required string Name { get; init; }
@@ -99,21 +100,26 @@ public static class ImportMergePlan
             var group = groups[key];
             var first = group[0];
 
-            if (!TryMergeNotes(group, errors, out var note))
-            {
-                continue;
-            }
+            // Both checks always run over the whole group before any decision is made, so a group with
+            // more than one thing wrong reports all of them together in a single pass - a Participant
+            // fixing the file from the errors alone should never be surprised by a second round.
+            var notesOk = TryMergeNotes(group, errors, out var note);
+            var quantityOk = TrySum(group, out var quantity);
 
-            if (!TrySum(group, out var quantity))
+            if (!quantityOk)
             {
                 errors.Add(new ImportRowError(ImportErrorCode.QuantityOverflow, first.LineNumber, ImportContract.QuantityColumn));
+            }
+
+            if (!notesOk || !quantityOk)
+            {
                 continue;
             }
 
             entries.Add(new ImportEntry
             {
                 LineNumber = first.LineNumber,
-                SourceLineNumbers = [.. group.Select(row => row.LineNumber).OrderBy(lineNumber => lineNumber)],
+                SourceLineNumbers = [.. group.Select(row => row.LineNumber)],
                 Name = first.Name,
                 NormalizedName = first.NormalizedName,
                 Quantity = quantity,
