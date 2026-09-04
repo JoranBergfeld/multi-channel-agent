@@ -36,7 +36,7 @@ public sealed class SqlImportProposalStore(MultiChannelAgentDbContext db) : IImp
             db.ImportUploads.Add(new ImportUploadEntity
             {
                 // Copied, never referenced: the caller's buffer may be pooled or reused the moment
-                // this returns, and the bytes a reloaded preview shows must be the ones uploaded.
+                // this returns, and what is retained has to be exactly the bytes that were digested.
                 Content = rawContent.ToArray(),
                 ProposalId = proposal.Id.Value,
                 CreatedAt = now,

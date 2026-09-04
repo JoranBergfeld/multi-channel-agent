@@ -55,6 +55,12 @@ public sealed class ImportConfirmationService(
             inventoryId, ImportOperationId.DeriveForProposal(proposalId), cancellationToken);
         if (recorded is not null)
         {
+            // The ledger is consulted before the proposal, because by the time a confirmation is
+            // re-driven - a retried request, a second tab, a lost response - the proposal it named has
+            // already been consumed. The ledger, keyed by an identity derived from that proposal, is
+            // the authoritative record, so this re-reports what the import did instead of answering
+            // that it is gone. It stays bound to the Participant who ran it: to anyone else the
+            // applied import is indistinguishable from one that never existed.
             return recorded.ActorId == participantId ? Completed(recorded) : NotFound();
         }
 
@@ -78,25 +84,6 @@ public sealed class ImportConfirmationService(
         }
 
         return await ExecuteAsync(participantId, inventoryId, pending, now, cancellationToken);
-    }
-
-    /// <summary>Re-reports an already applied proposal from the ledger without touching Stock.</summary>
-    public async Task<ImportConfirmationResult> ReplayAsync(
-        ParticipantId participantId,
-        InventoryId inventoryId,
-        ImportProposalId proposalId,
-        DateTimeOffset now,
-        CancellationToken cancellationToken)
-    {
-        if (await AuthorizeAsync(participantId, inventoryId, now, cancellationToken) is { } refusal)
-        {
-            return refusal;
-        }
-
-        var recorded = await executionStore.FindRecordedAsync(
-            inventoryId, ImportOperationId.DeriveForProposal(proposalId), cancellationToken);
-
-        return recorded is null || recorded.ActorId != participantId ? NotFound() : Completed(recorded);
     }
 
     public async Task<ImportConfirmationResult> RejectAsync(

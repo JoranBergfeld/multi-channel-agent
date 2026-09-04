@@ -4,7 +4,7 @@
 
 **Goal:** Complete issue #34 by giving Owners and Editors one signed-in web Initial Import workflow that accepts a bounded UTF-8 RFC 4180 five-column CSV for an Inventory with no Stock Entries, validates the whole file and reports every actionable row and column error together, resolves only active Units and Locations without ever creating one, merges Equivalent rows by summing Quantity when their Notes are compatible, shows an exact normalized preview backed by a ten-minute single-use proposal bound to the Participant, the Inventory, the file digest, the exact rows and the empty-state version, and on confirmation creates every Stock Entry atomically and idempotently - or none - without reparsing, then discards the raw CSV and retains only minimal 90-day semantic facts.
 
-**Architecture:** Initial Import is a **signed-in HTTP workflow, not a conversational tool**, so it does not go through `InboundTurn -> TurnProcessingCoordinator -> IToolDispatcher` and it does not compete for the one conversational pending-proposal slot. It reuses what genuinely aligns - `ConfirmationToken` for the single-use hashed token, `InventoryAuthorizationService` for role checks and denial audits, `IInventoryReferenceStore` for active-only reference resolution, `AssignedReferenceLocks` and the reference-then-proposal-then-stock lock order from #33, `AbandonedWrites.AbandonAsync` for failed-write hygiene, and the `Quantity`/`StockEntry`/`NameNormalization` domain rules - and adds its own durable aggregate where the shipped one does not fit: `ConfirmationProposal` is bounded to 25 changes and keyed one-pending-per-ChannelConversation, while an import carries up to 5,000 rows and belongs to a browser session. Four pure Domain pieces carry the rules: a `CsvImportDocument` reader that is the only thing that understands bytes, an `ImportRow` model the merge and the executor share, an `ImportMergePlan` that decides equivalence and Note compatibility from rows alone, and an `ImportProposal` aggregate carrying the token, the digest, the exact normalized rows and the empty-state version. Two Application services compose them - `InitialImportService` (eligibility, validate, preview) and `ImportConfirmationService` (confirm, reject, replay) - over two new store seams, `IImportProposalStore` and `IImportExecutionStore`. `SqlImportExecutionStore` is the one atomic writer: under `Serializable` it holds every referenced Unit and Location, consumes the proposal, re-asserts that the Inventory still has no Stock Entries at all, inserts every entry, appends one minimal audit fact and its ledger row, and discards the raw upload - all in one transaction, or nothing.
+**Architecture:** Initial Import is a **signed-in HTTP workflow, not a conversational tool**, so it does not go through `InboundTurn -> TurnProcessingCoordinator -> IToolDispatcher` and it does not compete for the one conversational pending-proposal slot. It reuses what genuinely aligns - `ConfirmationToken` for the single-use hashed token, `InventoryAuthorizationService` for role checks and denial audits, `IInventoryReferenceStore` for active-only reference resolution, `AssignedReferenceLocks` and the reference-then-proposal-then-stock lock order from #33, `AbandonedWrites.AbandonAsync` for failed-write hygiene, and the `Quantity`/`StockEntry`/`NameNormalization` domain rules - and adds its own durable aggregate where the shipped one does not fit: `ConfirmationProposal` is bounded to 25 changes and keyed one-pending-per-ChannelConversation, while an import carries up to 5,000 rows and belongs to a browser session. Four pure Domain pieces carry the rules: a `CsvImportDocument` reader that is the only thing that understands bytes, an `ImportRow` model the merge and the executor share, an `ImportMergePlan` that decides equivalence and Note compatibility from rows alone, and an `ImportProposal` aggregate carrying the token, the digest, the exact normalized rows and the empty-state version. Two Application services compose them - `InitialImportService` (eligibility, validate, preview) and `ImportConfirmationService` (confirm, reject) - over two new store seams, `IImportProposalStore` and `IImportExecutionStore`. `SqlImportExecutionStore` is the one atomic writer: under `Serializable` it holds every referenced Unit and Location, consumes the proposal, re-asserts that the Inventory still has no Stock Entries at all, inserts every entry, appends one minimal audit fact and its ledger row, and discards the raw upload - all in one transaction, or nothing.
 
 **Tech Stack:** C#/.NET 10, EF Core 10 (SQL Server in production, SQLite for Docker-free relational tests), ASP.NET Core minimal APIs with multipart form upload and the shipped `AntiforgeryEndpointFilter`, xUnit 2.9, `Xunit.SkippableFact`, `Microsoft.Extensions.TimeProvider.Testing`, Testcontainers `MsSql`, React 19 + TypeScript + Vite + oxlint.
 
@@ -212,7 +212,7 @@ The digest is SHA-256 over the exact uploaded bytes, before BOM stripping, as 64
 
 ### 9. The raw CSV lifecycle
 
-The uploaded bytes are stored in `ImportUploads`, one row per pending proposal, cascade-deleted with it. They are kept for the ten-minute window for two concrete reasons: the error report cites source line numbers and a reload of the preview page must be able to show them again without a re-upload, and having the bytes in SQL means "discard the raw CSV" is one durable, testable fact rather than a claim about process memory.
+The uploaded bytes are stored in `ImportUploads`, one row per pending proposal, cascade-deleted with it. They are kept for the ten-minute window for one concrete reason: having the bytes in SQL means "discard the raw CSV" is one durable, testable fact rather than a claim about process memory. Nothing serves them back to a Participant - no route rebuilds a preview from them, and the plaintext confirmation token a preview was issued with exists only in its validate response, so a reloaded page cannot reconstruct one and uploads again instead.
 
 They are deleted in the very transaction that confirms the import, in the guarded settle that rejects it, and by `ImportCleanupCoordinator` when a proposal expires or is superseded. After any of those, only the digest and the minimal audit fact remain. Nothing else in the system ever reads `ImportUploads`.
 
@@ -2136,11 +2136,15 @@ namespace MultiChannelAgent.Application.Inventories;
 /// <summary>
 /// The one pending Initial Import per Participant and Inventory, and the raw file it came from.
 ///
-/// The raw bytes live here for the proposal's ten minutes and nowhere else. They are kept so a
-/// reloaded preview can be shown again without a re-upload and so "the raw CSV is discarded" is one
-/// durable, testable fact rather than a claim about process memory - and they are deleted by every
-/// path out of Pending, so after confirmation, rejection, supersession, or expiry only the digest and
-/// the minimal audit fact remain.
+/// The raw bytes live here for the proposal's ten minutes and nowhere else, and they are kept for
+/// one reason: so that "the raw CSV is discarded" is a durable fact this system can be held to
+/// rather than a claim about process memory. Every path out of Pending deletes them, so after
+/// confirmation, rejection, supersession, or expiry only the digest and the minimal audit fact
+/// remain.
+///
+/// Nothing serves them back to a Participant. No route rebuilds a preview from them: a preview is
+/// the stored proposal, and the plaintext confirmation token it was issued with exists only in the
+/// validate response, so a reloaded page cannot reconstruct one and uploads again instead.
 /// </summary>
 public interface IImportProposalStore
 {
@@ -3418,9 +3422,10 @@ git commit -m "feat(inventories): validate a whole import file and store its exa
 > **Implementation note:** Task 9's final reviewed contract exposes the opaque `ProposalId` in the
 > preview and requires it on confirm/reject. Confirmation authorizes first, then checks the derived
 > ledger identity before looking for a pending proposal, so a lost-response retry re-reports the
-> completed import. `RecordedImport` therefore carries `ActorId`, and replay returns `NotFound` when
-> that actor does not match the current Participant. The remaining persistence and HTTP tasks below
-> include this reviewed contract even where the original illustrative Task 9 snippets predate it.
+> completed import. `RecordedImport` therefore carries `ActorId`, and a re-driven confirmation
+> returns `NotFound` when that actor does not match the current Participant. The remaining
+> persistence and HTTP tasks below include this reviewed contract even where the original
+> illustrative Task 9 snippets predate it.
 
 **Files:**
 - Create: `src/MultiChannelAgent.Application/Inventories/ImportConfirmationService.cs`
@@ -3494,15 +3499,16 @@ public class ImportConfirmationServiceTests
         return (proposal, token);
     }
 
-    private Task<ImportConfirmationResult> ConfirmAsync(string? token, DateTimeOffset? at = null) =>
-        Service().ConfirmAsync(_participantId, _inventoryId, token, at ?? Now, CancellationToken.None);
+    private Task<ImportConfirmationResult> ConfirmAsync(
+        ImportProposalId proposalId, string? token, DateTimeOffset? at = null) =>
+        Service().ConfirmAsync(_participantId, _inventoryId, proposalId, token, at ?? Now, CancellationToken.None);
 
     [Fact]
     public async Task Confirming_creates_every_entry_exactly_once_and_audits_one_fact()
     {
         var (proposal, token) = await StorePendingAsync(entryCount: 3);
 
-        var result = await ConfirmAsync(token);
+        var result = await ConfirmAsync(proposal.Id, token);
 
         Assert.Equal(ImportConfirmationResultKind.Completed, result.Kind);
         Assert.Equal(3, result.View!.CreatedEntryCount);
@@ -3519,7 +3525,7 @@ public class ImportConfirmationServiceTests
     {
         var (proposal, token) = await StorePendingAsync();
 
-        await ConfirmAsync(token);
+        await ConfirmAsync(proposal.Id, token);
 
         // The raw upload is discarded by the settle, and nothing re-read it on the way there.
         Assert.Null(await _proposals.FindRawContentAsync(proposal.Id, CancellationToken.None));
@@ -3529,13 +3535,20 @@ public class ImportConfirmationServiceTests
     [Fact]
     public async Task The_token_is_single_use()
     {
-        var (_, token) = await StorePendingAsync();
+        var (proposal, token) = await StorePendingAsync(entryCount: 2);
 
-        Assert.Equal(ImportConfirmationResultKind.Completed, (await ConfirmAsync(token)).Kind);
+        var first = await ConfirmAsync(proposal.Id, token);
+        Assert.Equal(ImportConfirmationResultKind.Completed, first.Kind);
 
-        var reused = await ConfirmAsync(token);
-        Assert.Equal(ImportConfirmationResultKind.NotFound, reused.Kind);
-        Assert.Single(_execution.CreatedEntries);
+        // Re-driving the very same confirmation - a retried request, a second browser tab - is
+        // answered from the ledger, so it re-reports what it did instead of importing twice.
+        var reused = await ConfirmAsync(proposal.Id, token);
+        Assert.Equal(ImportConfirmationResultKind.Completed, reused.Kind);
+        Assert.Equal(2, reused.View!.CreatedEntryCount);
+        Assert.Equal(first.View!.ProposalId, reused.View.ProposalId);
+        Assert.Equal(first.View.FileDigest, reused.View.FileDigest);
+        Assert.Equal(2, _execution.CreatedEntries.Count);
+        Assert.Single(_execution.Audits);
     }
 
     [Fact]
@@ -3543,7 +3556,7 @@ public class ImportConfirmationServiceTests
     {
         var (proposal, _) = await StorePendingAsync();
 
-        var result = await ConfirmAsync(ConfirmationToken.Issue());
+        var result = await ConfirmAsync(proposal.Id, ConfirmationToken.Issue());
 
         Assert.Equal(ImportConfirmationResultKind.Invalid, result.Kind);
         Assert.Equal("proposal_token_mismatch", result.Code);
@@ -3558,7 +3571,7 @@ public class ImportConfirmationServiceTests
     {
         var (proposal, token) = await StorePendingAsync();
 
-        var result = await ConfirmAsync(token, Now.AddMinutes(ImportProposal.LifetimeMinutes));
+        var result = await ConfirmAsync(proposal.Id, token, Now.AddMinutes(ImportProposal.LifetimeMinutes));
 
         Assert.Equal(ImportConfirmationResultKind.Conflict, result.Kind);
         Assert.Equal("proposal_expired", result.Code);
@@ -3574,7 +3587,7 @@ public class ImportConfirmationServiceTests
         var (proposal, token) = await StorePendingAsync();
         _emptyState.SetAnyStock(_inventoryId, true);
 
-        var result = await ConfirmAsync(token);
+        var result = await ConfirmAsync(proposal.Id, token);
 
         Assert.Equal(ImportConfirmationResultKind.Conflict, result.Kind);
         Assert.Equal("state_changed", result.Code);
@@ -3584,34 +3597,36 @@ public class ImportConfirmationServiceTests
             await _proposals.FindStatusAsync(proposal.Id, CancellationToken.None));
     }
 
+    // The ledger is consulted before the proposal, so an already-applied import answers a second
+    // confirmation. That answer is still bound to the Participant who ran it: another Editor - one
+    // who may confirm imports here, and who holds the very proposal id and token the preview issued -
+    // gets the same plain absence they would get for an import that never existed, learning neither
+    // that it ran, nor how many entries it created, nor which file it applied.
     [Fact]
-    public async Task A_replayed_confirmation_re_reports_what_it_did_instead_of_importing_twice()
+    public async Task Another_Editor_cannot_learn_of_or_re_report_an_import_that_is_not_theirs()
     {
         var (proposal, token) = await StorePendingAsync(entryCount: 2);
-        await ConfirmAsync(token);
+        var applied = await ConfirmAsync(proposal.Id, token);
+        Assert.Equal(ImportConfirmationResultKind.Completed, applied.Kind);
 
-        // The operation identity is derived from the proposal, so a re-driven confirmation finds it.
-        var replay = await Service().ReplayAsync(
-            _participantId, _inventoryId, proposal.Id, Now, CancellationToken.None);
-
-        Assert.Equal(ImportConfirmationResultKind.Completed, replay.Kind);
-        Assert.Equal(2, replay.View!.CreatedEntryCount);
-        Assert.Equal(2, _execution.CreatedEntries.Count);
-        Assert.Single(_execution.Audits);
-    }
-
-    [Fact]
-    public async Task Replay_does_not_disclose_another_Participants_import()
-    {
-        var (proposal, token) = await StorePendingAsync();
-        await ConfirmAsync(token);
         var otherEditor = new ParticipantId(Guid.NewGuid());
         _inventories.GrantMembership(_inventoryId, otherEditor, MembershipRole.Editor, Now);
 
-        var replay = await Service().ReplayAsync(
-            otherEditor, _inventoryId, proposal.Id, Now, CancellationToken.None);
+        var result = await Service().ConfirmAsync(
+            otherEditor, _inventoryId, proposal.Id, token, Now, CancellationToken.None);
 
-        Assert.Equal(ImportConfirmationResultKind.NotFound, replay.Kind);
+        Assert.Equal(ImportConfirmationResultKind.NotFound, result.Kind);
+        Assert.Equal("proposal_not_found", result.Code);
+        Assert.Null(result.View);
+        Assert.Equal(2, _execution.CreatedEntries.Count);
+        Assert.Single(_execution.Audits);
+
+        // And the Participant who ran it still gets their own recorded answer back.
+        var owner = await ConfirmAsync(proposal.Id, token);
+        Assert.Equal(ImportConfirmationResultKind.Completed, owner.Kind);
+        Assert.Equal(applied.View!.ProposalId, owner.View!.ProposalId);
+        Assert.Equal(2, owner.View.CreatedEntryCount);
+        Assert.Equal(applied.View.FileDigest, owner.View.FileDigest);
     }
 
     [Fact]
@@ -3645,11 +3660,12 @@ public class ImportConfirmationServiceTests
     [Fact]
     public async Task Another_Participants_pending_import_is_unreachable()
     {
-        var (_, token) = await StorePendingAsync();
+        var (proposal, token) = await StorePendingAsync();
         var stranger = new ParticipantId(Guid.NewGuid());
         _inventories.GrantMembership(_inventoryId, stranger, MembershipRole.Editor, Now);
 
-        var result = await Service().ConfirmAsync(stranger, _inventoryId, token, Now, CancellationToken.None);
+        var result = await Service().ConfirmAsync(
+            stranger, _inventoryId, proposal.Id, token, Now, CancellationToken.None);
 
         Assert.Equal(ImportConfirmationResultKind.NotFound, result.Kind);
         Assert.Empty(_execution.CreatedEntries);
@@ -3658,11 +3674,12 @@ public class ImportConfirmationServiceTests
     [Fact]
     public async Task A_Viewer_may_not_confirm_and_the_denial_is_audited()
     {
-        var (_, token) = await StorePendingAsync();
+        var (proposal, token) = await StorePendingAsync();
         var viewer = new ParticipantId(Guid.NewGuid());
         _inventories.GrantMembership(_inventoryId, viewer, MembershipRole.Viewer, Now);
 
-        var result = await Service().ConfirmAsync(viewer, _inventoryId, token, Now, CancellationToken.None);
+        var result = await Service().ConfirmAsync(
+            viewer, _inventoryId, proposal.Id, token, Now, CancellationToken.None);
 
         Assert.Equal(ImportConfirmationResultKind.Forbidden, result.Kind);
         Assert.Contains(_audits.RecordedFacts, fact => fact.OutcomeCode == "Denied:InsufficientRole");
@@ -3720,8 +3737,10 @@ public sealed record ImportConfirmationResult(ImportConfirmationResultKind Kind,
 /// yet expired.
 ///
 /// Execution then consumes the proposal and creates every entry in one transaction, so two
-/// confirmations can never both run. Nothing is ever re-read or re-parsed: the stored rows are handed
-/// to the writer exactly as they were previewed, which is what #34 means by "without reparsing".
+/// confirmations can never both run. A confirmation that is re-driven after that transaction is
+/// answered from the ledger, bound to the Participant who ran it, rather than being told the import
+/// is gone. Nothing is ever re-read or re-parsed: the stored rows are handed to the writer exactly
+/// as they were previewed, which is what #34 means by "without reparsing".
 /// </summary>
 public sealed class ImportConfirmationService(
     InventoryAuthorizationService authorizationService,
@@ -3731,6 +3750,7 @@ public sealed class ImportConfirmationService(
     public async Task<ImportConfirmationResult> ConfirmAsync(
         ParticipantId participantId,
         InventoryId inventoryId,
+        ImportProposalId proposalId,
         string? presentedToken,
         DateTimeOffset now,
         CancellationToken cancellationToken)
@@ -3740,8 +3760,21 @@ public sealed class ImportConfirmationService(
             return refusal;
         }
 
+        var recorded = await executionStore.FindRecordedAsync(
+            inventoryId, ImportOperationId.DeriveForProposal(proposalId), cancellationToken);
+        if (recorded is not null)
+        {
+            // The ledger is consulted before the proposal, because by the time a confirmation is
+            // re-driven - a retried request, a second tab, a replica that lost a race to its own twin -
+            // the proposal it named has already been consumed. The ledger, keyed by an identity derived
+            // from that proposal, is the authoritative record, so this re-reports what the import did
+            // instead of answering that it is gone. It stays bound to the Participant who ran it: to
+            // anyone else the applied import is indistinguishable from one that never existed.
+            return recorded.ActorId == participantId ? Completed(recorded) : NotFound();
+        }
+
         var pending = await proposalStore.FindPendingAsync(participantId, inventoryId, cancellationToken);
-        if (pending is null || !pending.BelongsTo(participantId, inventoryId))
+        if (pending is null || pending.Id != proposalId || !pending.BelongsTo(participantId, inventoryId))
         {
             return NotFound();
         }
@@ -3761,30 +3794,6 @@ public sealed class ImportConfirmationService(
         }
 
         return await ExecuteAsync(participantId, inventoryId, pending, now, cancellationToken);
-    }
-
-    /// <summary>
-    /// Re-reports what a confirmation already did, by the identity derived from its proposal. This is
-    /// what makes a re-driven confirmation - a retried request, a replica that lost a race to its own
-    /// twin - safe: the ledger, not the proposal, is the authoritative record, and by replay time the
-    /// proposal has been consumed.
-    /// </summary>
-    public async Task<ImportConfirmationResult> ReplayAsync(
-        ParticipantId participantId,
-        InventoryId inventoryId,
-        ImportProposalId proposalId,
-        DateTimeOffset now,
-        CancellationToken cancellationToken)
-    {
-        if (await AuthorizeAsync(participantId, inventoryId, now, cancellationToken) is { } refusal)
-        {
-            return refusal;
-        }
-
-        var recorded = await executionStore.FindRecordedAsync(
-            inventoryId, ImportOperationId.DeriveForProposal(proposalId), cancellationToken);
-
-        return recorded is null || recorded.ActorId != participantId ? NotFound() : Completed(recorded);
     }
 
     public async Task<ImportConfirmationResult> RejectAsync(
@@ -4076,9 +4085,9 @@ namespace MultiChannelAgent.Infrastructure.Persistence.Entities;
 /// <summary>
 /// The uploaded bytes, for exactly as long as the proposal they belong to is pending.
 ///
-/// They are kept so a reloaded preview can be shown again without a re-upload, and so "the raw CSV is
-/// discarded" is one durable, testable fact rather than a claim about process memory. Nothing else in
-/// the system ever reads this table, and every path out of <c>Pending</c> deletes the row.
+/// They are kept so that "the raw CSV is discarded" is one durable, testable fact rather than a
+/// claim about process memory. Nothing else in the system ever reads this table, no route rebuilds a
+/// preview from it, and every path out of <c>Pending</c> deletes the row.
 /// </summary>
 public sealed class ImportUploadEntity
 {
@@ -8082,7 +8091,7 @@ If nothing needed fixing, skip this commit rather than creating an empty one.
 | Exact normalized preview | Task 4 (merged entries), Task 8 (`ImportPreviewView`), Task 15 (the table) | `InitialImportServiceTests.A_valid_file_previews_the_exact_normalized_entries_it_would_create`, `ImportEndpointsHttpTests.A_valid_file_previews_the_exact_entries_and_hands_back_a_one_time_token`, scenario step 5 |
 | Ten-minute proposal bound to actor, Inventory, digest, rows, and empty-state version | Task 5 (`ImportProposal`), Task 10 (the schema), Task 11 (round-trip) | `ImportProposalTests` (binding, lifetime, entries), `InitialImportServiceTests.A_successful_validation_stores_a_pending_proposal_bound_to_everything_that_decided_it`, `SqlImportProposalStoreTests.A_stored_import_round_trips_every_exact_entry_it_carries` |
 | Confirmation creates all entries atomically or none | Task 12 (one `Serializable` transaction, `AbandonAsync` on every exit) | `SqlImportExecutionStoreTests` conflict cases, `SqlImportExecutionStoreChangeTrackerIsolationTests`, `SqlImportExecutionStoreConcurrencyTests` |
-| Idempotently | Task 5 (`ImportOperationId.DeriveForProposal`), Task 10 (unique proposal index), Task 12 (replay first) | `SqlImportExecutionStoreTests.Applying_the_same_operation_identity_again_re_reports_it_instead_of_importing_twice`, `ImportConfirmationServiceTests.A_replayed_confirmation_re_reports_what_it_did_instead_of_importing_twice`, scenario step 12 |
+| Idempotently | Task 5 (`ImportOperationId.DeriveForProposal`), Task 10 (unique proposal index), Task 12 (replay first) | `SqlImportExecutionStoreTests.Applying_the_same_operation_identity_again_re_reports_it_instead_of_importing_twice`, `ImportConfirmationServiceTests.The_token_is_single_use`, `ImportConfirmationServiceTests.Another_Editor_cannot_learn_of_or_re_report_an_import_that_is_not_theirs`, scenario step 12 |
 | Without reparsing | Task 9 (stored rows handed to the writer; the upload is never read) | `ImportConfirmationServiceTests.Confirmation_applies_the_stored_rows_and_never_reads_the_file`, Task 17 step 7 |
 | Raw CSV discarded after completion or expiry | Task 11 (`SettlePendingAsync` deletes with every settle), Task 12 (deleted in the import transaction), Task 13 (expiry sweep) | `SqlImportProposalStoreTests.The_raw_file_is_stored_with_the_proposal_and_gone_the_moment_it_settles`, `...An_expired_import_is_swept_out_of_Pending_and_its_file_discarded`, `ImportCleanupCoordinatorTests`, scenario steps 8 and 10 |
 | Only the specified 90-day semantic facts remain | Task 1 (`StockImported` / `Import:Completed`), Task 12 (exactly one fact), Task 13 (the audit sweep that did not exist) | `SqlImportExecutionStoreTests` audit assertions, `ImportCleanupCoordinatorTests.An_audit_fact_older_than_ninety_days_is_discarded_and_a_newer_one_is_kept`, scenario step 9 |

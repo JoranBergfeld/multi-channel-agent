@@ -571,6 +571,46 @@ public sealed class ImportEndpointsHttpTests : IAsyncLifetime
         Assert.Equal(first.GetProperty("fileDigest").GetString(), second.GetProperty("fileDigest").GetString());
     }
 
+    // A lost response must never cost a Participant their import, but the re-report belongs to the
+    // Participant who ran it. A second Editor - one who may import into this Inventory, holding the
+    // exact proposal id and token the preview issued - gets the same bodiless 404 the route gives for
+    // an import that never existed, so nothing about the applied import crosses to them.
+    [Fact]
+    public async Task A_second_Editor_confirming_an_applied_import_is_answered_as_if_it_never_existed()
+    {
+        var (ownerJar, ownerCsrfToken, _) = await SignInAndBootstrapAsync("Import Owner");
+        var inventoryId = await CreateInventoryAsync(ownerJar, ownerCsrfToken, "Import Warehouse");
+        var (editorJar, editorCsrfToken, editorId) = await SignInAndBootstrapAsync("Import Editor");
+        await GrantAsync(ownerJar, ownerCsrfToken, inventoryId, editorId, "Editor");
+
+        var preview = await (await ValidateAsync(ownerJar, ownerCsrfToken, inventoryId, $"{Header}\nSteel Bolts,4,,,\n"))
+            .Content.ReadFromJsonAsync<JsonElement>();
+        var applied = await (await ConfirmAsync(ownerJar, ownerCsrfToken, inventoryId, preview))
+            .Content.ReadFromJsonAsync<JsonElement>();
+
+        var stolen = await ConfirmAsync(editorJar, editorCsrfToken, inventoryId, preview);
+
+        Assert.Equal(HttpStatusCode.NotFound, stolen.StatusCode);
+        Assert.Empty(await stolen.Content.ReadAsByteArrayAsync());
+
+        // That 404 is the actor binding, not a missing membership: the same Editor reads the
+        // Inventory's eligibility perfectly well, and is told only that it now holds Stock.
+        var eligibility = await SendAsync(
+            editorJar, new HttpRequestMessage(HttpMethod.Get, $"/api/inventories/{inventoryId}/import"));
+        Assert.Equal(HttpStatusCode.OK, eligibility.StatusCode);
+        Assert.Equal(
+            "inventory_not_empty",
+            (await eligibility.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("reason").GetString());
+
+        // The Participant who ran it still gets their own recorded answer back.
+        var retry = await ConfirmAsync(ownerJar, ownerCsrfToken, inventoryId, preview);
+        var reported = await retry.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(HttpStatusCode.OK, retry.StatusCode);
+        Assert.Equal(applied.GetProperty("proposalId").GetString(), reported.GetProperty("proposalId").GetString());
+        Assert.Equal(1, reported.GetProperty("createdEntryCount").GetInt32());
+        Assert.Equal(applied.GetProperty("fileDigest").GetString(), reported.GetProperty("fileDigest").GetString());
+    }
+
     [Fact]
     public async Task A_token_that_does_not_match_the_proposal_is_refused_and_the_proposal_survives()
     {

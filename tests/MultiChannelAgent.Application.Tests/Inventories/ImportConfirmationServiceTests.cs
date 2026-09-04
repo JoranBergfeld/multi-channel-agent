@@ -95,13 +95,19 @@ public class ImportConfirmationServiceTests
     [Fact]
     public async Task The_token_is_single_use()
     {
-        var (proposal, token) = await StorePendingAsync();
+        var (proposal, token) = await StorePendingAsync(entryCount: 2);
 
-        Assert.Equal(ImportConfirmationResultKind.Completed, (await ConfirmAsync(proposal.Id, token)).Kind);
+        var first = await ConfirmAsync(proposal.Id, token);
+        Assert.Equal(ImportConfirmationResultKind.Completed, first.Kind);
 
+        // Re-driving the very same confirmation - a retried request, a second browser tab - is
+        // answered from the ledger, so it re-reports what it did instead of importing twice.
         var reused = await ConfirmAsync(proposal.Id, token);
         Assert.Equal(ImportConfirmationResultKind.Completed, reused.Kind);
-        Assert.Single(_execution.CreatedEntries);
+        Assert.Equal(2, reused.View!.CreatedEntryCount);
+        Assert.Equal(first.View!.ProposalId, reused.View.ProposalId);
+        Assert.Equal(first.View.FileDigest, reused.View.FileDigest);
+        Assert.Equal(2, _execution.CreatedEntries.Count);
         Assert.Single(_execution.Audits);
     }
 
@@ -149,21 +155,6 @@ public class ImportConfirmationServiceTests
         Assert.Equal(
             ImportProposalStatus.Conflicted,
             await _proposals.FindStatusAsync(proposal.Id, CancellationToken.None));
-    }
-
-    [Fact]
-    public async Task A_replayed_confirmation_re_reports_what_it_did_instead_of_importing_twice()
-    {
-        var (proposal, token) = await StorePendingAsync(entryCount: 2);
-        await ConfirmAsync(proposal.Id, token);
-
-        var replay = await Service().ReplayAsync(
-            _participantId, _inventoryId, proposal.Id, Now, CancellationToken.None);
-
-        Assert.Equal(ImportConfirmationResultKind.Completed, replay.Kind);
-        Assert.Equal(2, replay.View!.CreatedEntryCount);
-        Assert.Equal(2, _execution.CreatedEntries.Count);
-        Assert.Single(_execution.Audits);
     }
 
     [Fact]
@@ -225,18 +216,36 @@ public class ImportConfirmationServiceTests
         Assert.Empty(_execution.CreatedEntries);
     }
 
+    // The ledger is consulted before the proposal, so an already-applied import answers a second
+    // confirmation. That answer is still bound to the Participant who ran it: another Editor - one
+    // who may confirm imports here, and who holds the very proposal id and token the preview issued -
+    // gets the same plain absence they would get for an import that never existed, learning neither
+    // that it ran, nor how many entries it created, nor which file it applied.
     [Fact]
-    public async Task Replay_does_not_disclose_another_Participants_import()
+    public async Task Another_Editor_cannot_learn_of_or_re_report_an_import_that_is_not_theirs()
     {
-        var (proposal, token) = await StorePendingAsync();
-        await ConfirmAsync(proposal.Id, token);
+        var (proposal, token) = await StorePendingAsync(entryCount: 2);
+        var applied = await ConfirmAsync(proposal.Id, token);
+        Assert.Equal(ImportConfirmationResultKind.Completed, applied.Kind);
+
         var otherEditor = new ParticipantId(Guid.NewGuid());
         _inventories.GrantMembership(_inventoryId, otherEditor, MembershipRole.Editor, Now);
 
-        var result = await Service().ReplayAsync(
-            otherEditor, _inventoryId, proposal.Id, Now, CancellationToken.None);
+        var result = await Service().ConfirmAsync(
+            otherEditor, _inventoryId, proposal.Id, token, Now, CancellationToken.None);
 
         Assert.Equal(ImportConfirmationResultKind.NotFound, result.Kind);
+        Assert.Equal("proposal_not_found", result.Code);
+        Assert.Null(result.View);
+        Assert.Equal(2, _execution.CreatedEntries.Count);
+        Assert.Single(_execution.Audits);
+
+        // And the Participant who ran it still gets their own recorded answer back.
+        var owner = await ConfirmAsync(proposal.Id, token);
+        Assert.Equal(ImportConfirmationResultKind.Completed, owner.Kind);
+        Assert.Equal(applied.View!.ProposalId, owner.View!.ProposalId);
+        Assert.Equal(2, owner.View.CreatedEntryCount);
+        Assert.Equal(applied.View.FileDigest, owner.View.FileDigest);
     }
 
     [Fact]

@@ -5,11 +5,15 @@ namespace MultiChannelAgent.Application.Inventories;
 /// <summary>
 /// The one pending Initial Import per Participant and Inventory, and the raw file it came from.
 ///
-/// The raw bytes live here for the proposal's ten minutes and nowhere else. They are kept so a
-/// reloaded preview can be shown again without a re-upload and so "the raw CSV is discarded" is one
-/// durable, testable fact rather than a claim about process memory - and they are deleted by every
-/// path out of Pending, so after confirmation, rejection, supersession, or expiry only the digest and
-/// the minimal audit fact remain.
+/// The raw bytes live here for the proposal's ten minutes and nowhere else, and they are kept for
+/// one reason: so that "the raw CSV is discarded" is a durable fact this system can be held to
+/// rather than a claim about process memory. Every path out of Pending deletes them, so after
+/// confirmation, rejection, supersession, or expiry only the digest and the minimal audit fact
+/// remain.
+///
+/// Nothing serves them back to a Participant. No route rebuilds a preview from them: a preview is
+/// the stored proposal, and the plaintext confirmation token it was issued with exists only in the
+/// validate response, so a reloaded page cannot reconstruct one and uploads again instead.
 /// </summary>
 public interface IImportProposalStore
 {
@@ -25,7 +29,12 @@ public interface IImportProposalStore
     Task<ImportProposal?> FindPendingAsync(
         ParticipantId participantId, InventoryId inventoryId, CancellationToken cancellationToken);
 
-    /// <summary>The raw bytes of a pending proposal, or null once they have been discarded.</summary>
+    /// <summary>
+    /// The raw bytes of a pending proposal, or null once they have been discarded. This is the
+    /// observation seam for that lifecycle - how a test or an operator establishes that the file
+    /// exists while the proposal is pending and is gone once it settles - and no shipped workflow
+    /// calls it.
+    /// </summary>
     Task<ReadOnlyMemory<byte>?> FindRawContentAsync(ImportProposalId proposalId, CancellationToken cancellationToken);
 
     /// <summary>
