@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net.Http.Json;
 using System.Text.Json;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -324,15 +325,41 @@ internal static class ReferenceAdministrationScenario
         using var scope = factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<MultiChannelAgentDbContext>();
 
-        return await db.StockEntries
+        // Typed fields out of the database, snapshot text composed here. Concatenating them in SQL
+        // would mix NormalizedName - which carries the ordinal BIN2 collation the domain's ordering
+        // depends on - with default-collation columns and literals, which SQL Server refuses outright
+        // (error 451). Composing client-side also keeps the snapshot's shape the test's own business
+        // rather than something a provider gets a say in.
+        var rows = await db.StockEntries
             .AsNoTracking()
             .Where(e => e.InventoryId == inventoryId)
             .OrderBy(e => e.Id)
-            .Select(e =>
-                e.Id.ToString() + "|" + e.Name + "|" + e.NormalizedName + "|" + e.UnitId.ToString()
-                + "|" + (e.LocationId == null ? "" : e.LocationId.ToString()) + "|" + e.Quantity.ToString()
-                + "|" + (e.Note ?? "") + "|" + e.ConcurrencyStamp.ToString())
+            .Select(e => new
+            {
+                e.Id,
+                e.Name,
+                e.NormalizedName,
+                e.UnitId,
+                e.LocationId,
+                e.Quantity,
+                e.Note,
+                e.ConcurrencyStamp,
+            })
             .ToListAsync();
+
+        return
+        [
+            .. rows.Select(row => string.Join(
+                '|',
+                row.Id.ToString("D"),
+                row.Name,
+                row.NormalizedName,
+                row.UnitId.ToString("D"),
+                row.LocationId?.ToString("D") ?? string.Empty,
+                row.Quantity.ToString(CultureInfo.InvariantCulture),
+                row.Note ?? string.Empty,
+                row.ConcurrencyStamp.ToString("D"))),
+        ];
     }
 
     private static async Task<int> CountProposalsAsync(
