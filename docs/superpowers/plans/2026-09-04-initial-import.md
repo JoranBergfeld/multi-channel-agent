@@ -71,7 +71,7 @@ Explicitly **out of scope**:
 | --- | --- |
 | `Persistence/Entities/ImportProposalEntity.cs` (create) | The pending import: identity, token hash, binding, digest, serialized rows, empty-state version, status, created/expires/settled with their tick mirrors. |
 | `Persistence/Entities/ImportUploadEntity.cs` (create) | The raw bytes for the ten-minute window, one row per proposal, cascade-deleted with it. |
-| `Persistence/Entities/ImportOperationEntity.cs` (create) | The ledger header: operation identity, Inventory, proposal, created-entry count, applied-at. |
+| `Persistence/Entities/ImportOperationEntity.cs` (create) | The ledger header: operation identity, Inventory, proposal, importing Participant, created-entry count, applied-at. |
 | `Persistence/Configurations/ImportProposalEntityConfiguration.cs` (create) | Bounds, the filtered one-pending-per-Participant-and-Inventory unique index, the token-hash unique index, and the expiry sweep index. |
 | `Persistence/Configurations/ImportUploadEntityConfiguration.cs` (create) | Key on the proposal, single cascade path from the proposal only. |
 | `Persistence/Configurations/ImportOperationEntityConfiguration.cs` (create) | Operation identity as the key and the unique proposal index that makes replay exact. |
@@ -2468,7 +2468,7 @@ public sealed class InMemoryImportExecutionStore(
             command.Now));
 
         var recorded = new RecordedImport(
-            command.OperationId, command.ConsumesProposalId, command.FileDigest, command.Entries.Count);
+            command.OperationId, command.ConsumesProposalId, command.ActorId, command.FileDigest, command.Entries.Count);
         _recorded[(command.InventoryId, command.OperationId)] = recorded;
 
         return new ImportExecutionResult(ImportExecutionOutcome.Applied, recorded);
@@ -3407,6 +3407,13 @@ git commit -m "feat(inventories): validate a whole import file and store its exa
 
 ## Task 9: Confirm the stored proposal, and never reparse
 
+> **Implementation note:** Task 9's final reviewed contract exposes the opaque `ProposalId` in the
+> preview and requires it on confirm/reject. Confirmation authorizes first, then checks the derived
+> ledger identity before looking for a pending proposal, so a lost-response retry re-reports the
+> completed import. `RecordedImport` therefore carries `ActorId`, and replay returns `NotFound` when
+> that actor does not match the current Participant. The remaining persistence and HTTP tasks below
+> include this reviewed contract even where the original illustrative Task 9 snippets predate it.
+
 **Files:**
 - Create: `src/MultiChannelAgent.Application/Inventories/ImportConfirmationService.cs`
 - Test: `tests/MultiChannelAgent.Application.Tests/Inventories/ImportConfirmationServiceTests.cs`
@@ -3921,6 +3928,7 @@ public sealed class ImportRelationalModelTests
                 }));
 
         Assert.True(index.IsUnique);
+        Assert.NotNull(operation.FindProperty(nameof(ImportOperationEntity.ActorId)));
         Assert.Equal($"Status = '{nameof(ImportProposalStatus.Pending)}'", index.GetFilter());
     }
 
@@ -4084,6 +4092,9 @@ public sealed class ImportOperationEntity
     /// <summary>The proposal this consumed. Unique, which is what makes the replay lookup exact.</summary>
     public Guid ProposalId { get; set; }
 
+    /// <summary>The Participant who applied it, retained so replay cannot disclose another Editor's import.</summary>
+    public Guid ActorId { get; set; }
+
     /// <summary>The digest of the file that produced it - never the file.</summary>
     public required string FileDigest { get; set; }
 
@@ -4123,6 +4134,11 @@ public sealed class ImportProposalEntityConfiguration : IEntityTypeConfiguration
             .WithMany()
             .HasForeignKey(e => e.InventoryId)
             .OnDelete(DeleteBehavior.Cascade);
+
+        builder.HasOne<ParticipantEntity>()
+            .WithMany()
+            .HasForeignKey(e => e.ActorId)
+            .OnDelete(DeleteBehavior.NoAction);
 
         // The Participant is referenced without a cascade: deleting a Participant must not silently
         // take reviewed import work with it, and this is also the second path into the table, which
@@ -5513,7 +5529,11 @@ public sealed class SqlImportExecutionStore(MultiChannelAgentDbContext db) : IIm
         }
 
         return new RecordedImport(
-            operationId, new ImportProposalId(header.ProposalId), digest, header.CreatedEntryCount);
+            operationId,
+            new ImportProposalId(header.ProposalId),
+            new ParticipantId(header.ActorId),
+            digest,
+            header.CreatedEntryCount);
     }
 
     public async Task<ImportExecutionResult> ApplyAsync(ImportExecutionCommand command, CancellationToken cancellationToken)
@@ -5599,6 +5619,7 @@ public sealed class SqlImportExecutionStore(MultiChannelAgentDbContext db) : IIm
                 OperationId = command.OperationId.Value,
                 InventoryId = command.InventoryId.Value,
                 ProposalId = command.ConsumesProposalId.Value,
+                ActorId = command.ActorId.Value,
                 FileDigest = command.FileDigest.Value,
                 CreatedEntryCount = command.Entries.Count,
                 AppliedAt = command.Now,
@@ -5624,7 +5645,11 @@ public sealed class SqlImportExecutionStore(MultiChannelAgentDbContext db) : IIm
             return new ImportExecutionResult(
                 ImportExecutionOutcome.Applied,
                 new RecordedImport(
-                    command.OperationId, command.ConsumesProposalId, command.FileDigest, command.Entries.Count));
+                    command.OperationId,
+                    command.ConsumesProposalId,
+                    command.ActorId,
+                    command.FileDigest,
+                    command.Entries.Count));
         }
         catch (DbUpdateException)
         {
@@ -5987,6 +6012,7 @@ Create `tests/MultiChannelAgent.IntegrationTests/Inventories/ImportEndpointsHttp
         Assert.Equal("Steel Bolts", entry.GetProperty("name").GetString());
         Assert.Equal("10", entry.GetProperty("quantity").GetString());
         Assert.Equal(64, body.GetProperty("fileDigest").GetString()!.Length);
+        Assert.NotEqual(Guid.Empty, body.GetProperty("proposalId").GetGuid());
         Assert.False(string.IsNullOrWhiteSpace(body.GetProperty("token").GetString()));
     }
 
@@ -6002,7 +6028,11 @@ Create `tests/MultiChannelAgent.IntegrationTests/Inventories/ImportEndpointsHttp
             jar,
             new HttpRequestMessage(HttpMethod.Post, $"/api/inventories/{inventoryId}/import/confirm")
             {
-                Content = JsonContent.Create(new { token = preview.GetProperty("token").GetString() }),
+                Content = JsonContent.Create(new
+                {
+                    proposalId = preview.GetProperty("proposalId").GetGuid(),
+                    token = preview.GetProperty("token").GetString(),
+                }),
             },
             csrfToken);
         var body = await response.Content.ReadFromJsonAsync<JsonElement>();
@@ -6097,13 +6127,19 @@ Create `tests/MultiChannelAgent.IntegrationTests/Inventories/ImportEndpointsHttp
     {
         var (jar, csrfToken) = await SignInAndBootstrapAsync("Import Owner");
         var inventoryId = await CreateInventoryAsync(jar, csrfToken, "Import Warehouse");
-        await ValidateAsync(jar, csrfToken, inventoryId, $"{Header}\nSteel Bolts,4,,,\n");
+        var preview = await (await ValidateAsync(
+            jar, csrfToken, inventoryId, $"{Header}\nSteel Bolts,4,,,\n"))
+            .Content.ReadFromJsonAsync<JsonElement>();
 
         var response = await SendAsync(
             jar,
             new HttpRequestMessage(HttpMethod.Post, $"/api/inventories/{inventoryId}/import/reject")
             {
-                Content = JsonContent.Create(new { token = (string?)null }),
+                Content = JsonContent.Create(new
+                {
+                    proposalId = preview.GetProperty("proposalId").GetGuid(),
+                    token = (string?)null,
+                }),
             },
             csrfToken);
 
@@ -6125,7 +6161,11 @@ Create `tests/MultiChannelAgent.IntegrationTests/Inventories/ImportEndpointsHttp
             jar,
             new HttpRequestMessage(HttpMethod.Post, $"/api/inventories/{inventoryId}/import/confirm")
             {
-                Content = JsonContent.Create(new { token = ConfirmationToken.Issue() }),
+                Content = JsonContent.Create(new
+                {
+                    proposalId = Guid.NewGuid(),
+                    token = ConfirmationToken.Issue(),
+                }),
             },
             csrfToken);
 
@@ -6167,7 +6207,7 @@ public static class ImportEndpoints
     /// <summary>The bound plus a little multipart framing, so an oversized upload is refused before it is buffered.</summary>
     private const long MaxRequestBodyBytes = ImportContract.MaxUploadBytes + (4 * 1024);
 
-    private sealed record ImportTokenRequest(string? Token);
+    private sealed record ImportTokenRequest(Guid ProposalId, string? Token);
 
     public static IEndpointRouteBuilder MapImportEndpoints(this IEndpointRouteBuilder endpoints)
     {
@@ -6266,6 +6306,7 @@ public static class ImportEndpoints
             var result = await confirmationService.ConfirmAsync(
                 user.GetParticipantId(),
                 new InventoryId(inventoryId),
+                new ImportProposalId(body.ProposalId),
                 body.Token,
                 timeProvider.GetUtcNow(),
                 cancellationToken);
@@ -6286,6 +6327,7 @@ public static class ImportEndpoints
             var result = await confirmationService.RejectAsync(
                 user.GetParticipantId(),
                 new InventoryId(inventoryId),
+                new ImportProposalId(body.ProposalId),
                 body.Token,
                 timeProvider.GetUtcNow(),
                 cancellationToken);
@@ -6393,6 +6435,7 @@ export interface ImportPreviewRow {
 
 export interface ImportPreview {
   token: string;
+  proposalId: string;
   fileDigest: string;
   sourceRowCount: number;
   entries: ImportPreviewRow[];
@@ -6414,6 +6457,7 @@ export interface ImportErrorReport {
 }
 
 export interface ImportCompleted {
+  proposalId: string;
   createdEntryCount: number;
   fileDigest: string;
 }
@@ -6479,24 +6523,30 @@ export async function validateImport(
 export async function confirmImport(
   inventoryId: string,
   csrfToken: string,
+  proposalId: string,
   token: string,
 ): Promise<ImportCompleted | null> {
   const response = await fetch(`/api/inventories/${inventoryId}/import/confirm`, {
     method: 'POST',
     credentials: 'same-origin',
     headers: jsonHeaders(csrfToken),
-    body: JSON.stringify({ token }),
+    body: JSON.stringify({ proposalId, token }),
   });
 
   return response.ok ? ((await response.json()) as ImportCompleted) : null;
 }
 
-export async function rejectImport(inventoryId: string, csrfToken: string, token: string | null): Promise<boolean> {
+export async function rejectImport(
+  inventoryId: string,
+  csrfToken: string,
+  proposalId: string,
+  token: string | null,
+): Promise<boolean> {
   const response = await fetch(`/api/inventories/${inventoryId}/import/reject`, {
     method: 'POST',
     credentials: 'same-origin',
     headers: jsonHeaders(csrfToken),
-    body: JSON.stringify({ token }),
+    body: JSON.stringify({ proposalId, token }),
   });
 
   return response.ok;
@@ -6643,9 +6693,9 @@ function InitialImport({ inventoryId, csrfToken, refetchToken, onImported }: Ini
     setBusy(false);
   }
 
-  async function handleConfirm(token: string) {
+  async function handleConfirm(proposalId: string, token: string) {
     setBusy(true);
-    const result = await confirmImport(inventoryId, csrfToken, token);
+    const result = await confirmImport(inventoryId, csrfToken, proposalId, token);
     setBusy(false);
 
     if (result) {
@@ -6661,9 +6711,9 @@ function InitialImport({ inventoryId, csrfToken, refetchToken, onImported }: Ini
     await loadEligibility();
   }
 
-  async function handleCancel(token: string) {
+  async function handleCancel(proposalId: string, token: string) {
     setBusy(true);
-    await rejectImport(inventoryId, csrfToken, token);
+    await rejectImport(inventoryId, csrfToken, proposalId, token);
     setBusy(false);
     setValidation(null);
   }
@@ -6715,10 +6765,18 @@ function InitialImport({ inventoryId, csrfToken, refetchToken, onImported }: Ini
             {validation.preview.entries.length} stock entries from {validation.preview.sourceRowCount} rows
           </h3>
           <PreviewRows preview={validation.preview} />
-          <button type="button" onClick={() => handleConfirm(validation.preview.token)} disabled={busy}>
+          <button
+            type="button"
+            onClick={() => handleConfirm(validation.preview.proposalId, validation.preview.token)}
+            disabled={busy}
+          >
             Import these entries
           </button>
-          <button type="button" onClick={() => handleCancel(validation.preview.token)} disabled={busy}>
+          <button
+            type="button"
+            onClick={() => handleCancel(validation.preview.proposalId, validation.preview.token)}
+            disabled={busy}
+          >
             Cancel
           </button>
         </>
@@ -6856,14 +6914,16 @@ Create `tests/MultiChannelAgent.IntegrationTests/InitialImportScenario.cs`, foll
         Assert.Equal(1, await CountRawUploadsAsync(factory));
 
         // 8. Cancelling changes nothing at all, and discards the file.
-        Assert.Equal(HttpStatusCode.OK, (await RejectAsync(owner, inventoryId, Token(replaced.Body))).Status);
+        Assert.Equal(HttpStatusCode.OK, (await RejectAsync(
+            owner, inventoryId, ProposalId(replaced.Body), Token(replaced.Body))).Status);
         Assert.Equal(0, await CountStockAsync(factory, inventoryId));
         Assert.Equal(0, await CountRawUploadsAsync(factory));
         Assert.True((await EligibilityAsync(owner, inventoryId)).GetProperty("eligible").GetBoolean());
 
         // 9. A confirmed import creates exactly the entries that were previewed, and one audit fact.
         var confirmed = await ValidateAsync(owner, inventoryId, csv);
-        var applied = await ConfirmAsync(owner, inventoryId, Token(confirmed.Body));
+        var applied = await ConfirmAsync(
+            owner, inventoryId, ProposalId(confirmed.Body), Token(confirmed.Body));
 
         Assert.Equal(HttpStatusCode.OK, applied.Status);
         Assert.Equal(3, applied.Body.GetProperty("createdEntryCount").GetInt32());
@@ -6881,8 +6941,10 @@ Create `tests/MultiChannelAgent.IntegrationTests/InitialImportScenario.cs`, foll
         await AssertStockAsync(owner, inventoryId, "Brass Rivets", "2.5", "each", null);
         await AssertStockAsync(owner, inventoryId, "Zinc Screws", "0", "each", null, includeZero: true);
 
-        // 12. The token is single use, and import is no longer offered at all.
-        Assert.Equal(HttpStatusCode.NotFound, (await ConfirmAsync(owner, inventoryId, Token(confirmed.Body))).Status);
+        // 12. A lost-response retry re-reports the recorded result without importing twice, and
+        //     import is no longer offered at all.
+        Assert.Equal(HttpStatusCode.OK, (await ConfirmAsync(
+            owner, inventoryId, ProposalId(confirmed.Body), Token(confirmed.Body))).Status);
         var afterwards = await EligibilityAsync(owner, inventoryId);
         Assert.False(afterwards.GetProperty("eligible").GetBoolean());
         Assert.Equal("inventory_not_empty", afterwards.GetProperty("reason").GetString());
