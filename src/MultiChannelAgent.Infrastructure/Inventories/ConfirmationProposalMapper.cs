@@ -100,6 +100,7 @@ internal static class ConfirmationProposalMapper
             ChannelConversationId = entity.ChannelConversationId,
             InventoryId = new InventoryId(entity.InventoryId),
             ProposedInTurnId = new TurnId(entity.ProposedInTurnId),
+            Kind = ProposalKind.Stock,
             Changes = envelope.Changes.Select(ToDomain).ToList(),
             ExpectedVersions = versions
                 .Select(v => new ExpectedEntryVersion(new StockEntryId(v.StockEntryId), v.ConcurrencyStamp))
