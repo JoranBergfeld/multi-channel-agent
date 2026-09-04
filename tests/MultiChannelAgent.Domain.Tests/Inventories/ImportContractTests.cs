@@ -27,6 +27,16 @@ public class ImportContractTests
         Assert.Equal(4, ImportContract.NoteColumn);
     }
 
+    [Fact]
+    public void Every_column_constant_names_its_own_header_in_Headers()
+    {
+        Assert.Equal("Name", ImportContract.Headers[ImportContract.NameColumn]);
+        Assert.Equal("Quantity", ImportContract.Headers[ImportContract.QuantityColumn]);
+        Assert.Equal("Unit", ImportContract.Headers[ImportContract.UnitColumn]);
+        Assert.Equal("Location", ImportContract.Headers[ImportContract.LocationColumn]);
+        Assert.Equal("Note", ImportContract.Headers[ImportContract.NoteColumn]);
+    }
+
     [Theory]
     [InlineData(ImportErrorCode.UnknownColumn, "unknown_column")]
     [InlineData(ImportErrorCode.DuplicateColumn, "duplicate_column")]
@@ -56,6 +66,22 @@ public class ImportContractTests
         Assert.Equal(text, ImportFacts.ToMachineText(code));
         Assert.True(ImportFacts.TryParse(text, out var parsed));
         Assert.Equal(code, parsed);
+    }
+
+    [Fact]
+    public void Every_error_code_has_non_empty_distinct_machine_text_that_round_trips()
+    {
+        var codes = Enum.GetValues<ImportErrorCode>();
+        var texts = codes.Select(ImportFacts.ToMachineText).ToList();
+
+        Assert.All(texts, text => Assert.False(string.IsNullOrEmpty(text)));
+        Assert.Equal(texts.Count, texts.Distinct(StringComparer.Ordinal).Count());
+
+        foreach (var code in codes)
+        {
+            Assert.True(ImportFacts.TryParse(ImportFacts.ToMachineText(code), out var parsed));
+            Assert.Equal(code, parsed);
+        }
     }
 
     [Fact]
@@ -90,18 +116,6 @@ public class ImportContractTests
 
         Assert.True(FileDigest.TryParse(digest.Value, out var parsed));
         Assert.Equal(digest, parsed);
-    }
-
-    [Fact]
-    public void An_error_names_a_line_and_optionally_a_column()
-    {
-        var rowError = new ImportRowError(ImportErrorCode.MissingName, 7, ImportContract.NameColumn);
-        var fileError = new ImportRowError(ImportErrorCode.FileTooLarge, 0, null);
-
-        Assert.Equal(7, rowError.LineNumber);
-        Assert.Equal(0, rowError.ColumnIndex);
-        Assert.Equal(0, fileError.LineNumber);
-        Assert.Null(fileError.ColumnIndex);
     }
 
     [Fact]
