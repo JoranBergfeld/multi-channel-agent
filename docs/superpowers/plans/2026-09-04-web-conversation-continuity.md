@@ -4,7 +4,7 @@
 
 **Goal:** Complete issue #35 by giving the signed-in web channel a responsive conversation-primary layout with an accessible live Inventory workspace, a finite resumable per-Turn Server-Sent Events stream carrying progress, semantic response parts and one terminal Outcome with event IDs, a separate Participant-level stream that invalidates Inventory projections after a change from any channel, one browser-profile ChannelConversation that resumes across refreshes/restarts/tabs while preserving the shared FIFO queue, disconnect recovery that never resubmits unknown mutation-capable work, an explicit-only Active Inventory switch, and a "New conversation" action that atomically rotates the Foundry conversation generation and clears pending conversational confirmation state without removing any authorized access.
 
-**Architecture:** The per-Turn stream is a **projection with a minimal durable progress log**, read through one deep Application seam (`TurnEventReader`). Three of the four event kinds are projected from state that is already durable and permanent - `accepted` from the `InboxEntries` row, the semantic `part` events and the terminal `outcome` from the `Outcomes` row and its `Deliveries` - so they replay identically after any process restart and carry no second copy of a short-lived confirmation token. The one event that durable state cannot express, `processing`, is a real row in a new bounded `TurnProgressEvents` table with a 24-hour delete sweep. Every event ID is a **fixed constant sequence** (`accepted`=1, `processing`=2, `part` n=99+n, `outcome`=1,000,000), which is what makes replay-after-`Last-Event-ID` exact, makes appends idempotent by primary key with no counter read and therefore no race, and makes a swept log indistinguishable from a full one. Inventory invalidation uses a per-Inventory `InventoryVersions.Version` counter bumped **inside the same transaction as every mutation**, from one seam - a `MultiChannelAgentDbContext.SaveChangesAsync` override that keys off the `InventoryAuditEntity` rows every state-changing store already stages - so no endpoint, worker, or future channel can forget to publish, and nothing is ever published before commit. The Participant-level stream is deliberately **snapshot-and-diff rather than cursor-replay**: every connection opens with the complete current version of every authorized Inventory, which makes any reconnect a total resynchronization and removes the identity-gap, retention, and membership-drift failure modes a cursor would introduce. Conversation rotation is one guarded, transactional store operation, and old work can never enter new history because each Turn **captures its Foundry conversation and generation at acceptance** on its own inbox row.
+**Architecture:** The per-Turn stream is a **projection with a minimal durable progress log**, read through one deep Application seam (`TurnEventReader`). Three of the four event kinds are projected from state that is already durable and permanent - `accepted` from the `InboxEntries` row, the semantic `part` events and the terminal `outcome` from the `Outcomes` row and its `Deliveries` - so they replay identically after any process restart and carry no second copy of a short-lived confirmation token. Because the `part` events are projected from the recorded `Outcomes` row, they become readable at the instant the Turn completes and therefore arrive **together with** the terminal event; `accepted` and `processing` are the incremental signals a Participant sees while waiting (see Known limits). The one event that durable state cannot express, `processing`, is a real row in a new bounded `TurnProgressEvents` table with a 24-hour delete sweep. Every event ID is a **fixed constant sequence** (`accepted`=1, `processing`=2, `part` n=99+n, `outcome`=1,000,000), which is what makes replay-after-`Last-Event-ID` exact, makes appends idempotent by primary key with no counter read and therefore no race, and makes a swept log indistinguishable from a full one. Inventory invalidation uses a per-Inventory `InventoryVersions.Version` counter bumped **inside the same transaction as every mutation**, from one seam - a `MultiChannelAgentDbContext.SaveChangesAsync` override that keys off the `InventoryAuditEntity` rows every state-changing store already stages - so no endpoint, worker, or future channel can forget to publish, and nothing is ever published before commit. The Participant-level stream is deliberately **snapshot-and-diff rather than cursor-replay**: every connection opens with the complete current version of every authorized Inventory, which makes any reconnect a total resynchronization and removes the identity-gap, retention, and membership-drift failure modes a cursor would introduce. Conversation rotation is one guarded, transactional store operation, and old work can never enter new history because each Turn **captures its Foundry conversation and generation at acceptance** on its own inbox row - and a Turn whose captured generation is no longer the conversation's current one is recognized as **accepted in a superseded conversation**, so any confirmation it would otherwise have left waiting is settled in the very pass that created it and can never become confirmable in the new conversation.
 
 **Tech Stack:** C#/.NET 10, EF Core 10 (SQL Server in production, SQLite for Docker-free relational tests), ASP.NET Core minimal APIs with a custom `IResult` for `text/event-stream`, xUnit 2.9 with plain `Assert`, `Xunit.SkippableFact`, `Microsoft.Extensions.TimeProvider.Testing`, Testcontainers `MsSql`, React 19 + TypeScript + Vite 8 + oxlint, and (new) Vitest 5 + Testing Library + jsdom for web runtime tests.
 
@@ -30,9 +30,9 @@ Explicitly **out of scope**:
 - A real Foundry-backed `IModelBoundary`. `ScriptedModelBoundary` remains the production implementation; rotation rotates the durable **binding** (identity + generation), which is what a later Foundry integration will read.
 - Raw model tokens on the wire. #26: *"The core emits typed progress/status events, channel-neutral response parts, and one terminal Outcome. It does not expose raw model tokens."* No task may stream tokens.
 - Any second stock-mutation path. The Inventory workspace stays an authoritative **read** projection; no task may add a quantity input, a save button, or any direct mutation control to it.
-- Clearing Initial Import proposals on "New conversation". An `ImportProposal` is keyed by (Participant, Inventory) and belongs to a browser file workflow, not to a ChannelConversation; #26 says rotation clears *pending clarification/confirmation*, which in this system is exactly the one `ConfirmationProposal` per (Participant, ChannelConversation). Task 11 asserts the import proposal survives.
-- Persisting any Outcome payload in the browser. `turnsApi.ts` already documents the `stock_proposal`/`reference_proposal` `token` as a short-lived secret that must not be persisted separately; Task 16 persists only a Turn ID and a native message ID.
-- Playwright or any browser-driving end-to-end runner. Task 14 justifies the minimal jsdom-based runtime test tooling instead.
+- Clearing Initial Import proposals on "New conversation". An `ImportProposal` is keyed by (Participant, Inventory) and belongs to a browser file workflow, not to a ChannelConversation; #26 says rotation clears *pending clarification/confirmation*, which in this system is exactly the one `ConfirmationProposal` per (Participant, ChannelConversation). Task 12 asserts the import proposal survives.
+- Persisting any Outcome payload in the browser. `turnsApi.ts` already documents the `stock_proposal`/`reference_proposal` `token` as a short-lived secret that must not be persisted separately; Task 17 persists only a Turn ID and a native message ID.
+- Playwright or any browser-driving end-to-end runner. Task 15 justifies the minimal jsdom-based runtime test tooling instead.
 
 ---
 
@@ -47,6 +47,8 @@ These were the open questions. Each is decided here, once, with its reason. No t
 **Decided:** a hybrid. `accepted`, `part`, and `outcome` are **projected** from the permanent `InboxEntries` and `Outcomes`/`Deliveries` rows. `processing` is a **durable row** in a new `TurnProgressEvents` table.
 
 **Why:** Option (a) cannot express progress at all - `InboxEntries.Status` stays `Pending` from acceptance until completion, so "accepted but not started" and "accepted and being worked on" are indistinguishable, and AC 2 explicitly requires progress. Option (b) forces `ITurnResultStore.RecordAsync` to grow a third atomic effect and, worse, writes a **second copy of the Outcome payload** - which for a `stock_proposal` or `reference_proposal` contains a plaintext single-use confirmation token with its own ten-minute retention. Two copies of a short-lived secret with two retention paths is a defect waiting to happen. Projecting the parts from `Outcomes.Payload` means the shipped `OutcomePayloadCleanupCoordinator` already expires the streamed copy at exactly the right instant, because there is only one copy. The hybrid keeps `ITurnResultStore`'s contract untouched, adds one small bounded table, and still survives process restart and replays exactly after `Last-Event-ID` because the projected sources are permanent.
+
+**What this costs, stated plainly:** because the parts are projected from the recorded `Outcomes` row, they do not exist until the Turn completes. The stream is therefore incremental in its *status* events (`accepted`, then `processing`) and batched in its *content* events (`part`, `part`, `outcome`, all readable in the same poll). That is what AC 2's "progress, semantic parts, and terminal Outcomes" means here, and it is repeated in Known limits so nobody reads "streaming" as "token-by-token" - which #26 forbids anyway.
 
 ### D2. Event IDs are fixed constant sequences, not an incrementing counter
 
@@ -70,6 +72,7 @@ These were the open questions. Each is decided here, once, with its reason. No t
 - **Finite completion:** once the terminal `outcome` event has been written the handler returns and the response ends. The client closes its `EventSource` on `outcome`, so no reconnect follows.
 - **Interactive wait bound:** `MaxDuration = 5 minutes`. A stream that has not reached terminal by then ends without a terminal event; `EventSource` reconnects automatically with `Last-Event-ID` and resumes. This is user story 112's bounded interactive wait.
 - **Heartbeat:** an SSE comment line (`: heartbeat\n\n`) every 15 seconds of silence. Necessary, not decorative: Azure Container Apps ingress closes idle connections well inside the 5-minute bound, and a comment carries no `id`, so it can never corrupt `Last-Event-ID`.
+- **The three timings are injected, never hard-coded.** `TurnStreamOptions` (poll interval, heartbeat interval, interactive-wait bound) and `InventoryStreamOptions` are plain singletons registered in `Program.cs` holding exactly the production numbers stated here. This exists for one reason: proving the heartbeat fires is a real requirement, and a test that proved it by waiting fifteen real seconds would add fifteen seconds to every CI run forever. A `FakeTimeProvider` cannot serve instead - these handlers run inside a live HTTP request that a test is concurrently reading bytes from, so nobody is in a position to advance a fake clock at the right moment without racing the handler. Overriding one singleton with a 200 ms heartbeat is deterministic, needs no clock control, and leaves production untouched.
 - **Polling:** the handler polls the reader every 500 ms **in a fresh DI scope per iteration** (`IServiceScopeFactory`, exactly like the hosted workers) so a five-minute request never holds one `DbContext` open. In-process notification was rejected because the Container App runs multiple replicas and a Turn can be processed by a different replica than the one holding the stream.
 - **Disconnect:** `HttpContext.RequestAborted` cancels the loop and `OperationCanceledException` is swallowed. The endpoint only ever reads, so a disconnect can never undo, duplicate, or resubmit anything.
 - **Recovery without resubmission:** reconnecting is a `GET`. The shipped `POST /api/turns` remains idempotent by `(ParticipantId, ChannelConversationId, NativeMessageId)` and already returns the recorded Outcome for a duplicate, so even the client's worst case - re-POSTing a native message id whose response was lost - can only ever converge on the one recorded Turn.
@@ -80,21 +83,29 @@ These were the open questions. Each is decided here, once, with its reason. No t
 
 **Decided:** (c) a per-Inventory `InventoryVersions.Version`, bumped in the same transaction as the mutation by a `MultiChannelAgentDbContext.SaveChangesAsync`/`SaveChanges` override that keys off `Added` `InventoryAuditEntity` rows whose `EventType` is not `AccessDenied`.
 
-**Why not (a):** `InventoryAudits.Id` is a GUID and `OccurredAtUtcTicks` is neither unique nor monotonic, so audit rows carry no total order; and audits are a 90-day security artifact whose retention rules should not be coupled to a UX refresh signal. **Why not (b):** an IDENTITY column is assigned at INSERT and becomes visible at COMMIT, so a reader can consume sequence 6 before sequence 5 commits and record a cursor that permanently skips it. That gap is not hypothetical under concurrent transactions and there is no portable fix. **Why (c) is safe:** the bump is `UPDATE InventoryVersions SET Version = Version + 1 WHERE InventoryId = @id` - atomic at the database, needing no read - and it runs **after** `base.SaveChangesAsync` inside the same transaction, which means the version row is always the *last* lock every mutating transaction takes. Consistent lock ordering is why two concurrent mutations on one Inventory serialize instead of deadlocking, even under the `Serializable` transactions `SqlReferenceAdministrationStore` and `SqlImportExecutionStore` use.
+**Why not (a):** `InventoryAudits.Id` is a GUID and `OccurredAtUtcTicks` is neither unique nor monotonic, so audit rows carry no total order; and audits are a 90-day security artifact whose retention rules should not be coupled to a UX refresh signal. **Why not (b):** an IDENTITY column is assigned at INSERT and becomes visible at COMMIT, so a reader can consume sequence 6 before sequence 5 commits and record a cursor that permanently skips it. That gap is not hypothetical under concurrent transactions and there is no portable fix. **Why (c) is safe:** the bump is `UPDATE InventoryVersions SET Version = Version + 1 WHERE InventoryId = @id` - atomic at the database, needing no read, so it cannot lose an update the way a read-then-write counter can - and it runs **after** `base.SaveChangesAsync` inside the same transaction.
 
-**Why the audit row is the right trigger:** every store that changes Inventory-visible state already stages an `InventoryAuditEntity` in the same `SaveChanges` - `SqlStockMutationStore`, `SqlStockChangeSetStore`, `SqlReferenceAdministrationStore`, `SqlImportExecutionStore`, `SqlInventoryMembershipStore`, `SqlInventoryOwnershipStore`, `SqlInventoryRecoveryStore`. Keying off it means a future mutation path cannot forget to publish without also forgetting to audit, which is a far louder failure. `AccessDenied` is excluded because it changes nothing. Inventory creation writes no audit, so the override also seeds a `Version = 0` row for every `Added` `InventoryEntity`; the stream reports a brand-new Inventory the first time it appears in the authorized set.
+**What running it last does and does not buy, precisely.** It buys **commit coupling**: the version becomes visible exactly when the change it announces commits, never before, and a rollback takes it with the change. It buys a **short lock hold**: the version row's exclusive lock is taken at the very end and released at commit, so it is held for the shortest possible slice of the transaction. It does **not** serialize the work that came earlier in those transactions, and it is **not** a deadlock-prevention scheme - two transactions that would already deadlock on Stock rows still can, exactly as they could before this table existed, and the engine still resolves that by choosing a victim. No writer is asked to take the version lock first, and nothing in this plan depends on one. `SqlReferenceAdministrationStore` and `SqlImportExecutionStore` keep their `Serializable` transactions unchanged, and the shipped concurrency tests that already tolerate SQL Server deadlock victims keep tolerating them.
 
-**Why the Participant stream is snapshot-and-diff, not cursor-replay:** invalidation is idempotent and state-based - the client needs the *current* version of each Inventory it displays, not the history of how it got there. Opening every connection with a complete snapshot of every authorized Inventory's current version makes a reconnect a **total** resynchronization: strictly stronger than replaying a cursor, and immune to retention sweeps, identity gaps, and Memberships granted or revoked while the tab was disconnected. Consequently this stream deliberately emits **no `id:` lines**, because an `id` would advertise cursor semantics the stream does not use. Route: `GET /api/inventory-events`.
+**Why the version row has no foreign key to `Inventories`.** `InventoryAuditEntityConfiguration` says it outright for the fact this seam keys off: *"No foreign keys to Inventories/Participants: an audit row must remain a durable, minimal fact independent of later changes to (or eventual retirement of) either referenced row."* A cascading foreign key on `InventoryVersions` would contradict that in the one place it matters most - inside a mutating transaction. The bump's fallback insertion (for an Inventory somehow left without a row) would have to satisfy a foreign key while the audit fact that triggered it deliberately does not, so a state the audit model explicitly tolerates would become a hard failure of an unrelated write. `InventoryVersions` therefore mirrors `InventoryAudits`: keyed by the Inventory, indexed by it through that key, and referentially independent of it. Consistency comes from the two mechanisms that actually establish it - the migration backfills a row for every existing Inventory, and the save-time seam seeds one for every new Inventory in the same save - with the fallback insertion as the guarded third line of defence. Task 7 asserts all three, including that the created table carries no foreign key at all.
+
+**Why the Participant stream is snapshot-and-diff, not cursor-replay:** invalidation is idempotent and state-based - the client needs the *current* version of each Inventory it displays, not the history of how it got there. Every connection therefore opens with a complete snapshot of every authorized Inventory's current version.
+
+**Why that is genuinely resumable without event IDs, rather than merely convenient.** A resumable stream is one where a client that reconnects ends up knowing everything it would have known had it never disconnected. This stream satisfies that by construction, and for a reason that does not depend on a cursor: what a client needs to know is a *function of current state* (the version each authorized Inventory is at right now), not a function of the event history. A cursor is needed only when the events carry information that current state does not - a delta, an ordering, a payload that is discarded after delivery. Here they carry none: `changed` says nothing that the next snapshot does not say, and `revoked` says nothing that the next snapshot's absence does not say. A missed `changed` is therefore not a lost change; it is a change the client learns about one snapshot later, which is the same instant it would learn about it if the connection had merely been slow. Because `Last-Event-ID` could not improve on that, this stream deliberately emits **no `id:` lines**: an `id` would advertise cursor semantics the server does not implement, and a client that trusted it would be resuming from a position the server would silently ignore. Task 8 proves the claim rather than asserting it, with a test that disconnects, changes an Inventory while nothing is connected, reconnects, and finds the new version in the reconnect snapshot. Route: `GET /api/inventory-events`.
+
+**Why the audit row is the right trigger:** every store that changes Inventory-visible state already stages an `InventoryAuditEntity` in the same `SaveChanges` - `SqlStockMutationStore`, `SqlStockChangeSetStore`, `SqlReferenceAdministrationStore`, `SqlImportExecutionStore`, `SqlInventoryMembershipStore`, `SqlInventoryOwnershipStore`, `SqlInventoryRecoveryStore`. Keying off it means a future mutation path cannot forget to publish without also forgetting to audit, which is a far louder failure. `AccessDenied` is excluded because it changes nothing. Inventory creation writes no audit, so the override also seeds a `Version = 0` row for every `Added` `InventoryEntity`; the stream reports a brand-new Inventory the first time it appears in the authorized set. One consequence has to be kept in mind by every test that counts versions: **granting or removing a Membership is an audited change**, so it bumps the version of the Inventory it happened in. Tests therefore assert against a captured baseline rather than against an assumed zero.
 
 ### D6. Rotation captures the Foundry generation at acceptance and therefore never has to reject
 
 **Considered:** (a) refuse to rotate while any Turn in the conversation is still `Pending`; (b) stamp each Turn with the Foundry conversation and generation it was accepted under.
 
-**Decided:** (b). `InboxEntries` gains nullable `FoundryConversationId` and `FoundryConversationGeneration` columns, written by `TurnAcceptanceService` at acceptance; `TurnExecutionContextFactory` reads them back instead of resolving the *current* binding at processing time.
+**Decided:** (b). `InboxEntries` gains nullable `FoundryConversationId` and `FoundryConversationGeneration` columns, written by `TurnAcceptanceService` at acceptance; `TurnExecutionContextFactory` reads them back and uses them, rather than using the *current* binding, to decide which conversation a Turn belongs to at processing time. (From D10 onwards it also reads the current binding - but only to notice that a reset happened in between, never to decide where the Turn belongs.)
 
 **Why not (a):** the Participant who most needs "New conversation" is the one whose conversation is stuck, and a stuck head Turn already blocks that conversation's FIFO. Refusing to reset exactly then is the wrong answer, and making the check race-free would require a `Serializable` range lock over `InboxEntries` on a hot path. **Why (b) is race-free:** an acceptance either reads generation *n* before rotation commits, or *n+1* after; either way the Turn is stamped with a generation that genuinely existed, its old Foundry conversation identity lives on its own inbox row so it is never lost, and work accepted before a reset can never enter the new history. There is no interleaving that corrupts anything. FIFO is untouched: a Turn accepted before rotation still queues ahead of one accepted after, which is exactly AC 4's "preserving the shared FIFO queue".
 
 **Rotation atomicity:** one `SqlConversationRotationStore.RotateAsync` transaction does a guarded `WHERE Generation = @expected` update of the binding (so two concurrent rotations produce exactly one increment - the loser re-reads and retries, bounded, exactly like `SqlInboxStore.AcceptAsync`) and, in the same transaction, settles the one pending `ConfirmationProposal` for that (Participant, ChannelConversation) to a new `ProposalStatus.ConversationReset`. `Memberships` and `ActiveInventorySelections` are never touched, which is how AC 7's "without removing authorized access" is guaranteed structurally rather than by remembering not to.
+
+**What this decision does not cover, and D10 does:** settling at rotation time settles what is pending *at that moment*. A mutation-capable Turn accepted under the old generation but still queued can be processed *after* the rotation commits and would then create a brand-new `ConfirmationProposal` - one the rotation never saw and therefore never settled. D10 closes that.
 
 ### D7. Cross-tab and restart continuity without exposing any token
 
@@ -104,7 +115,7 @@ These were the open questions. Each is decided here, once, with its reason. No t
 
 ### D8. Responsive, accessible layout
 
-**Decided:** conversation is `<main>` and comes first in DOM order at every width. At >= 1024 px the workspace is an `<aside aria-label="Inventory workspace">` in a two-column CSS grid with the conversation column wider. Below 1024 px both live in a single column behind an ARIA tab list (`role="tablist"`/`role="tab"`/`role="tabpanel"`, `aria-selected`, `aria-controls`, roving `tabindex`, Left/Right/Home/End keys), with **Conversation** selected by default. The active Inventory is shown in the always-visible `<header>` so an explicit switch never scrolls out of sight. The narrow-screen breakpoint is read with `window.matchMedia`, which jsdom tests stub.
+**Decided:** conversation is `<main>` and comes first in DOM order at every width. At >= 1024 px the workspace is an `<aside aria-label="Inventory workspace">` in a two-column CSS grid with the conversation column wider. Below 1024 px both live in a single column behind an ARIA tab list (`role="tablist"`/`role="tab"`/`role="tabpanel"`, `aria-selected`, `aria-controls`, roving `tabindex`, Left/Right/Home/End keys), with **Conversation** selected by default. **The `main` landmark survives the narrow layout**: the tab list and the one rendered `tabpanel` live *inside* `<main>` rather than `role="tabpanel"` being put on the `<main>` element itself. An explicit `role` replaces an element's implicit one, so `<main role="tabpanel">` would delete the page's only main landmark at exactly the widths where landmark navigation matters most - and would leave the page with no `main` at all for a screen-reader user skipping to content. The active Inventory is shown in the always-visible `<header>` so an explicit switch never scrolls out of sight. The narrow-screen breakpoint is read with `window.matchMedia`, which jsdom tests stub.
 
 **Why:** #26 says "Make conversation primary with a collapsible Inventory panel or narrow-screen tab/sheet". DOM order decides both reading order for assistive technology and the default focus order, so making conversation first is what actually makes it primary - CSS ordering alone would not.
 
@@ -113,6 +124,26 @@ These were the open questions. Each is decided here, once, with its reason. No t
 **Decided:** add Vitest 5, `@testing-library/react`, `@testing-library/user-event`, `@testing-library/jest-dom`, and `jsdom` as devDependencies, with `"test": "vitest run"` and one new CI step. No Playwright.
 
 **Why:** almost every acceptance criterion in #35 is *client runtime behaviour* - reconnect, resume, cross-tab, tab navigation, live regions - and the repository currently has no way to assert any of it, which would leave those criteria verified only by hand. Vitest reuses the existing Vite config and transform pipeline, so no second build system enters the repository. Playwright was rejected: it needs browser downloads in CI and would only add value for true visual layout, which this plan asserts as CSS, not as behaviour. `EventSource` does not exist in jsdom, so the stream clients take an injectable factory rather than depending on a polyfill.
+
+### D10. A Turn accepted in a superseded conversation can never leave a confirmable proposal
+
+**The hole D6 leaves.** D6 stamps each Turn with the generation it was accepted under, and rotation settles whatever confirmation was pending when it ran. Neither covers this interleaving: a mutation-capable Turn ("forget stock Steel Bolts") is accepted under generation *n*; the Participant clicks "New conversation", which commits generation *n+1* and settles nothing, because at that instant nothing is pending; the queued Turn is then processed and stores a **new** `ConfirmationProposal` for that (Participant, ChannelConversation). AC 7 promises a reset clears pending confirmation state, and that promise would be broken by a proposal created after the reset out of work from before it.
+
+**Considered:** (a) stamp the captured generation onto `ConfirmationProposal` as its own column and compare it at confirmation time; (b) refuse to process any Turn whose captured generation is stale; (c) detect at processing time that the Turn belongs to a superseded conversation, and settle anything it leaves pending in the same pass.
+
+**Decided:** (c), with the detection made once in `TurnExecutionContextFactory` and acted on once in `ConfirmationProposalLifecycle`.
+
+**Why not (a):** it copies a fact that is already durable. `InboxEntries.FoundryConversationGeneration` (D6) records the generation a Turn was accepted under, and the trusted `TurnExecutionContext` already carries it, so a column on the proposal would be a second copy of a fact the processing path already holds - with a migration, a backfill, a nullable legacy case, and the standing possibility of the two disagreeing. **Why not (b):** a stale *read* ("list stock") must still complete, against the history it was accepted into; #26 and AC 4 both require a reset not to abandon accepted work, and refusing would abandon it. **Why (c) is complete:** per-ChannelConversation FIFO is the reason. `IInboxStore.ClaimPendingAsync` only ever offers a conversation's head, so every Turn accepted before a rotation is processed before every Turn accepted after it. A superseded-generation Turn can therefore never be processed *after* a current-generation Turn in the same conversation, which means settling on supersession can never destroy a legitimate proposal that a newer Turn had just made - there cannot be one yet.
+
+**How it is enforced: one detection, two settle points.**
+
+1. **Detection.** `TurnExecutionContextFactory` reads the Turn's captured binding (D6) *and* the conversation's current binding, and sets `TurnExecutionContext.AcceptedInSupersededConversation` when the generations differ. The captured binding still decides which Foundry conversation the Turn continues; the current one is read only to answer this question.
+2. **Before the Turn does anything.** `ConfirmationProposalLifecycle.ReconcileAsync` gains one case: a superseded Turn settles whatever was already pending as `ConversationReset`, before the model is asked anything. This covers a proposal that outlived the rotation for any reason.
+3. **After the Turn has done everything.** `ConfirmationProposalLifecycle.SettleSupersededConversationAsync`, which `TurnProcessingCoordinator` calls **after** tool dispatch and **before** `ITurnResultStore.RecordAsync`, settles anything the Turn itself just stored. This is the case D6 could not see, and it is why the proposal is never pending across two Turns and the Participant is never shown a code that would work.
+
+**What the Participant sees:** the stale Turn still answers. If it asked for confirmation, its Outcome still says `confirmation_required` and still carries a token - the answer is recorded atomically and is not rewritten by this - but the proposal behind it is already settled, so saying `confirm <code>` is answered as "there is nothing to confirm" rather than by executing it. That is the honest ordering: the Participant asked for a reset after asking for the change, and the reset wins. No migration, no new column, and no change to `IConfirmationProposalStore`, whose existing `InvalidatePendingAsync` is exactly this operation.
+
+**Initial Import is untouched.** `InvalidatePendingAsync` operates on `ConfirmationProposals` keyed by (Participant, ChannelConversation). An `ImportProposal` is a different table keyed by (Participant, Inventory) and is not reachable from here - the same structural reason Task 12 gives for rotation itself.
 
 ---
 
@@ -132,10 +163,11 @@ These were the open questions. Each is decided here, once, with its reason. No t
 | `Turns/ITurnProgressEventStore.cs` (create) | The durable progress seam: idempotent append by `(TurnId, Sequence)`, read all for a Turn, bounded expiry delete. |
 | `Turns/TurnEventReader.cs` (create) | **The deep seam.** The single authority on what one Turn's event stream *is*: ownership/non-disclosure, projection of `accepted`/`part`/`outcome` from permanent state, replay of the durable `processing` row, `Last-Event-ID` filtering, terminal detection, and JSON serialization of every event's `data`. |
 | `Turns/TurnProgressEventCleanupCoordinator.cs` (create) | Leased, bounded sweep of expired progress rows. |
-| `Turns/TurnProcessingCoordinator.cs` (modify) | Appends the `processing` progress event before asking the model anything. |
+| `Turns/TurnProcessingCoordinator.cs` (modify) | Appends the `processing` progress event before asking the model anything, and settles any confirmation a superseded-generation Turn leaves behind before recording its Outcome. |
 | `Turns/TurnAcceptanceService.cs` (modify) | Resolves the Foundry binding at acceptance and passes it to the inbox so the Turn captures it. |
 | `Turns/IInboxStore.cs` (modify) | `AcceptAsync` takes the captured `FoundryConversationBinding`; new `FindCapturedBindingAsync`. |
-| `Turns/TurnExecutionContext.cs` (modify) | `TurnExecutionContextFactory` uses the captured binding, falling back to `GetOrCreateAsync` only for Turns accepted before the migration. |
+| `Turns/TurnExecutionContext.cs` (modify) | `TurnExecutionContextFactory` uses the captured binding (falling back to the current one only for Turns accepted before the migration) and flags `AcceptedInSupersededConversation` when that captured generation is no longer current. |
+| `Inventories/ConfirmationProposalLifecycle.cs` (modify) | Adds the superseded-conversation invalidation, and the post-dispatch `SettleSupersededConversationAsync` that stops a stale Turn leaving a confirmable proposal. |
 | `Turns/IConversationRotationStore.cs` (create) | The one atomic rotation: guarded generation increment plus pending-confirmation settle. |
 | `Turns/ConversationRotationService.cs` (create) | The application boundary the endpoint calls; owns `ConversationRotationView`. |
 | `Inventories/IInventoryVersionStore.cs` (create) | The read seam over per-Inventory versions. |
@@ -148,7 +180,7 @@ These were the open questions. Each is decided here, once, with its reason. No t
 | `Persistence/Entities/TurnProgressEventEntity.cs` (create) | The durable progress row: `(TurnId, Sequence)` key, kind, instant, expiry ticks. |
 | `Persistence/Configurations/TurnProgressEventEntityConfiguration.cs` (create) | Composite key, bounds, expiry-sweep index, cascade from the inbox row. |
 | `Persistence/Entities/InventoryVersionEntity.cs` (create) | One row per Inventory: identity and monotonic version. No clock column at all. |
-| `Persistence/Configurations/InventoryVersionEntityConfiguration.cs` (create) | Key on the Inventory, cascade from it. |
+| `Persistence/Configurations/InventoryVersionEntityConfiguration.cs` (create) | Key on the Inventory. Deliberately no foreign key, mirroring `InventoryAudits` (D5). |
 | `Persistence/MultiChannelAgentDbContext.cs` (modify) | The publish seam: `SaveChanges`/`SaveChangesAsync` overrides that seed a version row for every new Inventory and bump the version once per Inventory that staged a non-denial audit fact, inside the caller's transaction, after the base save. |
 | `Persistence/Entities/InboxEntryEntity.cs` (modify) | Nullable `FoundryConversationId` and `FoundryConversationGeneration` captured at acceptance. |
 | `Persistence/Migrations/*_AddTurnProgressEvents.cs` (generate) | One table plus its expiry index. |
@@ -164,14 +196,14 @@ These were the open questions. Each is decided here, once, with its reason. No t
 
 | File | Responsibility |
 | --- | --- |
-| `Endpoints/ServerSentEvents.cs` (create) | The SSE wire format in one place: response preparation, event framing, heartbeat, and `Last-Event-ID` parsing. |
+| `Endpoints/ServerSentEvents.cs` (create) | The SSE wire format in one place: response preparation, event framing, heartbeat, `Last-Event-ID` parsing, and the two injectable stream timing options. |
 | `Endpoints/TurnEventStreamResult.cs` (create) | The finite per-Turn stream loop: poll in a fresh scope, write, heartbeat, stop at terminal or the interactive-wait bound, swallow disconnects. |
 | `Endpoints/InventoryEventStreamResult.cs` (create) | The Participant-level snapshot-and-diff loop. |
 | `Endpoints/TurnEndpoints.cs` (modify) | Maps `GET /api/turns/{turnId:guid}/events`. |
 | `Endpoints/ConversationEndpoints.cs` (create) | Maps `POST /api/conversation/new`. |
 | `Endpoints/InventoryEventEndpoints.cs` (create) | Maps `GET /api/inventory-events`. It is not under `/api/inventories` because it is scoped to the Participant, not to one Inventory. |
 | `Workers/TurnProgressEventCleanupWorker.cs` (create) | Periodically drives the progress-log sweep. |
-| `Program.cs` (modify) | Registers the worker and maps the new endpoints. |
+| `Program.cs` (modify) | Registers the worker, the stream timing options, and maps the new endpoints. |
 
 ### Web (`src/web/`)
 
@@ -211,9 +243,13 @@ These were the open questions. Each is decided here, once, with its reason. No t
 | `tests/MultiChannelAgent.IntegrationTests/ConversationRotationHttpTests.cs` (create) | Rotation preserves access and selection, clears the conversational proposal, keeps the import proposal, changes the generation. |
 | `tests/MultiChannelAgent.IntegrationTests/SharedBrowserProfileScenario.cs` (create) | Two clients sharing one cookie jar: one ChannelConversation, shared FIFO, resume after disconnect, no duplicate mutation. |
 | `tests/MultiChannelAgent.IntegrationTests/WebConversationContinuitySqlScenarioTests.cs` (create) | Real SQL Server: migrations, concurrent rotation, rotation racing acceptance. |
-| `tests/MultiChannelAgent.IntegrationTests/ServerSentEventReader.cs` (create) | Decodes a live `text/event-stream` response the way a browser does, so tests assert on events rather than bytes. |
+| `tests/MultiChannelAgent.IntegrationTests/ServerSentEventReader.cs` (create) | A stateful, async-disposable decoder that owns one reader over a live `text/event-stream` response, so several sequential reads of the same response cannot lose buffered bytes. |
 | `tests/MultiChannelAgent.IntegrationTests/SqlConversationRotationStoreTests.cs` (create) | Docker-free proof that rotation is atomic, guarded, and touches nothing it must not. |
 | `tests/MultiChannelAgent.Application.Tests/Turns/TurnProgressEventCleanupCoordinatorTests.cs` (create) | The leased, bounded progress sweep. |
+| `tests/MultiChannelAgent.Application.Tests/TurnProcessingCoordinatorTests.cs` (modify) | The progress publish, and the superseded-conversation settle after dispatch. |
+| `tests/MultiChannelAgent.Application.Tests/TurnExecutionContextFactoryTests.cs` (modify) | The captured binding, its fallback, and superseded-generation detection. |
+| `tests/MultiChannelAgent.Application.Tests/Inventories/ConfirmationProposalLifecycleTests.cs` (modify) | The superseded-conversation invalidation, both before and after dispatch. |
+| `tests/MultiChannelAgent.Application.Tests/TurnAcceptanceServiceTests.cs` (modify) | The Foundry binding captured at acceptance. |
 | `tests/MultiChannelAgent.IntegrationTests/ConversationTestClient.cs` (modify) | Shared-cookie second tab, SSE reader, rotation, version-stream helpers. |
 | `src/web/src/turnStream.test.ts` (create) | Event decoding, resume, terminal close, error surface. |
 | `src/web/src/inventoryStream.test.ts` (create) | Snapshot/changed/revoked decoding and close. |
@@ -500,22 +536,50 @@ git commit -m "feat: add turn stream event vocabulary and fixed event sequences"
 
 - [ ] **Step 1: Write the failing test**
 
-Append these two tests to `tests/MultiChannelAgent.Application.Tests/TurnProcessingCoordinatorTests.cs`, inside the existing class, and add `using MultiChannelAgent.Domain.Turns;` to the file header if it is not already there:
+`TurnProcessingCoordinatorTests` builds every coordinator it tests in one private helper, `CreateCoordinator(TimeProvider, IModelBoundary?)`, and nine call sites destructure its six-element tuple. Extend that helper with an **optional** parameter rather than changing the tuple, so none of those nine destructurings has to move.
+
+In `tests/MultiChannelAgent.Application.Tests/TurnProcessingCoordinatorTests.cs`, change the helper's signature to:
+
+```csharp
+    private static (TurnProcessingCoordinator Coordinator, InMemoryInboxStore Inbox, InMemoryOutcomeStore Outcomes, InMemoryDeliveryStore Deliveries, InMemoryTurnResultStore ResultStore, InMemoryFoundryConversationBindingStore Bindings)
+        CreateCoordinator(
+            TimeProvider timeProvider,
+            IModelBoundary? modelBoundary = null,
+            InMemoryTurnProgressEventStore? progressEvents = null)
+```
+
+and inside it, immediately before the `new TurnProcessingCoordinator(` call, add:
+
+```csharp
+        var progressEventStore = progressEvents ?? new InMemoryTurnProgressEventStore();
+```
+
+then add `progressEventStore,` to that constructor call immediately after `resultStore,`.
+
+Now append these two tests to the same file, inside the existing class:
 
 ```csharp
     [Fact]
     public async Task Processing_a_turn_publishes_a_progress_event_before_the_model_is_asked_anything()
     {
-        var harness = new Harness();
-        var turnId = await harness.AcceptAsync("native-progress-1", "conversation-1", "hello");
+        var timeProvider = new FakeTimeProvider(Now);
+        var progressEvents = new InMemoryTurnProgressEventStore();
+        var scriptedModel = new ScriptedModelBoundary();
+        var (coordinator, inbox, _, _, _, _) = CreateCoordinator(
+            timeProvider,
+            new ProgressObservingModelBoundary(scriptedModel, progressEvents),
+            progressEvents);
 
-        await harness.Coordinator.ProcessPendingAsync(CancellationToken.None);
+        var turn = TestTurns.Text("native-progress-1", SomeParticipant, "conversation-1", "hello", null, Now, null);
+        await inbox.AcceptAsync(turn, CancellationToken.None);
 
-        var published = Assert.Single(await harness.ProgressEvents.ReadAsync(turnId, CancellationToken.None));
+        await coordinator.ProcessPendingAsync(CancellationToken.None);
+
+        var published = Assert.Single(await progressEvents.ReadAsync(turn.TurnId, CancellationToken.None));
         Assert.Equal(TurnEventKind.Processing, published.Kind);
         Assert.Equal(TurnEventSequence.Processing, published.Sequence);
         Assert.True(
-            harness.ProgressEvents.WasAppendedBeforeFirstModelCall,
+            progressEvents.WasAppendedBeforeFirstModelCall,
             "Progress must be published before the model boundary is asked anything, so a Participant "
             + "watching a stream sees that work started rather than silence.");
     }
@@ -523,20 +587,38 @@ Append these two tests to `tests/MultiChannelAgent.Application.Tests/TurnProcess
     [Fact]
     public async Task Reprocessing_a_turn_after_a_failed_attempt_never_publishes_a_second_progress_event()
     {
-        var harness = new Harness();
-        var turnId = await harness.AcceptAsync("native-progress-2", "conversation-1", "hello");
+        var timeProvider = new FakeTimeProvider(Now);
+        var progressEvents = new InMemoryTurnProgressEventStore();
+        var (coordinator, inbox, _, _, resultStore, _) = CreateCoordinator(
+            timeProvider, modelBoundary: null, progressEvents: progressEvents);
 
-        harness.TurnResults.FailNextRecord = true;
-        await harness.Coordinator.ProcessPendingAsync(CancellationToken.None);
-        await harness.Coordinator.ProcessPendingAsync(CancellationToken.None);
+        var turn = TestTurns.Text("native-progress-2", SomeParticipant, "conversation-1", "hello", null, Now, null);
+        await inbox.AcceptAsync(turn, CancellationToken.None);
 
-        Assert.Single(await harness.ProgressEvents.ReadAsync(turnId, CancellationToken.None));
+        resultStore.FailNextRecord = true;
+        await coordinator.ProcessPendingAsync(CancellationToken.None);
+        await coordinator.ProcessPendingAsync(CancellationToken.None);
+
+        Assert.Single(await progressEvents.ReadAsync(turn.TurnId, CancellationToken.None));
     }
 ```
 
-If `TurnProcessingCoordinatorTests` has no `Harness` type, add one at the bottom of the file that constructs the coordinator from the in-memory doubles the file already uses, exposes `Coordinator`, `ProgressEvents`, `TurnResults`, and an `AcceptAsync(nativeMessageId, conversationId, text)` helper built on `TurnAcceptanceService`. Whatever the existing file already names these, reuse those names rather than introducing a second vocabulary; the two tests above are the only new behaviour.
+Add the observing boundary as a nested private class in the same file, next to the existing `CountingModelBoundary` and `CapturingModelBoundary`:
 
-If `InMemoryTurnResultStore` has no `FailNextRecord`, add it:
+```csharp
+    /// <summary>Records the moment the model is first asked anything, so a test can prove progress was published before it.</summary>
+    private sealed class ProgressObservingModelBoundary(IModelBoundary inner, InMemoryTurnProgressEventStore progressEvents)
+        : IModelBoundary
+    {
+        public Task<ModelProposal> ProposeAsync(InboundTurn turn, ModelInvocationContext context, CancellationToken cancellationToken)
+        {
+            progressEvents.ModelWasCalled = true;
+            return inner.ProposeAsync(turn, context, cancellationToken);
+        }
+    }
+```
+
+`InMemoryTurnResultStore` has no `FailNextRecord` yet. Add it to `tests/MultiChannelAgent.Application.Tests/TestDoubles/InMemoryTurnResultStore.cs`:
 
 ```csharp
     /// <summary>Provokes exactly one failed atomic record, so a test can prove a retry is safe.</summary>
@@ -591,8 +673,12 @@ public interface ITurnProgressEventStore
 
     /// <summary>
     /// Deletes up to <paramref name="maxCount"/> progress events whose retention has passed, and
-    /// reports how many were deleted. The Turn's Outcome is untouched: only the marker that preceded
-    /// it is dropped, so a Turn never stops having an answer.
+    /// reports how many were deleted. Never more than <paramref name="maxCount"/> rows, and never a
+    /// row it did not select: an implementation must delete the actual
+    /// (<see cref="TurnProgressEvent.TurnId"/>, <see cref="TurnProgressEvent.Sequence"/>) identities
+    /// it chose, not everything matching the two sets those identities happen to span. The Turn's
+    /// Outcome is untouched: only the marker that preceded it is dropped, so a Turn never stops
+    /// having an answer.
     /// </summary>
     Task<int> DeleteExpiredAsync(DateTimeOffset now, int maxCount, CancellationToken cancellationToken);
 }
@@ -683,22 +769,20 @@ public sealed class InMemoryTurnProgressEventStore : ITurnProgressEventStore
 }
 ```
 
-In the test file's `Harness`, wrap the scripted model boundary so `ModelWasCalled` is set on the first `ProposeAsync`, for example:
-
-```csharp
-    private sealed class ProgressObservingModelBoundary(IModelBoundary inner, InMemoryTurnProgressEventStore progressEvents) : IModelBoundary
-    {
-        public Task<ModelProposal> ProposeAsync(InboundTurn turn, ModelInvocationContext context, CancellationToken cancellationToken)
-        {
-            progressEvents.ModelWasCalled = true;
-            return inner.ProposeAsync(turn, context, cancellationToken);
-        }
-    }
-```
+In the test file's `ProgressObservingModelBoundary` (added in Step 1), `ModelWasCalled` is set on the first `ProposeAsync`, which is what makes `WasAppendedBeforeFirstModelCall` meaningful.
 
 - [ ] **Step 5: Publish progress from the coordinator**
 
 In `src/MultiChannelAgent.Application/Turns/TurnProcessingCoordinator.cs`, add `ITurnProgressEventStore progressEventStore,` to the primary constructor parameter list immediately after `ITurnResultStore turnResultStore,`.
+
+Every construction site of that coordinator must be updated in the same commit. There are exactly two, and both are tests:
+
+| Site | Change |
+| --- | --- |
+| `tests/MultiChannelAgent.Application.Tests/TurnProcessingCoordinatorTests.cs`, in `CreateCoordinator` | Done in Step 1: pass `progressEventStore,` after `resultStore,`. |
+| `tests/MultiChannelAgent.IntegrationTests/PerConversationFifoScenario.cs`, in `RunPassAsync` | Add `services.GetRequiredService<ITurnProgressEventStore>(),` immediately after `services.GetRequiredService<ITurnResultStore>(),`. The registration is added in Task 4; until then this scenario resolves nothing new, so run this task's tests first and the full suite after Task 4. |
+
+Production resolves the coordinator from DI, so no production call site changes.
 
 Then, in `ProcessOneAsync`, insert the publish immediately after the `proposalLifecycle.ReconcileAsync(...)` call and before `modelBoundary.ProposeAsync(...)`:
 
@@ -730,7 +814,8 @@ git add src/MultiChannelAgent.Application/Turns/ITurnProgressEventStore.cs \
         src/MultiChannelAgent.Application/Turns/TurnProcessingCoordinator.cs \
         tests/MultiChannelAgent.Application.Tests/TestDoubles/InMemoryTurnProgressEventStore.cs \
         tests/MultiChannelAgent.Application.Tests/TestDoubles/InMemoryTurnResultStore.cs \
-        tests/MultiChannelAgent.Application.Tests/TurnProcessingCoordinatorTests.cs
+        tests/MultiChannelAgent.Application.Tests/TurnProcessingCoordinatorTests.cs \
+        tests/MultiChannelAgent.IntegrationTests/PerConversationFifoScenario.cs
 git commit -m "feat: publish a durable processing progress event for every claimed Turn"
 ```
 
@@ -949,9 +1034,9 @@ public class TurnEventReaderTests
 }
 ```
 
-> If Task 9 has already landed, `_inbox.AcceptAsync` takes a binding; use
-> `await _inbox.AcceptAsync(turn, FoundryConversationBinding.CreateFirstGeneration(Owner, turn.ChannelConversationId, Accepted), CancellationToken.None)`
-> instead. Tasks are ordered so this one lands first.
+> If Task 9 has already landed, `_inbox.AcceptAsync(turn, CancellationToken.None)` still compiles:
+> `InMemoryInboxStore` keeps a one-argument convenience overload that accepts into a first-generation
+> binding, which is exactly what this test wants. Tasks are ordered so this one lands first anyway.
 
 - [ ] **Step 2: Run the test to verify it fails**
 
@@ -1223,7 +1308,7 @@ public sealed class SqlTurnProgressEventStoreTests : IDisposable
     }
 
     [Fact]
-    public async Task Two_concurrent_writers_racing_the_same_identity_converge_on_one_row()
+    public async Task A_second_writer_reaching_the_same_identity_converges_on_the_one_row()
     {
         using var seedDb = CreateContext();
         var turnId = await SeedTurnAsync(seedDb, "native-3");
@@ -1231,6 +1316,11 @@ public sealed class SqlTurnProgressEventStoreTests : IDisposable
         using var firstDb = CreateContext();
         using var secondDb = CreateContext();
 
+        // Two independent contexts reaching the same identity. Whether the engine actually interleaves
+        // them is up to it - SQLite serializes writers, SQL Server may not - and the assertion is
+        // written to be true either way: exactly one call reports having written the row, and exactly
+        // one row exists. The name says "a second writer" rather than "concurrent writers" because
+        // that is what this test can honestly guarantee it exercised.
         var results = await Task.WhenAll(
             new SqlTurnProgressEventStore(firstDb).AppendAsync(TurnProgressEvent.Processing(turnId, Started), CancellationToken.None),
             new SqlTurnProgressEventStore(secondDb).AppendAsync(TurnProgressEvent.Processing(turnId, Started), CancellationToken.None));
@@ -1277,6 +1367,59 @@ public sealed class SqlTurnProgressEventStoreTests : IDisposable
         Assert.Equal(2, await store.DeleteExpiredAsync(Started + TurnProgressEvent.Retention, 2, CancellationToken.None));
         Assert.Equal(3, await store.DeleteExpiredAsync(Started + TurnProgressEvent.Retention, 100, CancellationToken.None));
     }
+
+    [Fact]
+    public async Task A_bounded_pass_deletes_the_identities_it_selected_and_never_their_cross_product()
+    {
+        using var db = CreateContext();
+        var store = new SqlTurnProgressEventStore(db);
+
+        var first = await SeedTurnAsync(db, "native-pairs-1");
+        var second = await SeedTurnAsync(db, "native-pairs-2");
+
+        // Four expired markers across two Turns and two identities, arranged so the two OLDEST are
+        // (first, Processing) and (second, Processing + 1) - one identity from each Turn, and a
+        // different identity from each. A pass bounded to two must delete exactly those two rows. An
+        // implementation that deleted "every row whose Turn is in the selected set AND whose sequence
+        // is in the selected set" would delete all four, which is why this arrangement and not a
+        // simpler one.
+        await store.AppendAsync(Marker(first, TurnEventSequence.Processing, Started), CancellationToken.None);
+        await store.AppendAsync(Marker(second, TurnEventSequence.Processing + 1, Started), CancellationToken.None);
+        await store.AppendAsync(Marker(first, TurnEventSequence.Processing + 1, Started.AddMinutes(1)), CancellationToken.None);
+        await store.AppendAsync(Marker(second, TurnEventSequence.Processing, Started.AddMinutes(1)), CancellationToken.None);
+
+        var deleted = await store.DeleteExpiredAsync(
+            Started.AddMinutes(2) + TurnProgressEvent.Retention, 2, CancellationToken.None);
+
+        Assert.Equal(2, deleted);
+
+        using var verifyDb = CreateContext();
+        var remaining = await verifyDb.TurnProgressEvents.AsNoTracking()
+            .OrderBy(e => e.ExpiresAtTicks)
+            .Select(e => new { e.TurnId, e.Sequence })
+            .ToListAsync();
+
+        Assert.Equal(2, remaining.Count);
+        Assert.Contains(remaining, r => r.TurnId == first.Value && r.Sequence == TurnEventSequence.Processing + 1);
+        Assert.Contains(remaining, r => r.TurnId == second.Value && r.Sequence == TurnEventSequence.Processing);
+    }
+
+    /// <summary>
+    /// One durable marker at an explicit identity and instant. The vocabulary issues exactly one
+    /// progress identity today, so the second identity used above is deliberately one it does not:
+    /// which identities are meaningful is a decision <see cref="TurnEventSequence.IsIssued"/> makes
+    /// for the reader and the endpoint, while the store's whole job is to be correct about the
+    /// composite identity it is keyed on. A bounded delete that quietly assumed one row per Turn
+    /// would be a defect waiting for the first day that assumption stops holding.
+    /// </summary>
+    private static TurnProgressEvent Marker(TurnId turnId, long sequence, DateTimeOffset occurredAt) => new()
+    {
+        TurnId = turnId,
+        Sequence = sequence,
+        Kind = TurnEventKind.Processing,
+        OccurredAt = occurredAt,
+        ExpiresAt = occurredAt + TurnProgressEvent.Retention,
+    };
 
     private MultiChannelAgentDbContext CreateContext() =>
         new(new DbContextOptionsBuilder<MultiChannelAgentDbContext>().UseSqlite(_connectionString).Options);
@@ -1500,10 +1643,9 @@ public sealed class SqlTurnProgressEventStore(MultiChannelAgentDbContext db) : I
     {
         var nowTicks = now.UtcTicks;
 
-        // The bounded set is selected first so one pass can never turn into an unbounded delete, and
-        // the delete itself runs as a single set-based statement rather than by loading rows. This is
-        // also the portable shape: ordering and bounding inside ExecuteDelete is not translatable on
-        // every provider.
+        // The bounded set is selected first so one pass can never turn into an unbounded delete:
+        // ordering and bounding inside ExecuteDelete is not translatable on every provider this model
+        // runs on.
         var expiring = await db.TurnProgressEvents
             .AsNoTracking()
             .Where(e => e.ExpiresAtTicks <= nowTicks)
@@ -1519,12 +1661,24 @@ public sealed class SqlTurnProgressEventStore(MultiChannelAgentDbContext db) : I
             return 0;
         }
 
-        var turnIds = expiring.Select(e => e.TurnId).Distinct().ToList();
-        var sequences = expiring.Select(e => e.Sequence).Distinct().ToList();
+        // Deleted by the identities that were actually selected, one set-based statement per distinct
+        // sequence in the batch. The obvious single statement - "any selected TurnId AND any selected
+        // Sequence" - would delete the CROSS PRODUCT of those two sets, which is both wrong and
+        // unbounded in exactly the way maxCount exists to prevent. Grouping keeps every statement
+        // exact, and the number of statements is bounded by how many distinct progress identities one
+        // batch can contain, which is a small constant.
+        var deleted = 0;
+        foreach (var group in expiring.GroupBy(e => e.Sequence))
+        {
+            var sequence = group.Key;
+            var turnIds = group.Select(e => e.TurnId).ToList();
 
-        return await db.TurnProgressEvents
-            .Where(e => turnIds.Contains(e.TurnId) && sequences.Contains(e.Sequence) && e.ExpiresAtTicks <= nowTicks)
-            .ExecuteDeleteAsync(cancellationToken);
+            deleted += await db.TurnProgressEvents
+                .Where(e => e.Sequence == sequence && turnIds.Contains(e.TurnId) && e.ExpiresAtTicks <= nowTicks)
+                .ExecuteDeleteAsync(cancellationToken);
+        }
+
+        return deleted;
     }
 }
 ```
@@ -1558,7 +1712,7 @@ Open the generated `src/MultiChannelAgent.Infrastructure/Persistence/Migrations/
 - [ ] **Step 7: Run the tests to verify they pass**
 
 Run: `dotnet test tests/MultiChannelAgent.IntegrationTests --filter FullyQualifiedName~SqlTurnProgressEventStoreTests`
-Expected: PASS, 5 tests.
+Expected: PASS, 6 tests.
 
 - [ ] **Step 8: Commit**
 
@@ -1785,6 +1939,7 @@ git commit -m "feat: sweep expired Turn progress events on the Outcome payload r
 - Create: `src/MultiChannelAgent.Host/Endpoints/ServerSentEvents.cs`
 - Create: `src/MultiChannelAgent.Host/Endpoints/TurnEventStreamResult.cs`
 - Modify: `src/MultiChannelAgent.Host/Endpoints/TurnEndpoints.cs`
+- Modify: `src/MultiChannelAgent.Host/Program.cs`
 - Create: `tests/MultiChannelAgent.IntegrationTests/ServerSentEventReader.cs`
 - Modify: `tests/MultiChannelAgent.IntegrationTests/ConversationTestClient.cs`
 - Test: `tests/MultiChannelAgent.IntegrationTests/TurnEventStreamHttpTests.cs`
@@ -1794,6 +1949,7 @@ git commit -m "feat: sweep expired Turn progress events on the Outcome payload r
 Create `tests/MultiChannelAgent.IntegrationTests/ServerSentEventReader.cs`:
 
 ```csharp
+using System.Globalization;
 using System.Text;
 
 namespace MultiChannelAgent.IntegrationTests;
@@ -1803,24 +1959,51 @@ public sealed record ServerSentEvent(long? Id, string Name, string Data);
 
 /// <summary>
 /// Decodes a live <c>text/event-stream</c> response the way a browser's EventSource does: field by
-/// field, dispatching on the blank line that terminates a record, and ignoring comment lines. Tests
+/// field, dispatching on the blank line that terminates a record, and skipping comment lines. Tests
 /// need this because <c>HttpClient</c> gives them bytes, not events, and because asserting on raw
 /// bytes would couple every test to the exact framing instead of to the events themselves.
+///
+/// It is deliberately <b>stateful</b>, and owns one reader over the response body for its whole life.
+/// A stateless "read N events out of this response" helper cannot be written correctly:
+/// <see cref="StreamReader"/> reads ahead into its own buffer, so bytes already pulled off the socket
+/// but not yet returned are thrown away when it is disposed - and a second call on the same response
+/// would either read from a body the first call had already disposed, or silently skip whatever the
+/// first call had buffered. One reader, opened once, read repeatedly, disposed at the end, is the only
+/// shape in which a test can read some events, do something to the system, and then read the rest.
+///
+/// The caller keeps owning the <see cref="HttpResponseMessage"/>; this owns only what it created.
 /// </summary>
-public static class ServerSentEventReader
+public sealed class ServerSentEventReader : IAsyncDisposable
 {
-    /// <summary>
-    /// Reads events until <paramref name="count"/> have arrived or the server ends the stream.
-    /// Never blocks forever: <paramref name="cancellationToken"/> is the test's own timeout.
-    /// </summary>
-    public static async Task<IReadOnlyList<ServerSentEvent>> ReadAsync(
-        HttpResponseMessage response, int count, CancellationToken cancellationToken)
+    private readonly Stream _stream;
+    private readonly StreamReader _reader;
+
+    private ServerSentEventReader(Stream stream)
+    {
+        _stream = stream;
+        _reader = new StreamReader(stream, Encoding.UTF8);
+    }
+
+    /// <summary>How many comment lines - the keep-alive heartbeats - this reader has passed over so far.</summary>
+    public int HeartbeatCount { get; private set; }
+
+    /// <summary>Opens a reader over a live streaming response.</summary>
+    public static async Task<ServerSentEventReader> OpenAsync(
+        HttpResponseMessage response, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(response);
 
+        return new ServerSentEventReader(await response.Content.ReadAsStreamAsync(cancellationToken));
+    }
+
+    /// <summary>
+    /// Reads events until <paramref name="count"/> have arrived or the server ends the stream. Never
+    /// blocks forever: <paramref name="cancellationToken"/> is the test's own timeout. A second call
+    /// continues exactly where the previous one stopped.
+    /// </summary>
+    public async Task<IReadOnlyList<ServerSentEvent>> ReadAsync(int count, CancellationToken cancellationToken)
+    {
         var events = new List<ServerSentEvent>();
-        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
-        using var reader = new StreamReader(stream, Encoding.UTF8);
 
         long? id = null;
         string? name = null;
@@ -1828,7 +2011,7 @@ public static class ServerSentEventReader
 
         while (events.Count < count)
         {
-            var line = await reader.ReadLineAsync(cancellationToken);
+            var line = await _reader.ReadLineAsync(cancellationToken);
             if (line is null)
             {
                 break;
@@ -1849,6 +2032,7 @@ public static class ServerSentEventReader
 
             if (line.StartsWith(':'))
             {
+                HeartbeatCount++;
                 continue;
             }
 
@@ -1859,7 +2043,7 @@ public static class ServerSentEventReader
             switch (field)
             {
                 case "id":
-                    id = long.Parse(value);
+                    id = long.Parse(value, CultureInfo.InvariantCulture);
                     break;
                 case "event":
                     name = value;
@@ -1875,15 +2059,40 @@ public static class ServerSentEventReader
         return events;
     }
 
-    /// <summary>How many comment (heartbeat) lines a raw stream body contains, for tests that assert keep-alive behaviour.</summary>
-    public static int CountHeartbeats(string rawBody) =>
-        rawBody.Split('\n').Count(line => line.StartsWith(':'));
+    /// <summary>
+    /// Reads until at least <paramref name="count"/> comment lines have been passed over, or the
+    /// stream ends. A comment carries no identity and no body, so it is invisible to
+    /// <see cref="ReadAsync"/>; this is how a test asserts the keep-alive an ingress depends on is
+    /// actually being written.
+    /// </summary>
+    public async Task WaitForHeartbeatsAsync(int count, CancellationToken cancellationToken)
+    {
+        while (HeartbeatCount < count)
+        {
+            var line = await _reader.ReadLineAsync(cancellationToken);
+            if (line is null)
+            {
+                return;
+            }
+
+            if (line.StartsWith(':'))
+            {
+                HeartbeatCount++;
+            }
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        _reader.Dispose();
+        await _stream.DisposeAsync();
+    }
 }
 ```
 
 - [ ] **Step 2: Add the client helpers**
 
-In `tests/MultiChannelAgent.IntegrationTests/ConversationTestClient.cs`, change the private `CookieJar _jar = new();` field to be settable from a shared jar and add the streaming helpers. Replace the field and constructor with:
+In `tests/MultiChannelAgent.IntegrationTests/ConversationTestClient.cs`, the private `CookieJar _jar = new();` field must become one a second tab can share. Replace the field and the private constructor with:
 
 ```csharp
     private readonly HttpClient _client;
@@ -1898,7 +2107,7 @@ In `tests/MultiChannelAgent.IntegrationTests/ConversationTestClient.cs`, change 
 
 and change the one construction site inside `SignInAsync` to `new ConversationTestClient(client, new CookieJar())`.
 
-Then add these members to the class:
+`CsrfToken` and `ParticipantIdentifier` are `{ get; private set; }`, so a second tab copies them through a private helper rather than an object initializer. Add both members to the class:
 
 ```csharp
     /// <summary>
@@ -1907,9 +2116,19 @@ Then add these members to the class:
     /// the same Participant. This is what makes "one browser-profile conversation shared across tabs"
     /// testable rather than assumed.
     /// </summary>
-    public ConversationTestClient OpenAnotherTab() =>
-        new(_client, _jar) { CsrfToken = CsrfToken, ParticipantIdentifier = ParticipantIdentifier };
+    public ConversationTestClient OpenAnotherTab() => new ConversationTestClient(_client, _jar).WithIdentityOf(this);
 
+    private ConversationTestClient WithIdentityOf(ConversationTestClient other)
+    {
+        CsrfToken = other.CsrfToken;
+        ParticipantIdentifier = other.ParticipantIdentifier;
+        return this;
+    }
+```
+
+Then add the three streaming helpers:
+
+```csharp
     /// <summary>Opens this Turn's event stream, optionally resuming after an event this client already has.</summary>
     public async Task<HttpResponseMessage> OpenTurnStreamAsync(
         Guid turnId, long? lastEventId = null, CancellationToken cancellationToken = default)
@@ -1938,19 +2157,6 @@ Then add these members to the class:
         await SendAsync(new HttpRequestMessage(HttpMethod.Post, "/api/conversation/new"), withCsrf: true);
 ```
 
-`CsrfToken` and `ParticipantIdentifier` already have private setters; change them to `init`-friendly by leaving them as `{ get; private set; }` and instead assigning in `OpenAnotherTab` through a small private method:
-
-```csharp
-    private ConversationTestClient WithIdentityOf(ConversationTestClient other)
-    {
-        CsrfToken = other.CsrfToken;
-        ParticipantIdentifier = other.ParticipantIdentifier;
-        return this;
-    }
-```
-
-so `OpenAnotherTab` becomes `new ConversationTestClient(_client, _jar).WithIdentityOf(this)`.
-
 - [ ] **Step 3: Write the failing test**
 
 Create `tests/MultiChannelAgent.IntegrationTests/TurnEventStreamHttpTests.cs`:
@@ -1961,6 +2167,7 @@ using System.Text.Json;
 using Microsoft.Extensions.DependencyInjection;
 using MultiChannelAgent.Application.Turns;
 using MultiChannelAgent.Domain.Turns;
+using MultiChannelAgent.Host.Endpoints;
 
 namespace MultiChannelAgent.IntegrationTests;
 
@@ -2006,7 +2213,8 @@ public sealed class TurnEventStreamHttpTests : IAsyncLifetime
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.Equal("text/event-stream", response.Content.Headers.ContentType!.MediaType);
 
-        var events = await ServerSentEventReader.ReadAsync(response, 5, timeout.Token);
+        await using var reader = await ServerSentEventReader.OpenAsync(response, timeout.Token);
+        var events = await reader.ReadAsync(5, timeout.Token);
 
         Assert.Equal(
             ["accepted", "processing", "part", "part", "outcome"],
@@ -2027,7 +2235,47 @@ public sealed class TurnEventStreamHttpTests : IAsyncLifetime
         Assert.Equal("completed", terminal.GetProperty("status").GetString());
 
         // The stream is finite: nothing follows the terminal event and the server ends the response.
-        Assert.Empty(await ServerSentEventReader.ReadAsync(response, 1, timeout.Token));
+        // Reading again from the SAME reader is what proves it, which is only meaningful because the
+        // reader is stateful - a fresh one would have lost whatever the first read had buffered.
+        Assert.Empty(await reader.ReadAsync(1, timeout.Token));
+    }
+
+    [Fact]
+    public async Task A_stream_with_nothing_left_to_say_keeps_proving_it_is_still_alive()
+    {
+        // Everything about this factory is production except three numbers. The heartbeat has to be
+        // asserted - an ingress that sees no bytes closes the connection, and a stream that stopped
+        // heart-beating would fail in production and nowhere else - but asserting it at the production
+        // fifteen seconds would add half a minute to every CI run forever.
+        using var fastHeartbeat = new SqliteWebApplicationFactory(
+            configureTestServices: services => services.AddSingleton(new TurnStreamOptions
+            {
+                PollInterval = TimeSpan.FromMilliseconds(50),
+                HeartbeatInterval = TimeSpan.FromMilliseconds(200),
+                MaxDuration = TimeSpan.FromSeconds(30),
+            }));
+
+        var http = ConversationTestClient.CreateHttpsClient(fastHeartbeat);
+        var participant = await ConversationTestClient.SignInAsync(http, "Idle Participant");
+        await participant.CreateAndSelectInventoryAsync("Idle Warehouse");
+
+        // Deliberately never processed: a Turn with one event and then nothing at all is the only
+        // state in which a keep-alive matters.
+        var turnId = await participant.SubmitAcceptedTurnAsync("native-stream-heartbeat", "list stock");
+
+        using var timeout = new CancellationTokenSource(ReadTimeout);
+        using var response = await participant.OpenTurnStreamAsync(turnId, cancellationToken: timeout.Token);
+        await using var reader = await ServerSentEventReader.OpenAsync(response, timeout.Token);
+
+        Assert.Equal(["accepted"], (await reader.ReadAsync(1, timeout.Token)).Select(e => e.Name));
+
+        await reader.WaitForHeartbeatsAsync(2, timeout.Token);
+
+        // Two beats, so this cannot pass on a single accidental byte: the stream is repeating itself
+        // on a timer while it has nothing to say.
+        Assert.True(
+            reader.HeartbeatCount >= 2,
+            $"A silent stream must keep writing keep-alive comments, but only {reader.HeartbeatCount} arrived.");
     }
 
     [Fact]
@@ -2062,8 +2310,9 @@ public sealed class TurnEventStreamHttpTests : IAsyncLifetime
         using var timeout = new CancellationTokenSource(ReadTimeout);
         using var response = await participant.OpenTurnStreamAsync(
             turnId, TurnEventSequence.Processing, timeout.Token);
+        await using var reader = await ServerSentEventReader.OpenAsync(response, timeout.Token);
 
-        var events = await ServerSentEventReader.ReadAsync(response, 3, timeout.Token);
+        var events = await reader.ReadAsync(3, timeout.Token);
 
         Assert.Equal(["part", "part", "outcome"], events.Select(e => e.Name));
     }
@@ -2079,8 +2328,9 @@ public sealed class TurnEventStreamHttpTests : IAsyncLifetime
 
         using var timeout = new CancellationTokenSource(ReadTimeout);
         using var response = await participant.OpenTurnStreamAsync(turnId, TurnEventSequence.Outcome, timeout.Token);
+        await using var reader = await ServerSentEventReader.OpenAsync(response, timeout.Token);
 
-        Assert.Empty(await ServerSentEventReader.ReadAsync(response, 1, timeout.Token));
+        Assert.Empty(await reader.ReadAsync(1, timeout.Token));
     }
 
     [Theory]
@@ -2099,6 +2349,7 @@ public sealed class TurnEventStreamHttpTests : IAsyncLifetime
         using var timeout = new CancellationTokenSource(ReadTimeout);
         var request = new HttpRequestMessage(HttpMethod.Get, $"/api/turns/{turnId}/events?lastEventId={Uri.EscapeDataString(lastEventId)}");
         using var response = await participant.SendAsync(request);
+        await using var reader = await ServerSentEventReader.OpenAsync(response, timeout.Token);
 
         // Never an error: a browser's EventSource cannot read an error body and would reconnect
         // forever with the same bad value, so a value we never issued is treated exactly as if none
@@ -2106,7 +2357,7 @@ public sealed class TurnEventStreamHttpTests : IAsyncLifetime
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.Equal(
             ["accepted", "processing", "part", "part", "outcome"],
-            (await ServerSentEventReader.ReadAsync(response, 5, timeout.Token)).Select(e => e.Name));
+            (await reader.ReadAsync(5, timeout.Token)).Select(e => e.Name));
     }
 
     [Fact]
@@ -2122,8 +2373,9 @@ public sealed class TurnEventStreamHttpTests : IAsyncLifetime
         var request = new HttpRequestMessage(HttpMethod.Get, $"/api/turns/{turnId}/events");
         request.Headers.Add("Last-Event-ID", TurnEventSequence.ForPart(1).ToString());
         using var response = await participant.SendAsync(request);
+        await using var reader = await ServerSentEventReader.OpenAsync(response, timeout.Token);
 
-        Assert.Equal(["part", "outcome"], (await ServerSentEventReader.ReadAsync(response, 2, timeout.Token)).Select(e => e.Name));
+        Assert.Equal(["part", "outcome"], (await reader.ReadAsync(2, timeout.Token)).Select(e => e.Name));
     }
 
     [Fact]
@@ -2155,8 +2407,9 @@ public sealed class TurnEventStreamHttpTests : IAsyncLifetime
 
         using var timeout = new CancellationTokenSource(ReadTimeout);
         using var response = await participant.OpenTurnStreamAsync(turnId, cancellationToken: timeout.Token);
+        await using var reader = await ServerSentEventReader.OpenAsync(response, timeout.Token);
 
-        var reading = ServerSentEventReader.ReadAsync(response, 5, timeout.Token);
+        var reading = reader.ReadAsync(5, timeout.Token);
         await ProcessUntilQuietAsync();
         var events = await reading;
 
@@ -2229,6 +2482,43 @@ using Microsoft.AspNetCore.Http.Features;
 namespace MultiChannelAgent.Host.Endpoints;
 
 /// <summary>
+/// How the per-Turn stream paces itself. Registered as a singleton in <c>Program.cs</c> holding
+/// exactly the production numbers below; nothing else in the application reads them.
+///
+/// It is a settable record rather than three constants for one reason, and it is a test reason worth
+/// being honest about: the heartbeat is load-bearing (an ingress that sees no bytes closes the
+/// connection), so it has to be asserted, and asserting it at fifteen real seconds would tax every CI
+/// run forever. A fake clock cannot help - these values are consumed inside a live HTTP request that
+/// a test is concurrently reading bytes from, so there is no safe moment for anyone to advance one.
+/// </summary>
+public sealed record TurnStreamOptions
+{
+    /// <summary>How often the stream looks for events it has not sent yet.</summary>
+    public TimeSpan PollInterval { get; init; } = TimeSpan.FromMilliseconds(500);
+
+    /// <summary>How long the stream may stay silent before it proves it is still alive.</summary>
+    public TimeSpan HeartbeatInterval { get; init; } = TimeSpan.FromSeconds(15);
+
+    /// <summary>The bounded interactive wait. After this the client reconnects and resumes.</summary>
+    public TimeSpan MaxDuration { get; init; } = TimeSpan.FromMinutes(5);
+}
+
+/// <summary>How the Participant-level invalidation stream paces itself. Same rationale as <see cref="TurnStreamOptions"/>.</summary>
+public sealed record InventoryStreamOptions
+{
+    public TimeSpan PollInterval { get; init; } = TimeSpan.FromSeconds(1);
+
+    public TimeSpan HeartbeatInterval { get; init; } = TimeSpan.FromSeconds(15);
+
+    /// <summary>
+    /// The bounded life of one connection. A browser's EventSource reconnects by itself, and a
+    /// reconnect costs one snapshot, so bounding this keeps a long-lived tab's connection fresh
+    /// without the client having to do anything.
+    /// </summary>
+    public TimeSpan MaxDuration { get; init; } = TimeSpan.FromMinutes(10);
+}
+
+/// <summary>
 /// The Server-Sent Events wire format, in one place. Every stream this application serves frames its
 /// events here, so the framing rules - and the one rule that matters, that a body is always exactly
 /// one line - can never drift between streams.
@@ -2236,7 +2526,6 @@ namespace MultiChannelAgent.Host.Endpoints;
 public static class ServerSentEvents
 {
     public const string ContentType = "text/event-stream";
-
     /// <summary>The header a browser's EventSource sets by itself when it reconnects a stream it was already reading.</summary>
     public const string LastEventIdHeader = "Last-Event-ID";
 
@@ -2350,27 +2639,19 @@ namespace MultiChannelAgent.Host.Endpoints;
 public sealed class TurnEventStreamResult(
     TurnId turnId, ParticipantId participantId, long resumePoint, TurnEventPage firstPage) : IResult
 {
-    /// <summary>How often the stream looks for events it has not sent yet.</summary>
-    public static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(500);
-
-    /// <summary>How long the stream may stay silent before it proves it is still alive.</summary>
-    public static readonly TimeSpan HeartbeatInterval = TimeSpan.FromSeconds(15);
-
-    /// <summary>The bounded interactive wait. After this the client reconnects and resumes.</summary>
-    public static readonly TimeSpan MaxDuration = TimeSpan.FromMinutes(5);
-
     public async Task ExecuteAsync(HttpContext httpContext)
     {
         ArgumentNullException.ThrowIfNull(httpContext);
 
         var scopeFactory = httpContext.RequestServices.GetRequiredService<IServiceScopeFactory>();
         var timeProvider = httpContext.RequestServices.GetRequiredService<TimeProvider>();
+        var options = httpContext.RequestServices.GetRequiredService<TurnStreamOptions>();
         var cancellationToken = httpContext.RequestAborted;
 
         ServerSentEvents.PrepareResponse(httpContext.Response);
 
         var sent = resumePoint;
-        var deadline = timeProvider.GetUtcNow() + MaxDuration;
+        var deadline = timeProvider.GetUtcNow() + options.MaxDuration;
         var lastWrite = timeProvider.GetUtcNow();
         var page = firstPage;
 
@@ -2391,13 +2672,13 @@ public sealed class TurnEventStreamResult(
                     return;
                 }
 
-                if (timeProvider.GetUtcNow() - lastWrite >= HeartbeatInterval)
+                if (timeProvider.GetUtcNow() - lastWrite >= options.HeartbeatInterval)
                 {
                     await ServerSentEvents.WriteHeartbeatAsync(httpContext.Response, cancellationToken);
                     lastWrite = timeProvider.GetUtcNow();
                 }
 
-                await Task.Delay(PollInterval, timeProvider, cancellationToken);
+                await Task.Delay(options.PollInterval, timeProvider, cancellationToken);
 
                 using var scope = scopeFactory.CreateScope();
                 var reader = scope.ServiceProvider.GetRequiredService<TurnEventReader>();
@@ -2418,7 +2699,16 @@ public sealed class TurnEventStreamResult(
 }
 ```
 
-- [ ] **Step 7: Map the endpoint**
+- [ ] **Step 7: Register the stream timings and map the endpoint**
+
+In `src/MultiChannelAgent.Host/Program.cs`, add immediately after `builder.Services.AddHostedService<TurnProgressEventCleanupWorker>();`:
+
+```csharp
+// The production numbers, in one place. A test that must not wait fifteen real seconds for a
+// heartbeat replaces this one registration and changes nothing else.
+builder.Services.AddSingleton(new TurnStreamOptions());
+builder.Services.AddSingleton(new InventoryStreamOptions());
+```
 
 In `src/MultiChannelAgent.Host/Endpoints/TurnEndpoints.cs`, add immediately after the existing `group.MapGet("/{turnId:guid}/outcome", ...)` registration and before `return endpoints;`:
 
@@ -2447,12 +2737,12 @@ In `src/MultiChannelAgent.Host/Endpoints/TurnEndpoints.cs`, add immediately afte
 - [ ] **Step 8: Run the tests to verify they pass**
 
 Run: `dotnet test tests/MultiChannelAgent.IntegrationTests --filter FullyQualifiedName~TurnEventStreamHttpTests`
-Expected: PASS, 8 tests (the `[Theory]` contributes 4 cases, so 11 test results).
+Expected: PASS, 10 tests (the `[Theory]` contributes 4 cases, so 13 test results).
 
 - [ ] **Step 9: Commit**
 
 ```bash
-git add src/MultiChannelAgent.Host/Endpoints tests/MultiChannelAgent.IntegrationTests
+git add src/MultiChannelAgent.Host/Endpoints src/MultiChannelAgent.Host/Program.cs tests/MultiChannelAgent.IntegrationTests
 git commit -m "feat: serve a finite resumable per-Turn SSE stream with issued event ids"
 ```
 
@@ -2493,7 +2783,9 @@ namespace MultiChannelAgent.IntegrationTests;
 /// for a future mutation path - or a future channel - to change Inventory state without publishing:
 /// forgetting to publish would mean forgetting to audit, which is a far louder failure. Because the
 /// bump runs inside the caller's own transaction, and always last, nothing is ever published before
-/// it commits and two mutations on one Inventory serialize on the version row instead of deadlocking.
+/// it commits, a rollback takes the version with it, and the version row's lock is held for the
+/// shortest possible slice of the transaction. It is not a deadlock-prevention scheme and is not
+/// claimed to be one.
 /// </summary>
 public sealed class InventoryVersionBumpTests : IDisposable
 {
@@ -2636,6 +2928,37 @@ public sealed class InventoryVersionBumpTests : IDisposable
         Assert.Single(versions);
     }
 
+    [Fact]
+    public void The_version_row_is_referentially_independent_of_the_inventory_it_names()
+    {
+        using var db = CreateContext();
+
+        // Asserted, not assumed. An audit fact about an Inventory deliberately carries no foreign key
+        // (see InventoryAuditEntityConfiguration), and this row is published from exactly those facts,
+        // so a cascading key here would let a state the audit model tolerates fail somebody else's
+        // mutating transaction through the fallback insertion below.
+        var entityType = db.Model.FindEntityType(typeof(InventoryVersionEntity))!;
+
+        Assert.Empty(entityType.GetForeignKeys());
+        Assert.Equal("InventoryVersions", entityType.GetTableName());
+    }
+
+    [Fact]
+    public async Task An_inventory_that_somehow_has_no_version_row_gets_one_from_its_next_audited_change()
+    {
+        using var db = CreateContext();
+
+        // Exactly the residue the migration's backfill exists to prevent, forced here so the guarded
+        // fallback is a tested path rather than a hopeful comment. It is reachable at all only because
+        // there is no foreign key stopping the row from being established on demand.
+        await db.Database.ExecuteSqlAsync($"DELETE FROM InventoryVersions WHERE InventoryId = {_inventoryId}");
+        db.ChangeTracker.Clear();
+
+        await RecordAuditAsync(db, AuditEventType.StockAdded);
+
+        Assert.Equal(1L, await VersionAsync(db, _inventoryId));
+    }
+
     private MultiChannelAgentDbContext CreateContext() =>
         new(new DbContextOptionsBuilder<MultiChannelAgentDbContext>().UseSqlite(_connectionString).Options);
 
@@ -2741,10 +3064,15 @@ public sealed class InventoryVersionEntityConfiguration : IEntityTypeConfigurati
 
         builder.Property(e => e.InventoryId).ValueGeneratedNever();
 
-        builder.HasOne<InventoryEntity>()
-            .WithOne()
-            .HasForeignKey<InventoryVersionEntity>(e => e.InventoryId)
-            .OnDelete(DeleteBehavior.Cascade);
+        // Deliberately NO foreign key to Inventories, for exactly the reason
+        // InventoryAuditEntityConfiguration gives for the audit rows this seam keys off: a fact about
+        // an Inventory must stay independent of later changes to (or retirement of) the row it names.
+        // A cascading foreign key here would also make the bump's fallback insertion - the guarded
+        // path for an Inventory that somehow has no version row - able to fail a foreign key check
+        // inside somebody else's mutating transaction, turning a state the audit model tolerates into
+        // a hard failure of an unrelated write. Consistency is established by the two mechanisms that
+        // actually establish it: this migration backfills every existing Inventory, and
+        // MultiChannelAgentDbContext seeds a row for every new one in the same save.
     }
 }
 ```
@@ -2772,10 +3100,11 @@ Then add these members immediately after `OnModelCreating`:
     ///
     /// The bump runs INSIDE the caller's transaction, and always LAST. Inside, so nothing is ever
     /// published before the change it announces commits, and a rollback takes the version with it.
-    /// Last, so the version row is the final lock every mutating transaction takes: consistent lock
-    /// ordering is why two concurrent changes to one Inventory queue behind each other instead of
-    /// deadlocking, including under the Serializable transactions the reference administration and
-    /// import writers use.
+    /// Last, so the version row's exclusive lock is taken as late as possible and released at commit -
+    /// the shortest hold this design can have. That is commit coupling and a short lock, and it is
+    /// deliberately NOT claimed to be anything more: it does not serialize the work earlier in those
+    /// transactions, and it prevents no deadlock that could already happen on the rows they were
+    /// changing. No writer takes this lock first, and nothing here depends on one doing so.
     /// </summary>
     public override async Task<int> SaveChangesAsync(
         bool acceptAllChangesOnSuccess, CancellationToken cancellationToken = default)
@@ -2998,13 +3327,15 @@ dotnet ef migrations add AddInventoryVersions \
   --startup-project src/MultiChannelAgent.Infrastructure
 ```
 
-Then edit the generated `*_AddInventoryVersions.cs` so `Up` ends with the backfill, immediately after the `CreateTable`/`CreateIndex` calls:
+Open the generated `src/MultiChannelAgent.Infrastructure/Persistence/Migrations/*_AddInventoryVersions.cs` and confirm `Up` creates the `InventoryVersions` table with a primary key on `InventoryId` and - explicitly - **no** `AddForeignKey` call and no `ForeignKey` argument inside `CreateTable`. If EF generated one, the model has drifted from D5; fix the configuration rather than editing the migration. Then edit the file so `Up` ends with the backfill, immediately after the `CreateTable` call:
 
 ```csharp
             // Every Inventory that already exists gets its starting version here rather than lazily,
             // so the bump this migration enables is always an update of a row that exists - and so a
             // Participant watching an Inventory created before this deploy is told about its very
-            // next change, not its second one.
+            // next change, not its second one. This backfill, and the save-time seeding of new
+            // Inventories, are what keep the table consistent with Inventories in the absence of a
+            // foreign key; the store's fallback insertion is the third line of defence, not the first.
             migrationBuilder.Sql(
                 """
                 INSERT INTO InventoryVersions (InventoryId, Version)
@@ -3019,7 +3350,7 @@ Then edit the generated `*_AddInventoryVersions.cs` so `Up` ends with the backfi
 - [ ] **Step 7: Run the tests to verify they pass**
 
 Run: `dotnet test tests/MultiChannelAgent.IntegrationTests --filter FullyQualifiedName~InventoryVersionBumpTests`
-Expected: PASS, 8 tests.
+Expected: PASS, 10 tests.
 
 - [ ] **Step 8: Prove nothing already shipped regressed**
 
@@ -3186,11 +3517,12 @@ public sealed record AuthorizedInventoryVersion(Guid InventoryId, long Version);
 ///
 /// This is deliberately a whole-state read rather than a change feed. Invalidation is idempotent -
 /// a client needs to know what version each Inventory is at, never the history of how it got there -
-/// so sending the complete picture makes every reconnect a total resynchronization. That is strictly
-/// stronger than replaying a cursor, and it removes three failure modes a cursor would have: a
-/// retention sweep aging out unseen entries, an identity gap where a later change becomes visible
-/// before an earlier one commits, and Membership granted or revoked while the client was
-/// disconnected. Authorization is re-read every time for that last reason.
+/// so sending the complete picture makes reconnecting a resynchronization rather than a replay. That
+/// is what lets the stream over this reader carry no cursor at all without losing anything (see the
+/// stream's own documentation), and it removes three failure modes a cursor would have: a retention
+/// sweep aging out unseen entries, an identity gap where a later change becomes visible before an
+/// earlier one commits, and Membership granted or revoked while the client was disconnected.
+/// Authorization is re-read every time for that last reason.
 /// </summary>
 public sealed class InventoryInvalidationReader(IInventoryStore inventoryStore, IInventoryVersionStore versionStore)
 {
@@ -3274,16 +3606,56 @@ public sealed class InventoryEventStreamHttpTests : IAsyncLifetime
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.Equal("text/event-stream", response.Content.Headers.ContentType!.MediaType);
 
-        var snapshot = Assert.Single(await ServerSentEventReader.ReadAsync(response, 1, timeout.Token));
+        await using var reader = await ServerSentEventReader.OpenAsync(response, timeout.Token);
+        var snapshot = Assert.Single(await reader.ReadAsync(1, timeout.Token));
         Assert.Equal("snapshot", snapshot.Name);
 
-        // No issued identity: a snapshot supersedes any resume point, so advertising one would promise
-        // cursor semantics this stream deliberately does not have.
+        // No issued identity, because this stream implements no cursor. See D5: what a client needs is
+        // a function of current state, so a snapshot supersedes any resume point, and advertising an
+        // `id` would promise semantics the server would silently ignore.
         Assert.Null(snapshot.Id);
 
         var reported = Assert.Single(JsonDocument.Parse(snapshot.Data).RootElement.GetProperty("inventories").EnumerateArray());
         Assert.Equal(inventoryId, reported.GetProperty("inventoryId").GetGuid());
         Assert.Equal(0L, reported.GetProperty("version").GetInt64());
+    }
+
+    [Fact]
+    public async Task A_change_made_while_nothing_was_connected_is_in_the_next_connections_snapshot()
+    {
+        var http = ConversationTestClient.CreateHttpsClient(_factory);
+        var participant = await ConversationTestClient.SignInAsync(http, "Reconnecting Participant");
+        var inventoryId = await participant.CreateAndSelectInventoryAsync("Reconnected Warehouse");
+
+        using var timeout = new CancellationTokenSource(ReadTimeout);
+
+        long firstSeenVersion;
+        using (var firstConnection = await participant.OpenInventoryStreamAsync(timeout.Token))
+        {
+            await using var firstReader = await ServerSentEventReader.OpenAsync(firstConnection, timeout.Token);
+            var snapshot = Assert.Single(await firstReader.ReadAsync(1, timeout.Token));
+            firstSeenVersion = JsonDocument.Parse(snapshot.Data).RootElement
+                .GetProperty("inventories").EnumerateArray().Single().GetProperty("version").GetInt64();
+        }
+
+        // Nothing is connected. This is precisely the window a cursor would exist to cover.
+        await participant.SubmitAcceptedTurnAsync("native-invalidate-offline", "add stock Steel Bolts quantity 4");
+        await ProcessUntilQuietAsync();
+
+        using var secondConnection = await participant.OpenInventoryStreamAsync(timeout.Token);
+        await using var secondReader = await ServerSentEventReader.OpenAsync(secondConnection, timeout.Token);
+        var reconnected = Assert.Single(await secondReader.ReadAsync(1, timeout.Token));
+
+        var reported = JsonDocument.Parse(reconnected.Data).RootElement
+            .GetProperty("inventories").EnumerateArray().Single();
+
+        // The change made while disconnected is not lost, and it did not need a Last-Event-ID to
+        // survive: the snapshot IS the resume, because what the client needs is current state.
+        Assert.Equal(inventoryId, reported.GetProperty("inventoryId").GetGuid());
+        Assert.True(
+            reported.GetProperty("version").GetInt64() > firstSeenVersion,
+            "A reconnect must observe the change that happened while nothing was connected.");
+        Assert.Null(reconnected.Id);
     }
 
     [Fact]
@@ -3295,8 +3667,9 @@ public sealed class InventoryEventStreamHttpTests : IAsyncLifetime
 
         using var timeout = new CancellationTokenSource(ReadTimeout);
         using var response = await participant.OpenInventoryStreamAsync(timeout.Token);
+        await using var reader = await ServerSentEventReader.OpenAsync(response, timeout.Token);
 
-        var reading = ServerSentEventReader.ReadAsync(response, 2, timeout.Token);
+        var reading = reader.ReadAsync(2, timeout.Token);
 
         await participant.SubmitAcceptedTurnAsync("native-invalidate-1", "add stock Steel Bolts quantity 4");
         await ProcessUntilQuietAsync();
@@ -3322,7 +3695,8 @@ public sealed class InventoryEventStreamHttpTests : IAsyncLifetime
 
         using var timeout = new CancellationTokenSource(ReadTimeout);
         using var response = await editor.OpenInventoryStreamAsync(timeout.Token);
-        var reading = ServerSentEventReader.ReadAsync(response, 2, timeout.Token);
+        await using var reader = await ServerSentEventReader.OpenAsync(response, timeout.Token);
+        var reading = reader.ReadAsync(2, timeout.Token);
 
         await owner.SubmitAcceptedTurnAsync("native-invalidate-2", "add stock Brass Rivets quantity 2");
         await ProcessUntilQuietAsync();
@@ -3346,7 +3720,8 @@ public sealed class InventoryEventStreamHttpTests : IAsyncLifetime
 
         using var timeout = new CancellationTokenSource(ReadTimeout);
         using var response = await editor.OpenInventoryStreamAsync(timeout.Token);
-        var reading = ServerSentEventReader.ReadAsync(response, 2, timeout.Token);
+        await using var reader = await ServerSentEventReader.OpenAsync(response, timeout.Token);
+        var reading = reader.ReadAsync(2, timeout.Token);
 
         var removal = new HttpRequestMessage(
             HttpMethod.Delete, $"/api/inventories/{inventoryId}/members/{editor.ParticipantIdentifier}");
@@ -3371,8 +3746,9 @@ public sealed class InventoryEventStreamHttpTests : IAsyncLifetime
 
         using var timeout = new CancellationTokenSource(ReadTimeout);
         using var response = await stranger.OpenInventoryStreamAsync(timeout.Token);
+        await using var reader = await ServerSentEventReader.OpenAsync(response, timeout.Token);
 
-        var snapshot = Assert.Single(await ServerSentEventReader.ReadAsync(response, 1, timeout.Token));
+        var snapshot = Assert.Single(await reader.ReadAsync(1, timeout.Token));
         Assert.Empty(JsonDocument.Parse(snapshot.Data).RootElement.GetProperty("inventories").EnumerateArray());
     }
 
@@ -3423,27 +3799,23 @@ public sealed record InventoryRevokedWire(Guid InventoryId);
 /// One Participant's Inventory invalidation stream.
 ///
 /// It opens with a complete snapshot of every Inventory the Participant may currently see and the
-/// version each is at, then reports only differences for as long as the connection lasts. That makes
-/// reconnecting a total resynchronization rather than a replay, which is why this stream issues no
-/// event identities at all: a resume point would advertise cursor semantics it deliberately does not
-/// have, and would be strictly weaker than the snapshot that supersedes it.
+/// version each is at, then reports only differences for as long as the connection lasts.
+///
+/// It issues no event identities, and that is a claim about what the events carry rather than a
+/// convenience. What a client needs from this stream is a function of current state - the version each
+/// authorized Inventory is at right now - not of the event history. A `changed` event says nothing the
+/// next snapshot does not say, and a `revoked` event says nothing the next snapshot's absence does not
+/// say, so a missed event is a fact learned one snapshot later rather than a fact lost. A
+/// `Last-Event-ID` could therefore not improve on reconnecting, while advertising one would promise
+/// cursor semantics this handler does not implement and a client would be resuming from a position the
+/// server ignores. `InventoryEventStreamHttpTests` proves the consequence directly: a change made
+/// while nothing was connected is in the next connection's snapshot.
 ///
 /// The authorized set is re-read on every pass, not just at the start, so a Membership granted or
 /// revoked while the tab is open is reported rather than discovered on the next page load.
 /// </summary>
 public sealed class InventoryEventStreamResult(ParticipantId participantId) : IResult
 {
-    public static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(1);
-
-    public static readonly TimeSpan HeartbeatInterval = TimeSpan.FromSeconds(15);
-
-    /// <summary>
-    /// The bounded life of one connection. A browser's EventSource reconnects by itself, and a
-    /// reconnect costs one snapshot, so bounding this keeps a long-lived tab's connection fresh
-    /// without the client having to do anything.
-    /// </summary>
-    public static readonly TimeSpan MaxDuration = TimeSpan.FromMinutes(10);
-
     private static readonly JsonSerializerOptions SerializerOptions = new(JsonSerializerDefaults.Web);
 
     public async Task ExecuteAsync(HttpContext httpContext)
@@ -3452,11 +3824,12 @@ public sealed class InventoryEventStreamResult(ParticipantId participantId) : IR
 
         var scopeFactory = httpContext.RequestServices.GetRequiredService<IServiceScopeFactory>();
         var timeProvider = httpContext.RequestServices.GetRequiredService<TimeProvider>();
+        var options = httpContext.RequestServices.GetRequiredService<InventoryStreamOptions>();
         var cancellationToken = httpContext.RequestAborted;
 
         ServerSentEvents.PrepareResponse(httpContext.Response);
 
-        var deadline = timeProvider.GetUtcNow() + MaxDuration;
+        var deadline = timeProvider.GetUtcNow() + options.MaxDuration;
         var lastWrite = timeProvider.GetUtcNow();
 
         try
@@ -3474,7 +3847,7 @@ public sealed class InventoryEventStreamResult(ParticipantId participantId) : IR
 
             while (timeProvider.GetUtcNow() < deadline)
             {
-                await Task.Delay(PollInterval, timeProvider, cancellationToken);
+                await Task.Delay(options.PollInterval, timeProvider, cancellationToken);
 
                 var current = await ReadAsync(scopeFactory, cancellationToken);
                 var wrote = false;
@@ -3512,7 +3885,7 @@ public sealed class InventoryEventStreamResult(ParticipantId participantId) : IR
                 {
                     lastWrite = timeProvider.GetUtcNow();
                 }
-                else if (timeProvider.GetUtcNow() - lastWrite >= HeartbeatInterval)
+                else if (timeProvider.GetUtcNow() - lastWrite >= options.HeartbeatInterval)
                 {
                     await ServerSentEvents.WriteHeartbeatAsync(httpContext.Response, cancellationToken);
                     lastWrite = timeProvider.GetUtcNow();
@@ -3580,7 +3953,7 @@ app.MapInventoryEventEndpoints();
 - [ ] **Step 9: Run the HTTP tests to verify they pass**
 
 Run: `dotnet test tests/MultiChannelAgent.IntegrationTests --filter FullyQualifiedName~InventoryEventStreamHttpTests`
-Expected: PASS, 5 tests.
+Expected: PASS, 6 tests.
 
 - [ ] **Step 10: Commit**
 
@@ -3910,9 +4283,9 @@ In `src/MultiChannelAgent.Infrastructure/Turns/SqlInboxStore.cs`:
     }
 ```
 
-- [ ] **Step 7: Update the test doubles**
+- [ ] **Step 7: Update the test doubles and every call site**
 
-In `tests/MultiChannelAgent.Application.Tests/TestDoubles/InMemoryInboxStore.cs`, change `AcceptAsync` to take the binding, record it, and add the read:
+In `tests/MultiChannelAgent.Application.Tests/TestDoubles/InMemoryInboxStore.cs`, change `AcceptAsync` to take the binding, record it, add the read, and add one convenience overload:
 
 ```csharp
     private readonly Dictionary<Guid, CapturedConversationBinding> _capturedBindings = [];
@@ -3936,6 +4309,19 @@ In `tests/MultiChannelAgent.Application.Tests/TestDoubles/InMemoryInboxStore.cs`
         }
     }
 
+    /// <summary>
+    /// Accepts a Turn into a first-generation binding for its own conversation. Not part of
+    /// <see cref="IInboxStore"/> - it exists so the many tests that predate captured bindings, and
+    /// genuinely do not care which generation a Turn was accepted under, keep saying what they mean
+    /// instead of restating an irrelevant detail. Tests that DO care pass the binding explicitly.
+    /// </summary>
+    public Task<InboxAcceptResult> AcceptAsync(InboundTurn turn, CancellationToken cancellationToken) =>
+        AcceptAsync(
+            turn,
+            FoundryConversationBinding.CreateFirstGeneration(
+                turn.ParticipantId, turn.ChannelConversationId, turn.ReceivedAt),
+            cancellationToken);
+
     public Task<CapturedConversationBinding?> FindCapturedBindingAsync(TurnId turnId, CancellationToken cancellationToken)
     {
         lock (_gate)
@@ -3946,8 +4332,23 @@ In `tests/MultiChannelAgent.Application.Tests/TestDoubles/InMemoryInboxStore.cs`
     }
 ```
 
-Apply the identical two changes to `tests/MultiChannelAgent.Application.Tests/TestDoubles/TwoPartyGatedInboxStore.cs` (it wraps or mirrors the same contract). Update every existing call site of `AcceptAsync` across the test projects to pass
-`FoundryConversationBinding.CreateFirstGeneration(<participantId>, <channelConversationId>, <instant>)`.
+Apply the same three changes to `tests/MultiChannelAgent.Application.Tests/TestDoubles/TwoPartyGatedInboxStore.cs`, which wraps the same contract: widen its `AcceptAsync` to `(InboundTurn turn, FoundryConversationBinding binding, CancellationToken cancellationToken)` and forward the binding to `inner.AcceptAsync`; add the same convenience overload; and forward `FindCapturedBindingAsync` to `inner`.
+
+Because both doubles keep a one-argument overload, **no Application-layer test that merely accepts a Turn has to change.** The remaining call sites are the ones that use the real store or the real factory, and they are exactly these:
+
+| File | Change |
+| --- | --- |
+| `tests/MultiChannelAgent.Application.Tests/TurnAcceptanceServiceTests.cs` (6 sites: lines constructing `new TurnAcceptanceService(store)`, including the two `TwoPartyGatedInboxStore` ones) | `new TurnAcceptanceService(store, new InMemoryFoundryConversationBindingStore())`. The two gated services must share **one** binding store instance so the racing pair resolve the same binding, exactly as they share one inbox. |
+| `tests/MultiChannelAgent.Application.Tests/TurnExecutionContextFactoryTests.cs`, in `CreateFactory` | Add `var inboxStore = new InMemoryInboxStore();`, change the construction to `new TurnExecutionContextFactory(inboxStore, bindingStore, selectionService)`, and widen the returned tuple to `(TurnExecutionContextFactory Factory, InMemoryInventoryStore InventoryStore, InMemoryActiveInventorySelectionStore SelectionStore, InMemoryInboxStore Inbox, InMemoryFoundryConversationBindingStore Bindings)`. Then update its eight call sites: `var (factory, _, _) = CreateFactory();` becomes `var (factory, _, _, _, _) = CreateFactory();`, and the two `var (factory, inventoryStore, selectionStore) = CreateFactory();` become `var (factory, inventoryStore, selectionStore, _, _) = CreateFactory();`. |
+| `tests/MultiChannelAgent.Application.Tests/TurnProcessingCoordinatorTests.cs`, in `CreateCoordinator` | `new TurnExecutionContextFactory(inbox, bindingStore, selectionService)` - the `inbox` local it already creates. |
+| `tests/MultiChannelAgent.IntegrationTests/SqlInboxStoreFifoTests.cs` | Its private `AcceptAsync(SqlInboxStore, string, string, DateTimeOffset)` helper gains a trailing `FoundryConversationBinding? binding = null` parameter, defaulting inside the body to `FoundryConversationBinding.CreateFirstGeneration(SomeParticipant, new ChannelConversationId(conversationId), receivedAt)`, and passes it through. The two direct `storeA.AcceptAsync(` / `storeB.AcceptAsync(` calls in the concurrency test pass that same expression inline. |
+| `tests/MultiChannelAgent.IntegrationTests/SqlInboxStoreConcurrencyTests.cs` (8 direct calls) | Each passes `FoundryConversationBinding.CreateFirstGeneration(<the turn's ParticipantId>, <the turn's ChannelConversationId>, <the turn's ReceivedAt>)`. Add a private static helper `Binding(InboundTurn turn)` returning exactly that, and pass `Binding(turnA)` and so on, so the expression appears once. |
+| `tests/MultiChannelAgent.IntegrationTests/SqlDeliveryStoreClaimTests.cs` | One private `AcceptAsync` helper wraps `inbox.AcceptAsync`; give it the same `Binding(...)` treatment. |
+| `tests/MultiChannelAgent.IntegrationTests/InboundTurnContractSqliteTests.cs` (3 direct calls) | Same `Binding(...)` helper, same substitution. |
+
+`TurnAcceptanceService` and `TurnExecutionContextFactory` are already registered in DI, and `IFoundryConversationBindingStore` already is too, so no production registration changes. `src/MultiChannelAgent.Host/Endpoints/TurnEndpoints.cs` calls `acceptanceService.AcceptAsync(...)`, whose signature is unchanged.
+
+Task 11 adds `AcceptedInSupersededConversation` to the context this factory builds; nothing here anticipates it.
 
 - [ ] **Step 8: Generate the migration and backfill**
 
@@ -4011,7 +4412,7 @@ first generation for the conversation it is accepting into, and to pass it throu
 `TurnAcceptanceService` and `TurnExecutionContextFactory` are already registered; their new dependencies resolve automatically.
 
 Run: `dotnet test --configuration Release`
-Expected: PASS. Every call site of `IInboxStore.AcceptAsync` now passes a binding.
+Expected: PASS. Every call site listed in Step 7 has been updated, so every `IInboxStore.AcceptAsync` now passes a binding.
 
 - [ ] **Step 11: Commit**
 
@@ -4161,7 +4562,7 @@ public sealed class SqlConversationRotationStoreTests : IDisposable
     }
 
     [Fact]
-    public async Task Two_rotations_racing_the_same_conversation_produce_exactly_one_new_generation_each()
+    public async Task Two_rotations_of_the_same_conversation_advance_two_distinct_generations()
     {
         using var seedDb = CreateContext();
         await new SqlFoundryConversationBindingStore(seedDb)
@@ -4170,6 +4571,10 @@ public sealed class SqlConversationRotationStoreTests : IDisposable
         using var firstDb = CreateContext();
         using var secondDb = CreateContext();
 
+        // Two independent contexts rotating the same conversation. SQLite serializes writers, so this
+        // proves the GUARD rather than a race: the second rotation must observe the first's generation
+        // and advance past it instead of overwriting it. The genuinely concurrent case is Task 14's
+        // SQL Server scenario, where two live HTTP resets are in flight at once.
         var results = await Task.WhenAll(
             Store(firstDb).RotateAsync(Participant, Conversation, Now.AddMinutes(1), CancellationToken.None),
             Store(secondDb).RotateAsync(Participant, Conversation, Now.AddMinutes(1), CancellationToken.None));
@@ -4598,13 +5003,391 @@ git commit -m "feat: rotate a conversation's Foundry generation and pending conf
 
 ---
 
-## Task 11: The New conversation endpoint
+## Task 11: A Turn accepted in a superseded conversation leaves nothing confirmable
+
+**Files:**
+- Modify: `src/MultiChannelAgent.Application/Turns/TurnExecutionContext.cs`
+- Modify: `src/MultiChannelAgent.Application/Inventories/ConfirmationProposalLifecycle.cs`
+- Modify: `src/MultiChannelAgent.Application/Turns/TurnProcessingCoordinator.cs`
+- Test: `tests/MultiChannelAgent.Application.Tests/TurnExecutionContextFactoryTests.cs`
+- Test: `tests/MultiChannelAgent.Application.Tests/Inventories/ConfirmationProposalLifecycleTests.cs`
+- Test: `tests/MultiChannelAgent.Application.Tests/TurnProcessingCoordinatorTests.cs`
+
+This is D10. Task 10 settles what is pending **at the moment** a conversation is reset. This settles what a Turn accepted *before* that reset would otherwise leave pending **after** it - the one interleaving that would let a Participant confirm, in their new conversation, work they walked away from. Nothing here is persisted: the generation a Turn was accepted under is already durable on its inbox row from Task 9, and the proposal already names the Turn that proposed it, so this needs no column, no migration, and no backfill.
+
+- [ ] **Step 1: Write the failing factory test**
+
+Append to `tests/MultiChannelAgent.Application.Tests/TurnExecutionContextFactoryTests.cs`, inside the existing class:
+
+```csharp
+    [Fact]
+    public async Task A_turn_accepted_before_a_reset_is_recognized_as_belonging_to_the_superseded_conversation()
+    {
+        var (factory, _, _, inbox, bindings) = CreateFactory();
+        var turn = Turn("conversation-1");
+
+        var acceptedUnder = await bindings.GetOrCreateAsync(
+            SomeParticipant, turn.ChannelConversationId, Now, CancellationToken.None);
+        await inbox.AcceptAsync(turn, acceptedUnder, CancellationToken.None);
+
+        bindings.Rotate(SomeParticipant, turn.ChannelConversationId, Now.AddMinutes(1));
+
+        var context = await factory.CreateAsync(turn, Now.AddMinutes(2), CancellationToken.None);
+
+        Assert.True(context.AcceptedInSupersededConversation);
+
+        // It still continues the history it was accepted into. A reset changes where NEW work goes;
+        // it does not drag already-accepted work into the fresh conversation.
+        Assert.Equal(acceptedUnder.FoundryConversationId, context.FoundryConversationId);
+        Assert.Equal(acceptedUnder.Generation, context.FoundryConversationGeneration);
+    }
+
+    [Fact]
+    public async Task A_turn_accepted_in_the_conversations_current_generation_is_not_superseded()
+    {
+        var (factory, _, _, inbox, bindings) = CreateFactory();
+        var turn = Turn("conversation-1");
+
+        var acceptedUnder = await bindings.GetOrCreateAsync(
+            SomeParticipant, turn.ChannelConversationId, Now, CancellationToken.None);
+        await inbox.AcceptAsync(turn, acceptedUnder, CancellationToken.None);
+
+        var context = await factory.CreateAsync(turn, Now.AddMinutes(1), CancellationToken.None);
+
+        Assert.False(context.AcceptedInSupersededConversation);
+    }
+
+    [Fact]
+    public async Task A_turn_accepted_before_bindings_were_captured_is_never_treated_as_superseded()
+    {
+        var (factory, _, _, _, _) = CreateFactory();
+
+        // Never accepted through the inbox, so nothing was captured - exactly the residue Task 9's
+        // migration backfills. The fallback uses the current binding, which by definition matches it.
+        var context = await factory.CreateAsync(Turn("conversation-1"), Now, CancellationToken.None);
+
+        Assert.False(context.AcceptedInSupersededConversation);
+    }
+```
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `dotnet test tests/MultiChannelAgent.Application.Tests --filter FullyQualifiedName~TurnExecutionContextFactoryTests`
+Expected: FAIL to compile with `CS1061: 'TurnExecutionContext' does not contain a definition for 'AcceptedInSupersededConversation'`.
+
+- [ ] **Step 3: Detect supersession once, in the factory**
+
+In `src/MultiChannelAgent.Application/Turns/TurnExecutionContext.cs`, add the flag as a trailing optional positional parameter - trailing so the two existing positional construction sites (`ReferenceToolDispatcherTests` and `ConfirmationProposalLifecycleTests`) keep compiling unchanged:
+
+```csharp
+public sealed record TurnExecutionContext(
+    TurnId TurnId,
+    ParticipantId ParticipantId,
+    ChannelConversationId ChannelConversationId,
+    FoundryConversationId FoundryConversationId,
+    int FoundryConversationGeneration,
+    InventoryId? ActiveInventoryId,
+    string? TraceId,
+    DirectConfirmationEvidence Confirmation = DirectConfirmationEvidence.None,
+    bool WasInterrupted = false,
+
+    /// <summary>
+    /// True when this Turn was accepted under a Foundry conversation generation the conversation has
+    /// since moved past - that is, the Participant started a new conversation after this Turn was
+    /// accepted but before it was processed. The Turn still runs, and still runs against the history
+    /// it was accepted into; what it must not do is leave a confirmation waiting in the conversation
+    /// the Participant just started.
+    /// </summary>
+    bool AcceptedInSupersededConversation = false);
+```
+
+Then replace `TurnExecutionContextFactory.CreateAsync` in the same file with:
+
+```csharp
+    public async Task<TurnExecutionContext> CreateAsync(InboundTurn turn, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(turn);
+
+        // Two reads of the binding, answering two different questions. The CAPTURED one decides which
+        // conversation this Turn belongs to - decided when it was accepted, so a reset since then
+        // leaves it exactly where it was. The CURRENT one is read only to notice that a reset has
+        // happened in between. The fallback covers Turns accepted before capture existed; those
+        // predate any reset by definition, so the current binding is the right one for them and they
+        // are never superseded.
+        var current = await bindingStore.GetOrCreateAsync(
+            turn.ParticipantId, turn.ChannelConversationId, now, cancellationToken);
+
+        var captured = await inboxStore.FindCapturedBindingAsync(turn.TurnId, cancellationToken)
+            ?? new CapturedConversationBinding(current.FoundryConversationId, current.Generation);
+
+        var activeInventoryId = await selectionService.GetActiveInventoryIdAsync(
+            turn.ParticipantId, turn.ChannelConversationId.Value, now, cancellationToken);
+
+        return new TurnExecutionContext(
+            turn.TurnId,
+            turn.ParticipantId,
+            turn.ChannelConversationId,
+            captured.FoundryConversationId,
+            captured.Generation,
+            activeInventoryId,
+            turn.TraceId,
+
+            // Derived from the Turn's own direct content, here, before the model is asked anything -
+            // so no proposal the model makes can ever be the reason a mutation was approved.
+            DirectConfirmationEvidenceReader.Read(turn),
+            turn.WasInterrupted,
+            AcceptedInSupersededConversation: captured.Generation != current.Generation);
+    }
+```
+
+and delete the now-unused `CurrentBindingAsync` helper Task 9 added.
+
+- [ ] **Step 4: Run the factory tests to verify they pass**
+
+Run: `dotnet test tests/MultiChannelAgent.Application.Tests --filter FullyQualifiedName~TurnExecutionContextFactoryTests`
+Expected: PASS, including the three new tests.
+
+- [ ] **Step 5: Write the failing lifecycle tests**
+
+Append to `tests/MultiChannelAgent.Application.Tests/Inventories/ConfirmationProposalLifecycleTests.cs`, inside the existing class:
+
+```csharp
+    [Fact]
+    public async Task A_turn_from_a_conversation_the_participant_has_since_reset_invalidates_what_was_pending()
+    {
+        var (store, proposal) = await PendingAsync();
+
+        var settled = await new ConfirmationProposalLifecycle(store).ReconcileAsync(
+            Context(SomeInventory, acceptedInSupersededConversation: true), Now, CancellationToken.None);
+
+        Assert.Equal(ProposalStatus.ConversationReset, settled);
+        Assert.Equal(ProposalStatus.ConversationReset, await store.FindStatusAsync(proposal.Id, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task A_superseded_turn_settles_whatever_it_left_pending_itself()
+    {
+        var store = new InMemoryConfirmationProposalStore();
+        var lifecycle = new ConfirmationProposalLifecycle(store);
+
+        // The order production runs in: the Turn is reconciled (nothing pending yet), then it does its
+        // work and stores a proposal, then this settles what it just stored.
+        Assert.Null(await lifecycle.ReconcileAsync(
+            Context(SomeInventory, acceptedInSupersededConversation: true), Now, CancellationToken.None));
+
+        var proposal = Proposal();
+        await store.StoreAsync(proposal, Now, CancellationToken.None);
+
+        var settled = await lifecycle.SettleSupersededConversationAsync(
+            Context(SomeInventory, acceptedInSupersededConversation: true), Now, CancellationToken.None);
+
+        Assert.Equal(ProposalStatus.ConversationReset, settled);
+        Assert.Null(await store.FindPendingAsync(Participant, Conversation, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task A_turn_in_the_current_conversation_leaves_its_own_proposal_pending()
+    {
+        var store = new InMemoryConfirmationProposalStore();
+        var lifecycle = new ConfirmationProposalLifecycle(store);
+        var proposal = Proposal();
+        await store.StoreAsync(proposal, Now, CancellationToken.None);
+
+        Assert.Null(await lifecycle.SettleSupersededConversationAsync(
+            Context(SomeInventory), Now, CancellationToken.None));
+
+        Assert.NotNull(await store.FindPendingAsync(Participant, Conversation, CancellationToken.None));
+    }
+```
+
+Widen the file's existing `Context` helper with one more optional parameter, keeping every existing call unchanged:
+
+```csharp
+    private static TurnExecutionContext Context(
+        InventoryId? activeInventoryId,
+        bool wasInterrupted = false,
+        string? conversation = null,
+        bool acceptedInSupersededConversation = false) => new(
+        TurnId.NewId(),
+        Participant,
+        new ChannelConversationId(conversation ?? Conversation),
+        new FoundryConversationId(Guid.NewGuid()),
+        1,
+        activeInventoryId,
+        TraceId: null,
+        DirectConfirmationEvidence.None,
+        wasInterrupted,
+        acceptedInSupersededConversation);
+```
+
+- [ ] **Step 6: Run the lifecycle tests to verify they fail**
+
+Run: `dotnet test tests/MultiChannelAgent.Application.Tests --filter FullyQualifiedName~ConfirmationProposalLifecycleTests`
+Expected: FAIL to compile with `CS1061: 'ConfirmationProposalLifecycle' does not contain a definition for 'SettleSupersededConversationAsync'`.
+
+- [ ] **Step 7: Teach the lifecycle about superseded conversations**
+
+In `src/MultiChannelAgent.Application/Inventories/ConfirmationProposalLifecycle.cs`, add the new case as the **first** arm of the existing `switch`, so it is evaluated before the interruption and access checks:
+
+```csharp
+        var status = context switch
+        {
+            // The Participant started a new conversation after this Turn was accepted. Whatever is
+            // waiting here belongs to the conversation they ended, so it stops being confirmable -
+            // exactly as if it had still been pending when the reset itself ran.
+            { AcceptedInSupersededConversation: true } => ProposalStatus.ConversationReset,
+
+            // A cut-off utterance is not a statement of intent, and a conversation that has just been
+            // interrupted is not one in which a stored approval should keep waiting to be triggered.
+            { WasInterrupted: true } => ProposalStatus.Interrupted,
+```
+
+(the remaining arms are unchanged), and add this method after `ReconcileAsync`:
+
+```csharp
+    /// <summary>
+    /// Settles a proposal a Turn accepted in a superseded conversation has just created, and returns
+    /// the status it was settled with (or null when there was nothing to settle).
+    ///
+    /// <see cref="ReconcileAsync"/> runs before the Turn does anything and therefore cannot see what
+    /// the Turn itself will store. This runs after, which is the only moment at which that proposal
+    /// exists and the only moment at which it can be stopped from becoming confirmable in the
+    /// conversation the Participant just started. Settling here is safe precisely because
+    /// per-ChannelConversation FIFO drains every Turn accepted before a reset before any Turn accepted
+    /// after it: there cannot yet be a legitimate newer proposal for this to destroy.
+    /// </summary>
+    public async Task<ProposalStatus?> SettleSupersededConversationAsync(
+        TurnExecutionContext context, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+
+        if (!context.AcceptedInSupersededConversation)
+        {
+            return null;
+        }
+
+        var settled = await proposalStore.InvalidatePendingAsync(
+            context.ParticipantId,
+            context.ChannelConversationId.Value,
+            ProposalStatus.ConversationReset,
+            now,
+            cancellationToken);
+
+        return settled > 0 ? ProposalStatus.ConversationReset : null;
+    }
+```
+
+- [ ] **Step 8: Run the lifecycle tests to verify they pass**
+
+Run: `dotnet test tests/MultiChannelAgent.Application.Tests --filter FullyQualifiedName~ConfirmationProposalLifecycleTests`
+Expected: PASS, including the three new tests.
+
+- [ ] **Step 9: Write the failing coordinator test**
+
+`TurnProcessingCoordinatorTests.CreateCoordinator` currently builds its tool dispatcher on one `InMemoryConfirmationProposalStore` and its `ConfirmationProposalLifecycle` on a **different** one, so the two have never been able to see each other's rows. That is a latent defect in the harness and it makes this behaviour untestable, so fix it in the same change: add one more optional parameter and use a single store for both.
+
+In `tests/MultiChannelAgent.Application.Tests/TurnProcessingCoordinatorTests.cs`, change the helper's signature to:
+
+```csharp
+    private static (TurnProcessingCoordinator Coordinator, InMemoryInboxStore Inbox, InMemoryOutcomeStore Outcomes, InMemoryDeliveryStore Deliveries, InMemoryTurnResultStore ResultStore, InMemoryFoundryConversationBindingStore Bindings)
+        CreateCoordinator(
+            TimeProvider timeProvider,
+            IModelBoundary? modelBoundary = null,
+            InMemoryTurnProgressEventStore? progressEvents = null,
+            InMemoryConfirmationProposalStore? proposals = null)
+```
+
+replace the line `var proposalStore = new InMemoryConfirmationProposalStore();` with:
+
+```csharp
+        var proposalStore = proposals ?? new InMemoryConfirmationProposalStore();
+```
+
+and change the coordinator's `new ConfirmationProposalLifecycle(new InMemoryConfirmationProposalStore())` argument to `new ConfirmationProposalLifecycle(proposalStore)`.
+
+Then append this test to the same class:
+
+```csharp
+    [Fact]
+    public async Task A_turn_accepted_before_a_reset_never_leaves_a_confirmable_proposal_in_the_new_conversation()
+    {
+        var timeProvider = new FakeTimeProvider(Now);
+        var proposals = new InMemoryConfirmationProposalStore();
+        var (coordinator, inbox, _, _, _, bindings) = CreateCoordinator(
+            timeProvider, modelBoundary: null, progressEvents: null, proposals: proposals);
+
+        var conversation = new ChannelConversationId("conversation-1");
+        var acceptedUnder = await bindings.GetOrCreateAsync(SomeParticipant, conversation, Now, CancellationToken.None);
+
+        // Accepted under the old generation, and mutation-capable: this is the Turn whose answer would
+        // ask for confirmation.
+        var turn = TestTurns.Text(
+            "native-superseded-1", SomeParticipant, conversation.Value, "forget stock Steel Bolts", null, Now, null);
+        await inbox.AcceptAsync(turn, acceptedUnder, CancellationToken.None);
+
+        // The Participant starts a new conversation while that Turn is still queued.
+        bindings.Rotate(SomeParticipant, conversation, Now.AddMinutes(1));
+
+        await coordinator.ProcessPendingAsync(CancellationToken.None);
+
+        // Whatever it decided, nothing is left that a "confirm" in the new conversation could execute.
+        Assert.Null(await proposals.FindPendingAsync(SomeParticipant, conversation.Value, CancellationToken.None));
+    }
+```
+
+> The scripted model boundary answers `forget stock <name>` with the change-set tool call that asks for
+> confirmation. If it does not - check `ScriptedModelBoundary` and `StockToolDispatcher` for the exact
+> phrasing the shipped `ConfirmedStockMutationScenario` uses - use that phrasing instead. Do not add a
+> second command vocabulary for the same behaviour.
+
+- [ ] **Step 10: Run the coordinator test to verify it fails**
+
+Run: `dotnet test tests/MultiChannelAgent.Application.Tests --filter FullyQualifiedName~TurnProcessingCoordinatorTests`
+Expected: FAIL with `Assert.Null() Failure` - the stale Turn stored a proposal and nothing settled it.
+
+- [ ] **Step 11: Settle it in the coordinator**
+
+In `src/MultiChannelAgent.Application/Turns/TurnProcessingCoordinator.cs`, inside `ProcessOneAsync`, insert immediately after the `var decision = ...` assignment and before `var outcome = Outcome.Record(...)`:
+
+```csharp
+        // A Turn accepted before the Participant started a new conversation may still have stored a
+        // proposal just now. It belongs to the conversation they ended, so it is settled here - in the
+        // same pass that created it, before the answer is recorded - and can never be confirmed in the
+        // conversation they started. The answer itself is untouched: it is recorded exactly as decided,
+        // and saying "confirm" against it is simply answered as "there is nothing to confirm".
+        await proposalLifecycle.SettleSupersededConversationAsync(executionContext, now, cancellationToken);
+```
+
+Extend the class summary's last paragraph with:
+
+```
+/// The same seam runs once more after dispatch, so a Turn accepted in a conversation the Participant
+/// has since reset cannot leave a confirmable proposal behind in the one they started.
+```
+
+- [ ] **Step 12: Run the whole Application suite to verify nothing regressed**
+
+Run: `dotnet test tests/MultiChannelAgent.Application.Tests`
+Expected: PASS. The harness now shares one proposal store, which is what the pre-existing tests always assumed.
+
+- [ ] **Step 13: Commit**
+
+```bash
+git add src/MultiChannelAgent.Application/Turns/TurnExecutionContext.cs \
+        src/MultiChannelAgent.Application/Turns/TurnProcessingCoordinator.cs \
+        src/MultiChannelAgent.Application/Inventories/ConfirmationProposalLifecycle.cs \
+        tests/MultiChannelAgent.Application.Tests
+git commit -m "fix: stop a Turn from a reset conversation leaving a confirmable proposal"
+```
+
+---
+
+## Task 12: The New conversation endpoint
 
 **Files:**
 - Create: `src/MultiChannelAgent.Host/Endpoints/ConversationEndpoints.cs`
 - Modify: `src/MultiChannelAgent.Host/Program.cs`
 - Test: `tests/MultiChannelAgent.IntegrationTests/ConversationRotationHttpTests.cs`
-
 - [ ] **Step 1: Write the failing test**
 
 Create `tests/MultiChannelAgent.IntegrationTests/ConversationRotationHttpTests.cs`:
@@ -4801,6 +5584,44 @@ public sealed class ConversationRotationHttpTests : IAsyncLifetime
         Assert.NotNull(await participant.GetOutcomeAsync(after));
     }
 
+    [Fact]
+    public async Task A_change_proposed_by_work_from_before_the_reset_can_never_be_confirmed_after_it()
+    {
+        var http = ConversationTestClient.CreateHttpsClient(_factory);
+        var participant = await ConversationTestClient.SignInAsync(http, "Superseded Participant");
+        await participant.CreateAndSelectInventoryAsync("Superseded Warehouse");
+
+        await participant.SubmitAcceptedTurnAsync("native-reset-7", "add stock Steel Bolts quantity 4");
+        await ProcessUntilQuietAsync();
+
+        // Accepted, then reset, then processed. The proposal this Turn asks for is created entirely
+        // AFTER the reset committed, so the rotation's own transactional settle never saw it. This is
+        // exactly the interleaving D10 exists for, end to end over HTTP.
+        var stale = await participant.SubmitAcceptedTurnAsync("native-reset-8", "forget stock Steel Bolts");
+        Assert.Equal(HttpStatusCode.OK, (await participant.StartNewConversationAsync()).StatusCode);
+        await ProcessUntilQuietAsync();
+
+        var proposalOutcome = await participant.GetOutcomeAsync(stale);
+        Assert.Equal("confirmation_required", proposalOutcome!.Value.GetProperty("category").GetString());
+        var token = proposalOutcome.Value.GetProperty("payload").GetProperty("token").GetString()!;
+
+        var confirmation = await participant.SubmitAcceptedTurnAsync("native-reset-9", $"confirm {token}");
+        await ProcessUntilQuietAsync();
+
+        Assert.NotEqual(
+            "completed", (await participant.GetOutcomeAsync(confirmation))!.Value.GetProperty("category").GetString());
+
+        using var scope = _factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<MultiChannelAgentDbContext>();
+
+        // Nothing was forgotten, and the proposal is settled as what it is: work belonging to a
+        // conversation the Participant ended.
+        Assert.Equal(
+            nameof(ProposalStatus.ConversationReset),
+            (await db.ConfirmationProposals.AsNoTracking().SingleAsync()).Status);
+        Assert.Equal(4m, (await db.StockEntries.AsNoTracking().SingleAsync()).Quantity);
+    }
+
     private async Task<Domain.Turns.FoundryConversationBinding> SingleBindingAsync()
     {
         using var scope = _factory.Services.CreateScope();
@@ -4896,7 +5717,7 @@ app.MapConversationEndpoints();
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `dotnet test tests/MultiChannelAgent.IntegrationTests --filter FullyQualifiedName~ConversationRotationHttpTests`
-Expected: PASS, 7 tests.
+Expected: PASS, 8 tests.
 
 - [ ] **Step 5: Commit**
 
@@ -4908,7 +5729,7 @@ git commit -m "feat: add the New conversation endpoint for the signed-in web cha
 
 ---
 
-## Task 12: One browser profile, many tabs - the shared-conversation scenario
+## Task 13: One browser profile, many tabs - the shared-conversation scenario
 
 **Files:**
 - Test: `tests/MultiChannelAgent.IntegrationTests/SharedBrowserProfileScenario.cs`
@@ -5015,9 +5836,10 @@ public sealed class SharedBrowserProfileScenario : IAsyncLifetime
 
         using var timeout = new CancellationTokenSource(ReadTimeout);
         using var response = await secondTab.OpenTurnStreamAsync(turnId, cancellationToken: timeout.Token);
+        await using var reader = await ServerSentEventReader.OpenAsync(response, timeout.Token);
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        var events = await ServerSentEventReader.ReadAsync(response, 5, timeout.Token);
+        var events = await reader.ReadAsync(5, timeout.Token);
         Assert.Equal("outcome", events[^1].Name);
     }
 
@@ -5066,10 +5888,12 @@ public sealed class SharedBrowserProfileScenario : IAsyncLifetime
         using var timeout = new CancellationTokenSource(ReadTimeout);
 
         using var firstConnection = await participant.OpenTurnStreamAsync(turnId, cancellationToken: timeout.Token);
-        var firstEvents = await ServerSentEventReader.ReadAsync(firstConnection, 5, timeout.Token);
+        await using var firstReader = await ServerSentEventReader.OpenAsync(firstConnection, timeout.Token);
+        var firstEvents = await firstReader.ReadAsync(5, timeout.Token);
 
         using var secondConnection = await participant.OpenTurnStreamAsync(turnId, cancellationToken: timeout.Token);
-        var secondEvents = await ServerSentEventReader.ReadAsync(secondConnection, 5, timeout.Token);
+        await using var secondReader = await ServerSentEventReader.OpenAsync(secondConnection, timeout.Token);
+        var secondEvents = await secondReader.ReadAsync(5, timeout.Token);
 
         Assert.Equal(firstEvents.Select(e => (e.Id, e.Name, e.Data)), secondEvents.Select(e => (e.Id, e.Name, e.Data)));
     }
@@ -5163,7 +5987,7 @@ git commit -m "test: prove one browser profile shares one conversation, queue, a
 
 ---
 
-## Task 13: The real SQL Server scenario, including concurrency
+## Task 14: The real SQL Server scenario, including concurrency
 
 **Files:**
 - Test: `tests/MultiChannelAgent.IntegrationTests/WebConversationContinuitySqlScenarioTests.cs`
@@ -5181,6 +6005,7 @@ using MultiChannelAgent.Application.Turns;
 using MultiChannelAgent.Domain.Inventories;
 using MultiChannelAgent.Domain.Turns;
 using MultiChannelAgent.Infrastructure.Persistence;
+using MultiChannelAgent.Infrastructure.Persistence.Entities;
 
 namespace MultiChannelAgent.IntegrationTests;
 
@@ -5228,7 +6053,8 @@ public sealed class WebConversationContinuitySqlScenarioTests : SqlIntegrationTe
 
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(60));
         using var response = await participant.OpenTurnStreamAsync(turnId, cancellationToken: timeout.Token);
-        var events = await ServerSentEventReader.ReadAsync(response, 5, timeout.Token);
+        await using var reader = await ServerSentEventReader.OpenAsync(response, timeout.Token);
+        var events = await reader.ReadAsync(5, timeout.Token);
 
         Assert.Equal(["accepted", "processing", "part", "part", "outcome"], events.Select(e => e.Name));
 
@@ -5238,7 +6064,7 @@ public sealed class WebConversationContinuitySqlScenarioTests : SqlIntegrationTe
     }
 
     [SkippableFact]
-    public async Task Two_concurrent_mutations_in_one_inventory_both_publish_and_neither_loses_its_bump()
+    public async Task Two_genuinely_concurrent_commits_in_one_inventory_both_publish_and_neither_loses_its_bump()
     {
         Skip.IfNot(DockerAvailable, "Docker is not available for the SQL Server-backed scenario.");
 
@@ -5246,24 +6072,64 @@ public sealed class WebConversationContinuitySqlScenarioTests : SqlIntegrationTe
         var participant = await ConversationTestClient.SignInAsync(http, "Concurrent SQL Participant");
         var inventoryId = await participant.CreateAndSelectInventoryAsync("Concurrent SQL Warehouse");
 
-        // Two different conversations, so per-conversation FIFO does not serialize them for us and
-        // the two mutations genuinely race at the database.
-        var secondProfile = ConversationTestClient.CreateHttpsClient(Factory!);
-        var secondConversation = await ConversationTestClient.SignInAsync(secondProfile, "Concurrent SQL Editor");
-        await participant.GrantMembershipAsync(inventoryId, secondConversation.ParticipantIdentifier, "Editor");
-        await secondConversation.SelectInventoryAsync(inventoryId);
+        // Read AFTER all setup, because setup publishes too: creating the Inventory seeds version 0,
+        // and every audited change since - a Membership grant, for instance - has already bumped it.
+        // Asserting against an assumed zero here would be asserting against the setup, not the seam.
+        var baseline = await VersionAsync(inventoryId);
 
-        await participant.SubmitAcceptedTurnAsync("native-sql-race-1", "add stock Steel Bolts quantity 1");
-        await secondConversation.SubmitAcceptedTurnAsync("native-sql-race-2", "add stock Brass Rivets quantity 1");
+        // Two independent DI scopes, each with its own DbContext and its own transaction, started
+        // before either is awaited. This is the concurrency the name claims: nothing serializes them
+        // at the application boundary, so they meet at the database exactly as two replicas would.
+        async Task CommitAuditedChangeAsync(string outcomeCode)
+        {
+            using var scope = Factory!.Services.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<MultiChannelAgentDbContext>();
 
-        await ProcessUntilQuietAsync();
+            db.InventoryAudits.Add(new InventoryAuditEntity
+            {
+                Id = Guid.NewGuid(),
+                EventType = nameof(AuditEventType.StockAdded),
+                ActorKind = nameof(AuditActorKind.Participant),
+                ActorId = participant.ParticipantIdentifier,
+                InventoryId = inventoryId,
+                SubjectParticipantId = null,
+                OutcomeCode = outcomeCode,
+                OccurredAtUtc = DateTimeOffset.UtcNow,
+                OccurredAtUtcTicks = DateTimeOffset.UtcNow.UtcTicks,
+                ExpiresAtUtc = DateTimeOffset.UtcNow.AddDays(90),
+            });
 
-        using var scope = Factory!.Services.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<MultiChannelAgentDbContext>();
+            await db.SaveChangesAsync();
+        }
+
+        var first = CommitAuditedChangeAsync("concurrent-a");
+        var second = CommitAuditedChangeAsync("concurrent-b");
+        await Task.WhenAll(first, second);
 
         // Two committed changes, two versions. A lost update - the failure a read-then-write counter
-        // would have - would show up here as a version of 1.
-        Assert.Equal(2L, (await db.InventoryVersions.AsNoTracking().SingleAsync(v => v.InventoryId == inventoryId)).Version);
+        // would have - would show up here as baseline + 1.
+        Assert.Equal(baseline + 2, await VersionAsync(inventoryId));
+    }
+
+    [SkippableFact]
+    public async Task Granting_membership_is_itself_an_audited_change_and_publishes_a_version()
+    {
+        Skip.IfNot(DockerAvailable, "Docker is not available for the SQL Server-backed scenario.");
+
+        var ownerHttp = ConversationTestClient.CreateHttpsClient(Factory!);
+        var owner = await ConversationTestClient.SignInAsync(ownerHttp, "Granting SQL Owner");
+        var inventoryId = await owner.CreateAndSelectInventoryAsync("Granting SQL Warehouse");
+
+        var editorHttp = ConversationTestClient.CreateHttpsClient(Factory!);
+        var editor = await ConversationTestClient.SignInAsync(editorHttp, "Granted SQL Editor");
+
+        var before = await VersionAsync(inventoryId);
+        await owner.GrantMembershipAsync(inventoryId, editor.ParticipantIdentifier, "Editor");
+
+        // Recorded here so no other test has to rediscover it: governance is an audited change, so it
+        // publishes exactly like a stock change does. Any test that counts versions must therefore
+        // count from a baseline it captured, not from zero.
+        Assert.Equal(before + 1, await VersionAsync(inventoryId));
     }
 
     [SkippableFact]
@@ -5276,8 +6142,9 @@ public sealed class WebConversationContinuitySqlScenarioTests : SqlIntegrationTe
         await participant.CreateAndSelectInventoryAsync("Racing Reset Warehouse");
         var secondTab = participant.OpenAnotherTab();
 
-        var responses = await WhenAllToleratingDeadlockAsync(
-            participant.StartNewConversationAsync(), secondTab.StartNewConversationAsync());
+        // Both requests are in flight before either is awaited, so this is a real race at the database.
+        var responses = await RunConcurrentlyRetryingDeadlockVictimAsync(
+            participant.StartNewConversationAsync, secondTab.StartNewConversationAsync);
 
         Assert.All(responses, response => Assert.Equal(HttpStatusCode.OK, response.StatusCode));
 
@@ -5325,28 +6192,40 @@ public sealed class WebConversationContinuitySqlScenarioTests : SqlIntegrationTe
     }
 
     /// <summary>
-    /// Two writers racing the same rows on SQL Server may make one of them a deadlock victim. That is
-    /// the engine resolving contention, not the application misbehaving, so the loser is retried once
-    /// - exactly as the shipped reference administration concurrency tests do.
+    /// Starts every attempt before awaiting any of them, so they genuinely overlap, and re-runs any
+    /// attempt SQL Server chose as a deadlock victim. A deadlock is the engine resolving contention,
+    /// not the application misbehaving - the shipped reference administration concurrency tests treat
+    /// it the same way - but the victim's work did NOT happen, so it is actually retried rather than
+    /// pretended to have succeeded. Fabricating a success would leave the caller asserting a
+    /// generation that was never reached.
     /// </summary>
-    private static async Task<IReadOnlyList<HttpResponseMessage>> WhenAllToleratingDeadlockAsync(
-        params Task<HttpResponseMessage>[] attempts)
+    private static async Task<IReadOnlyList<HttpResponseMessage>> RunConcurrentlyRetryingDeadlockVictimAsync(
+        params Func<Task<HttpResponseMessage>>[] attempts)
     {
+        var started = attempts.Select(attempt => (Attempt: attempt, Task: attempt())).ToList();
         var responses = new List<HttpResponseMessage>();
 
-        foreach (var attempt in attempts)
+        foreach (var (attempt, task) in started)
         {
             try
             {
-                responses.Add(await attempt);
+                responses.Add(await task);
             }
             catch (SqlException exception) when (exception.Number == DeadlockVictimErrorNumber)
             {
-                responses.Add(new HttpResponseMessage(HttpStatusCode.OK));
+                responses.Add(await attempt());
             }
         }
 
         return responses;
+    }
+
+    private async Task<long> VersionAsync(Guid inventoryId)
+    {
+        using var scope = Factory!.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<MultiChannelAgentDbContext>();
+
+        return (await db.InventoryVersions.AsNoTracking().SingleAsync(v => v.InventoryId == inventoryId)).Version;
     }
 
     private async Task ProcessUntilQuietAsync()
@@ -5369,7 +6248,7 @@ Delete any `using` the compiler reports as unused - `TreatWarningsAsErrors` turn
 - [ ] **Step 2: Run the tests with Docker required**
 
 Run: `REQUIRE_DOCKER_TESTS=true dotnet test tests/MultiChannelAgent.IntegrationTests --filter FullyQualifiedName~WebConversationContinuitySqlScenarioTests`
-Expected: PASS, 5 tests. If Docker is genuinely unavailable on this machine, run without the variable and confirm all 5 report as skipped - never as passed.
+Expected: PASS, 6 tests. If Docker is genuinely unavailable on this machine, run without the variable and confirm all 6 report as skipped - never as passed.
 
 If `Two_concurrent_resets_of_one_conversation_advance_two_generations_and_never_collide` reports generation 2 instead of 3, the guarded update in `SqlConversationRotationStore` is not actually guarding: one reset overwrote the other rather than retrying. Fix the store, not the test.
 
@@ -5382,7 +6261,7 @@ git commit -m "test: prove migrations, version bumps, and rotation races against
 
 ---
 
-## Task 14: Web runtime test tooling
+## Task 15: Web runtime test tooling
 
 **Files:**
 - Modify: `src/web/package.json`
@@ -5609,7 +6488,7 @@ describe('the test harness', () => {
 - [ ] **Step 6: Run the test to verify it passes**
 
 Run: `cd src/web && npm test`
-Expected: PASS, 2 tests. `fakeEventSource.ts` has no test of its own and imports nothing from the code under test, so it compiles on its own here and is exercised from Task 15 onwards.
+Expected: PASS, 2 tests. `fakeEventSource.ts` has no test of its own and imports nothing from the code under test, so it compiles on its own here and is exercised from Task 16 onwards.
 
 - [ ] **Step 7: Add the CI gate**
 
@@ -5630,7 +6509,7 @@ git commit -m "chore: add Vitest and Testing Library for web runtime tests"
 
 ---
 
-## Task 15: The typed per-Turn stream client
+## Task 16: The typed per-Turn stream client
 
 **Files:**
 - Create: `src/web/src/turnStream.ts`
@@ -5945,7 +6824,7 @@ git commit -m "feat: add the typed resumable per-Turn stream client"
 
 ---
 
-## Task 16: Browser-profile conversation continuity
+## Task 17: Browser-profile conversation continuity
 
 **Files:**
 - Create: `src/web/src/conversationStorage.ts`
@@ -6197,7 +7076,7 @@ git commit -m "feat: persist one browser profile's in-flight Turn without storin
 
 ---
 
-## Task 17: The typed Inventory invalidation stream client
+## Task 18: The typed Inventory invalidation stream client
 
 **Files:**
 - Create: `src/web/src/inventoryStream.ts`
@@ -6421,7 +7300,7 @@ git commit -m "feat: add the Participant-level Inventory invalidation stream cli
 
 ---
 
-## Task 18: The responsive, accessible workspace panel
+## Task 19: The responsive, accessible workspace panel
 
 **Files:**
 - Create: `src/web/src/useMediaQuery.ts`
@@ -6435,7 +7314,7 @@ Create `src/web/src/WorkspacePanel.test.tsx`:
 
 ```tsx
 import { describe, expect, it } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { DESKTOP_WIDTH, NARROW_WIDTH, setViewportWidth } from './testing/setup';
 import WorkspacePanel from './WorkspacePanel';
@@ -6479,6 +7358,18 @@ describe('WorkspacePanel on a desktop viewport', () => {
 });
 
 describe('WorkspacePanel on a narrow viewport', () => {
+  it('keeps the page inside a main landmark, with the tab panel in it', () => {
+    setViewportWidth(NARROW_WIDTH);
+    renderPanel();
+
+    // An explicit role replaces an element's implicit one, so putting role="tabpanel" on <main> would
+    // delete the page's only main landmark at exactly the widths where skipping to content matters
+    // most. The panel therefore lives inside main rather than being it.
+    const main = screen.getByRole('main');
+    expect(within(main).getByRole('tablist')).toBeInTheDocument();
+    expect(within(main).getByRole('tabpanel')).toHaveTextContent('Conversation content');
+  });
+
   it('offers an accessible tab list with the conversation selected', () => {
     setViewportWidth(NARROW_WIDTH);
     renderPanel();
@@ -6616,8 +7507,9 @@ type TabId = (typeof TABS)[number]['id'];
  * On a wide viewport the conversation is the page's `main` landmark and the workspace is a
  * `complementary` one beside it, which is what "conversation primary with a live workspace" means to
  * a screen reader as much as to an eye. Below the breakpoint they cannot both be usable at once, so
- * the workspace moves behind an ARIA tab list - and only the selected panel is rendered at all, so a
- * hidden panel is never quietly focusable or read out.
+ * the workspace moves behind an ARIA tab list *inside* that same `main` landmark - the landmark never
+ * disappears - and only the selected panel is rendered at all, so a hidden panel is never quietly
+ * focusable or read out.
  *
  * The conversation comes first in document order at every width, and its tab is selected by default.
  * Document order is what decides reading order and default focus order, so this - not CSS placement -
@@ -6664,35 +7556,42 @@ function WorkspacePanel({ conversation, workspace }: WorkspacePanelProps) {
 
   return (
     <div className="workspace-layout workspace-layout-narrow">
-      <div role="tablist" aria-label="Workspace sections" className="workspace-tabs">
-        {TABS.map((tab) => (
-          <button
-            key={tab.id}
-            id={`workspace-tab-${tab.id}`}
-            ref={(element) => {
-              tabRefs.current[tab.id] = element;
-            }}
-            type="button"
-            role="tab"
-            aria-selected={selected === tab.id}
-            aria-controls={`workspace-panel-${tab.id}`}
-            // Roving tab order: the tab list is one stop, and the arrow keys move within it.
-            tabIndex={selected === tab.id ? 0 : -1}
-            onClick={() => select(tab.id)}
-            onKeyDown={onKeyDown}
-          >
-            {tab.label}
-          </button>
-        ))}
-      </div>
+      {/*
+        The main landmark survives the narrow layout. Putting role="tabpanel" on <main> would replace
+        its implicit role and leave the page with no main at all - precisely when a screen-reader user
+        skipping to content needs one most - so the tab list and the one rendered panel live inside it.
+      */}
+      <main className="workspace-conversation">
+        <div role="tablist" aria-label="Workspace sections" className="workspace-tabs">
+          {TABS.map((tab) => (
+            <button
+              key={tab.id}
+              id={`workspace-tab-${tab.id}`}
+              ref={(element) => {
+                tabRefs.current[tab.id] = element;
+              }}
+              type="button"
+              role="tab"
+              aria-selected={selected === tab.id}
+              aria-controls={`workspace-panel-${tab.id}`}
+              // Roving tab order: the tab list is one stop, and the arrow keys move within it.
+              tabIndex={selected === tab.id ? 0 : -1}
+              onClick={() => select(tab.id)}
+              onKeyDown={onKeyDown}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
 
-      <main
-        id={`workspace-panel-${selected}`}
-        role="tabpanel"
-        aria-labelledby={`workspace-tab-${selected}`}
-        tabIndex={0}
-      >
-        {selected === 'conversation' ? conversation : workspace}
+        <div
+          id={`workspace-panel-${selected}`}
+          role="tabpanel"
+          aria-labelledby={`workspace-tab-${selected}`}
+          tabIndex={0}
+        >
+          {selected === 'conversation' ? conversation : workspace}
+        </div>
       </main>
     </div>
   );
@@ -6777,7 +7676,7 @@ Append to `src/web/src/index.css`:
 - [ ] **Step 6: Run the tests to verify they pass**
 
 Run: `cd src/web && npm test`
-Expected: PASS, 9 new tests.
+Expected: PASS, 10 new tests.
 
 - [ ] **Step 7: Check types and lint**
 
@@ -6793,7 +7692,7 @@ git commit -m "feat: make the web layout responsive with an accessible workspace
 
 ---
 
-## Task 19: Stream the conversation, resume it, and start a new one
+## Task 20: Stream the conversation, resume it, and start a new one
 
 **Files:**
 - Modify: `src/web/src/turnsApi.ts`
@@ -6987,6 +7886,40 @@ describe('TurnTracer', () => {
     expect(opened[0].url).toBe('/api/turns/turn-other-tab/events');
   });
 
+  it('never resubmits when the parent re-renders before it has learned the Turn id', async () => {
+    let resolveSubmission: (response: Response) => void = () => {};
+    const pending = new Promise<Response>((resolve) => {
+      resolveSubmission = resolve;
+    });
+
+    const fetchMock = vi.fn(() => pending);
+    vi.stubGlobal('fetch', fetchMock);
+
+    // The one dangerous window: a stored submission whose response was never seen, so the component
+    // is mid-resubmit and `turnId` is still null.
+    rememberSubmission(CONVERSATION, { nativeMessageId: 'native-lost', contentText: 'list stock' });
+
+    const { opened, factory } = recordingEventStreamFactory();
+    const props = {
+      csrfToken: 'csrf-token',
+      webConversationId: CONVERSATION,
+      onTerminalOutcome: () => {},
+      createSource: factory,
+    };
+
+    const { rerender } = render(<TurnTracer {...props} />);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+
+    // A parent re-render with fresh callback identities - which any unmemoized parent produces on
+    // every render - must not make this component submit mutation-capable work a second time.
+    rerender(<TurnTracer {...props} onTerminalOutcome={() => {}} />);
+
+    resolveSubmission(acceptedResponse('turn-recovered'));
+
+    await waitFor(() => expect(opened).toHaveLength(1));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it('never renders a control that would change a quantity directly', async () => {
     stubFetch(() => acceptedResponse('turn-1'));
     const { factory } = recordingEventStreamFactory();
@@ -7153,6 +8086,12 @@ function TurnTracer({ csrfToken, webConversationId, onTerminalOutcome, createSou
   const streamRef = useRef<{ close: () => void } | null>(null);
   const watchedTurnRef = useRef<string | null>(null);
 
+  // Resuming is a once-per-mount decision, not a once-per-render one. In the window where a stored
+  // submission has no Turn id yet, resuming means re-POSTing - safe, because the native message id is
+  // an idempotency key, but pointless work and a second in-flight request. A parent that re-renders
+  // with fresh callback identities would otherwise re-run the effect and do exactly that.
+  const resumeAttemptedRef = useRef(false);
+
   // The parts as they arrive, mirrored outside React state so the terminal handler can compose the
   // Outcome from them without reading state inside a state updater - which React may run twice.
   const partsRef = useRef<TurnResponsePartEvent[]>([]);
@@ -7236,6 +8175,12 @@ function TurnTracer({ csrfToken, webConversationId, onTerminalOutcome, createSou
   }, [csrfToken, onTerminalOutcome, watchTurn, webConversationId]);
 
   useEffect(() => {
+    if (resumeAttemptedRef.current) {
+      return;
+    }
+
+    resumeAttemptedRef.current = true;
+
     void (async () => {
       await resumeStoredTurn();
     })();
@@ -7460,7 +8405,7 @@ Delete the now-unused `getTurnOutcome` import if the compiler reports it; the re
 - [ ] **Step 6: Run the tests to verify they pass**
 
 Run: `cd src/web && npm test`
-Expected: PASS, 8 new tests.
+Expected: PASS, 9 new tests.
 
 - [ ] **Step 7: Check types and lint**
 
@@ -7476,7 +8421,7 @@ git commit -m "feat: stream the web conversation and resume it across refreshes 
 
 ---
 
-## Task 20: Wire the conversation-primary application shell
+## Task 21: Wire the conversation-primary application shell
 
 **Files:**
 - Modify: `src/web/src/App.tsx`
@@ -7491,7 +8436,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { DESKTOP_WIDTH, NARROW_WIDTH, setViewportWidth } from './testing/setup';
-import { installFakeEventSource } from './testing/fakeEventSource';
+import { FakeEventSource, installFakeEventSource } from './testing/fakeEventSource';
+import { readInFlightTurn, rememberSubmission, rememberTurnId } from './conversationStorage';
 import App from './App';
 
 const BOOTSTRAP = {
@@ -7557,7 +8503,12 @@ describe('App', () => {
 
     render(<App />);
 
-    const main = await screen.findByRole('main');
+    // Waited on deliberately. The loading state renders a `main` of its own, so waiting for `main`
+    // would resolve against the loading tree and assert nothing about the ready one. The banner exists
+    // only once the session bootstrap has resolved.
+    await screen.findByRole('banner');
+
+    const main = screen.getByRole('main');
     expect(within(main).getByRole('heading', { name: 'Conversation' })).toBeInTheDocument();
     expect(screen.getByRole('complementary', { name: 'Inventory workspace' })).toBeInTheDocument();
   });
@@ -7568,10 +8519,14 @@ describe('App', () => {
 
     render(<App />);
 
+    await screen.findByRole('banner');
     await screen.findByRole('tablist');
     const tabs = screen.getAllByRole('tab');
     expect(tabs.map((tab) => tab.textContent)).toEqual(['Conversation', 'Inventory']);
     expect(tabs[0]).toHaveAttribute('aria-selected', 'true');
+
+    // The landmark is still there at this width; the tab panel is inside it, not instead of it.
+    expect(within(screen.getByRole('main')).getByRole('tabpanel')).toBeInTheDocument();
   });
 
   it('shows the Active Inventory in the always-visible header at every width', async () => {
@@ -7589,7 +8544,7 @@ describe('App', () => {
     const { calls } = stubApi();
 
     render(<App />);
-    await screen.findByRole('main');
+    await screen.findByRole('banner');
 
     // Looking at the list is browsing. Nothing has been selected.
     expect(calls.some((url) => url.includes('/select'))).toBe(false);
@@ -7604,10 +8559,9 @@ describe('App', () => {
     const { streams } = stubApi();
 
     render(<App />);
-    await screen.findByRole('main');
+    await screen.findByRole('banner');
 
-    await waitFor(() => expect(streams).toHaveLength(1));
-    expect(streams[0].url).toBe('/api/inventory-events');
+    await waitFor(() => expect(streams.filter((s) => s.url === '/api/inventory-events')).toHaveLength(1));
   });
 
   it('refetches the workspace when the stream says the Inventory version changed', async () => {
@@ -7615,27 +8569,72 @@ describe('App', () => {
     const { calls, streams } = stubApi();
 
     render(<App />);
-    await screen.findByRole('main');
+    await screen.findByRole('banner');
     await waitFor(() => expect(calls.filter((url) => url.includes('/stock'))).toHaveLength(1));
-    await waitFor(() => expect(streams).toHaveLength(1));
+    await waitFor(() => expect(inventoryStreamIn(streams)).toBeDefined());
 
     // A change made anywhere - this conversation, another tab, another Participant, a future channel -
     // reaches this tab as a version, and the authoritative projection is re-read without a reload.
-    streams[0].emit('snapshot', { inventories: [{ inventoryId: 'inventory-1', version: 0 }] });
-    streams[0].emit('changed', { inventoryId: 'inventory-1', version: 1 });
+    inventoryStreamIn(streams)!.emit('snapshot', { inventories: [{ inventoryId: 'inventory-1', version: 0 }] });
+    inventoryStreamIn(streams)!.emit('changed', { inventoryId: 'inventory-1', version: 1 });
 
     await waitFor(() => expect(calls.filter((url) => url.includes('/stock')).length).toBeGreaterThan(1));
   });
 
-  it('starts a new conversation and tells the Participant what it cleared', async () => {
+  it('does not let a locally signalled refetch swallow the next version the server publishes', async () => {
     setViewportWidth(DESKTOP_WIDTH);
-    stubApi({
+    const { calls, streams } = stubApi({
+      '/api/turns': () => json({ turnId: 'turn-1', alreadyAccepted: false }, 202),
+    });
+
+    render(<App />);
+    await screen.findByRole('banner');
+    await waitFor(() => expect(calls.filter((url) => url.includes('/stock'))).toHaveLength(1));
+    await waitFor(() => expect(inventoryStreamIn(streams)).toBeDefined());
+
+    inventoryStreamIn(streams)!.emit('snapshot', { inventories: [{ inventoryId: 'inventory-1', version: 0 }] });
+
+    // A Turn finishes. This tab knows to re-read, but the server has published no new version - so the
+    // signal must live in a namespace of its own.
+    await userEvent.click(screen.getByRole('button', { name: 'Send' }));
+    await waitFor(() => expect(turnStreamIn(streams)).toBeDefined());
+    turnStreamIn(streams)!.emit(
+      'outcome',
+      {
+        turnId: 'turn-1',
+        status: 'completed',
+        category: 'completed',
+        code: 'stock.listed',
+        summary: 'None.',
+        deliveries: [],
+      },
+      '1000000',
+    );
+
+    await waitFor(() => expect(calls.filter((url) => url.includes('/stock'))).toHaveLength(2));
+
+    // Now the FIRST version the server ever publishes arrives. Had the local signal been written into
+    // the server's version namespace, this would look like a version this tab had already seen, and
+    // the change behind it would never be read at all.
+    inventoryStreamIn(streams)!.emit('changed', { inventoryId: 'inventory-1', version: 1 });
+
+    await waitFor(() => expect(calls.filter((url) => url.includes('/stock'))).toHaveLength(3));
+  });
+
+  it('starts a new conversation, forgets the in-flight Turn, and tells the Participant what it cleared', async () => {
+    setViewportWidth(DESKTOP_WIDTH);
+    const { streams } = stubApi({
       '/api/conversation/new': () =>
         json({ foundryConversationId: 'foundry-2', generation: 2, clearedPendingConfirmation: true }),
     });
 
+    // Something this browser profile was already waiting on. If the reset left it behind, the remounted
+    // conversation would immediately reconnect - or re-POST - work from the conversation just ended.
+    rememberSubmission('web-conversation-1', { nativeMessageId: 'native-old', contentText: 'list stock' });
+    rememberTurnId('web-conversation-1', 'turn-old');
+
     render(<App />);
-    await screen.findByRole('main');
+    await screen.findByRole('banner');
 
     await userEvent.click(screen.getByRole('button', { name: 'New conversation' }));
 
@@ -7645,6 +8644,9 @@ describe('App', () => {
         'Started a new conversation. The change that was waiting for confirmation was cleared.',
       ),
     );
+
+    expect(readInFlightTurn('web-conversation-1')).toBeNull();
+    expect(streamsFor(streams, '/api/turns/turn-old/events')).toHaveLength(0);
   });
 
   it('never offers a control that would change a quantity directly', async () => {
@@ -7652,7 +8654,7 @@ describe('App', () => {
     stubApi();
 
     render(<App />);
-    await screen.findByRole('main');
+    await screen.findByRole('banner');
 
     expect(screen.queryByRole('spinbutton')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /save quantity/i })).not.toBeInTheDocument();
@@ -7660,7 +8662,21 @@ describe('App', () => {
 });
 ```
 
-The invalidation tests drive a real `snapshot`/`changed` pair through the fake `EventSource` installed by `stubApi`, so `App` needs no test-only code path at all.
+The invalidation tests drive a real `snapshot`/`changed` pair through the fake `EventSource` installed by `stubApi`, so `App` needs no test-only code path at all. Because that double is global, this Participant's invalidation stream and any Turn stream `TurnTracer` opens land in the same list, which is why the tests pick them out by URL. Add these three helpers next to `stubApi` in the same file:
+
+```tsx
+function streamsFor(streams: FakeEventSource[], url: string) {
+  return streams.filter((stream) => stream.url === url);
+}
+
+function inventoryStreamIn(streams: FakeEventSource[]) {
+  return streams.find((stream) => stream.url === '/api/inventory-events');
+}
+
+function turnStreamIn(streams: FakeEventSource[]) {
+  return streams.find((stream) => stream.url.startsWith('/api/turns/'));
+}
+```
 
 - [ ] **Step 2: Run the test to verify it fails**
 
@@ -7681,6 +8697,7 @@ import {
   type BootstrapResponse,
   type InventoryView,
 } from './sessionApi';
+import { clearInFlightTurn } from './conversationStorage';
 import { startNewConversation } from './conversationApi';
 import { openInventoryStream, type InventoryVersions } from './inventoryStream';
 import InitialImport from './InitialImport';
@@ -7707,7 +8724,9 @@ type SessionState =
  *
  * Projections are invalidated by the Participant-level stream rather than by guessing: whenever an
  * Inventory's version moves - because of this conversation, another tab, another Participant, or a
- * future channel - the workspace re-reads the authoritative projection.
+ * future channel - the workspace re-reads the authoritative projection. What this tab learns locally,
+ * before the server has published anything, is counted separately, so a local signal can never make
+ * the server's next version look like one already seen.
  */
 function App() {
   const [state, setState] = useState<SessionState>({ phase: 'loading' });
@@ -7718,7 +8737,22 @@ function App() {
   const [selectingId, setSelectingId] = useState<string | null>(null);
   const [resetting, setResetting] = useState(false);
   const [conversationEpoch, setConversationEpoch] = useState(0);
-  const [versions, setVersions] = useState<InventoryVersions>({});
+
+  // Two separate namespaces on purpose. `inventoryVersions` holds ONLY what the server published;
+  // `localRefetchNonce` counts the times this tab learned something locally - a Turn reaching its
+  // Outcome, an import it just applied - that the server has not published a version for yet.
+  // Writing a local signal into the server's namespace would be a real defect: the next version the
+  // server publishes could then equal one this tab believes it has already seen, and the change
+  // behind it would silently never be read.
+  const [inventoryVersions, setInventoryVersions] = useState<InventoryVersions>({});
+  const [localRefetchNonce, setLocalRefetchNonce] = useState(0);
+
+  /**
+   * A change this tab knows about before the server announces it. Stable across renders, because it
+   * is passed to children whose effects depend on it - an identity that changed every render would
+   * make them re-run for no reason, and would make a mid-flight resume look like a fresh mount.
+   */
+  const invalidateActiveInventory = useCallback(() => setLocalRefetchNonce((nonce) => nonce + 1), []);
 
   const loadSession = useCallback(async () => {
     try {
@@ -7750,7 +8784,7 @@ function App() {
       return;
     }
 
-    const stream = openInventoryStream({ onVersions: setVersions });
+    const stream = openInventoryStream({ onVersions: setInventoryVersions });
     return () => stream.close();
   }, [isReady]);
 
@@ -7808,6 +8842,12 @@ function App() {
     try {
       const rotation = await startNewConversation(state.session.csrfToken);
 
+      // Forgotten BEFORE the conversation remounts, and only after the rotation succeeded. The stored
+      // record belongs to the conversation that just ended: leaving it would make the remounted
+      // TurnTracer immediately reconnect that Turn's stream - or, in the lost-response case, re-POST
+      // it - dragging work from the old conversation into the new one on the very first render.
+      clearInFlightTurn(state.session.bootstrap.webConversationId);
+
       // Remounts the conversation, which is what drops this tab's transcript. The Inventory the
       // Participant was working in, and every authorization they hold, are deliberately untouched -
       // starting a new conversation is not signing out.
@@ -7857,17 +8897,15 @@ function App() {
   const activeInventoryId = bootstrap.activeInventoryId;
   const activeInventory = bootstrap.inventories.find((i) => i.id === activeInventoryId);
 
-  // One number that changes whenever anything the workspace shows might have. It is the Active
-  // Inventory's own published version, so a change made anywhere - this conversation, another tab,
-  // another Participant, a future channel - invalidates the projection exactly once.
-  const activeInventoryVersion = activeInventoryId ? (versions[activeInventoryId] ?? 0) : 0;
+  // The Active Inventory's own published version, as the server reports it. A change made anywhere -
+  // this conversation, another tab, another Participant, a future channel - moves exactly this number.
+  const activeInventoryVersion = activeInventoryId ? (inventoryVersions[activeInventoryId] ?? 0) : 0;
 
-  // Bumping the version this tab holds is how a locally-known change invalidates the projection
-  // immediately, without waiting for the stream's next pass to say the same thing.
-  const invalidateActiveInventory = () =>
-    setVersions((current) =>
-      activeInventoryId ? { ...current, [activeInventoryId]: (current[activeInventoryId] ?? 0) + 1 } : current,
-    );
+  // One number for the projections to key on, derived from both sources. Both only ever increase, so
+  // their sum increases whenever either does and can never coincidentally match a value the workspace
+  // has already refetched at. Switching Inventories does not need to be handled here: every workspace
+  // component's load already depends on the Inventory id it was given.
+  const workspaceRefetchToken = activeInventoryVersion + localRefetchNonce;
 
   const conversation = (
     <>
@@ -7941,9 +8979,9 @@ function App() {
         />
       )}
 
-      {activeInventoryId && <StockWorkspace inventoryId={activeInventoryId} refetchToken={activeInventoryVersion} />}
+      {activeInventoryId && <StockWorkspace inventoryId={activeInventoryId} refetchToken={workspaceRefetchToken} />}
 
-      {activeInventoryId && <ReferenceWorkspace inventoryId={activeInventoryId} refetchToken={activeInventoryVersion} />}
+      {activeInventoryId && <ReferenceWorkspace inventoryId={activeInventoryId} refetchToken={workspaceRefetchToken} />}
 
       {/*
         Keyed by the Active Inventory so switching Inventories starts the workflow over rather than
@@ -7955,7 +8993,7 @@ function App() {
           key={activeInventoryId}
           inventoryId={activeInventoryId}
           csrfToken={session.csrfToken}
-          refetchToken={activeInventoryVersion}
+          refetchToken={workspaceRefetchToken}
           onStockMayHaveChanged={invalidateActiveInventory}
         />
       )}
@@ -7996,7 +9034,7 @@ export default App;
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `cd src/web && npm test`
-Expected: PASS. The whole web suite - roughly 50 tests across seven files - is green.
+Expected: PASS. The whole web suite - roughly 55 tests across seven files - is green.
 
 - [ ] **Step 5: Check types, lint, and build**
 
@@ -8012,7 +9050,7 @@ git commit -m "feat: make conversation the primary surface with version-driven w
 
 ---
 
-## Task 21: Every gate CI runs, run here first
+## Task 22: Every gate CI runs, run here first
 
 **Files:**
 - Modify: `README.md` (only if it documents endpoints or the web client's behaviour)
@@ -8106,7 +9144,8 @@ Start the application against a local SQL Server and confirm each criterion by h
 3. Open a second tab and reload the first mid-answer: both show the same Turn, and no second Turn appears in `InboxEntries`.
 4. Add stock in one tab: the other tab's Stock workspace refreshes without being reloaded.
 5. Click "Use in this conversation" on a second Inventory: the header changes. Read the first Inventory's Stock: the header does not change.
-6. Ask for something that needs confirmation, then click "New conversation": the notice says the pending change was cleared, the Inventory is still active, and the Inventories list is unchanged.
+6. Ask for something that needs confirmation, then click "New conversation": the notice says the pending change was cleared, the Inventory is still active, the Inventories list is unchanged, and the code you were holding no longer works.
+7. Stop the worker, send `forget stock <something>`, click "New conversation", then start the worker again: the queued Turn still answers, but the code in its answer is refused - and the transcript did not reappear.
 
 - [ ] **Step 8: Commit**
 
@@ -8123,13 +9162,13 @@ If Step 6 changed nothing, skip this commit rather than creating an empty one.
 
 | # | Acceptance criterion (issue #35) | Where it is built | Where it is proved |
 | --- | --- | --- | --- |
-| 1 | Desktop and narrow-screen layouts keep conversation primary and expose an accessible live Inventory workspace | Task 18 (`WorkspacePanel`, `useMediaQuery`, `index.css`), Task 20 (`App` shell, always-visible Active Inventory) | `WorkspacePanel.test.tsx` (landmarks, DOM order, tab semantics, arrow-key navigation, panel labelling), `App.test.tsx` (conversation in `main` on desktop, conversation tab first and selected on narrow, header Active Inventory), Task 21 Step 7.1 |
-| 2 | Typed Turns return stable Turn IDs and publish finite resumable SSE progress, semantic parts, and terminal Outcomes with event IDs | Task 1 (fixed sequences), Task 2 (`processing`), Task 3 (`TurnEventReader`), Task 4 (durable progress rows), Task 5 (retention), Task 6 (`GET /api/turns/{id}/events`), Task 15 (client) | `TurnStreamEventTests`, `TurnEventReaderTests` (ordering, replay, terminal, swept log, single-line data), `TurnEventStreamHttpTests` (full order with ids, resume by query and by header, ignored bad resume point, finite terminal, framing), `turnStream.test.ts`, `WebConversationContinuitySqlScenarioTests` on real SQL Server |
-| 3 | A separate Participant-level SSE stream invalidates Inventory projections after changes from any channel | Task 7 (version bump at the persistence seam), Task 8 (`InventoryInvalidationReader`, `GET /api/inventory-events`), Task 17 (client), Task 20 (`App` wiring) | `InventoryVersionBumpTests` (one bump per audited commit, none on denial, none on rollback, independent per Inventory), `InventoryInvalidationReaderTests`, `InventoryEventStreamHttpTests` (snapshot, change via the conversational worker, change by another Participant over HTTP, revocation, non-disclosure), `inventoryStream.test.ts`, `App.test.tsx` version-driven refetch |
-| 4 | One browser-profile ChannelConversation resumes across refreshes, restarts, and tabs while preserving the shared FIFO queue | Shipped `WebConversationCookie` + `SqlInboxStore` FIFO, Task 16 (`conversationStorage`), Task 19 (mount-time resume, cross-tab `storage` subscription) | `SharedBrowserProfileScenario` (one ChannelConversation across tabs, one shared FIFO order, a second tab watching the first tab's Turn, identical replay on reconnect), `conversationStorage.test.ts`, `TurnTracer.test.tsx` (resume on mount, adopt another tab's Turn), Task 21 Step 7.3 |
-| 5 | Disconnect recovery retrieves recorded status and Outcome without resubmitting unknown mutation-capable work | Task 6 (the stream is a pure `GET`; disconnect cancels and undoes nothing), Task 16 (idempotency key recorded before the request leaves), Task 19 (resume reads; resubmits only the same native message id) | `TurnEventStreamHttpTests` disconnect test, `SharedBrowserProfileScenario` resubmission test (one inbox row, quantity applied exactly once), `TurnTracer.test.tsx` (reconnect issues no fetch at all; the lost-response case reuses the same `nativeMessageId`) |
-| 6 | "Use in this conversation" explicitly switches Active Inventory and records the switch; browsing never switches implicitly | Shipped `InventorySelectionService` + `POST /api/inventories/{id}/select`, Task 20 (the button is the only caller) | `SharedBrowserProfileScenario` (browsing lists, Stock, and references changes nothing; selection changes and records; a switch in one tab is every tab's switch), `App.test.tsx` (no `/select` call until the button is clicked), Task 21 Step 7.5 |
-| 7 | "New conversation" rotates Foundry history and clears pending clarification/confirmation state without removing authorized access | Task 9 (generation captured at acceptance), Task 10 (`SqlConversationRotationStore`, `ProposalStatus.ConversationReset`), Task 11 (`POST /api/conversation/new`), Task 20 (the control and its notice) | `SqlConversationRotationStoreTests` (new generation, settled proposal, Membership and selection untouched, other conversations untouched, concurrent rotations), `ConversationRotationServiceTests`, `ConversationRotationHttpTests` (generation changes, authorizations and Active Inventory survive, the held token stops working, CSRF and authentication required, work accepted before the reset still completes), `WebConversationContinuitySqlScenarioTests` (concurrent resets, reset racing acceptance) |
+| 1 | Desktop and narrow-screen layouts keep conversation primary and expose an accessible live Inventory workspace | Task 19 (`WorkspacePanel`, `useMediaQuery`, `index.css`), Task 21 (`App` shell, always-visible Active Inventory) | `WorkspacePanel.test.tsx` (landmarks, DOM order, tab semantics, arrow-key navigation, panel labelling), `App.test.tsx` (conversation in `main` on desktop, conversation tab first and selected on narrow, header Active Inventory), Task 22 Step 7.1 |
+| 2 | Typed Turns return stable Turn IDs and publish finite resumable SSE progress, semantic parts, and terminal Outcomes with event IDs | Task 1 (fixed sequences), Task 2 (`processing`), Task 3 (`TurnEventReader`), Task 4 (durable progress rows), Task 5 (retention), Task 6 (`GET /api/turns/{id}/events`), Task 16 (client) | `TurnStreamEventTests`, `TurnEventReaderTests` (ordering, replay, terminal, swept log, single-line data), `TurnEventStreamHttpTests` (full order with ids, resume by query and by header, ignored bad resume point, finite terminal, framing, keep-alive heartbeat), `turnStream.test.ts`, `WebConversationContinuitySqlScenarioTests` on real SQL Server. Honest scope: progress is incremental (`accepted`, then `processing`); the semantic parts are projected from the recorded Outcome and therefore arrive with the terminal event - stated in D1 and in Known limits |
+| 3 | A separate Participant-level SSE stream invalidates Inventory projections after changes from any channel | Task 7 (version bump at the persistence seam, no foreign key), Task 8 (`InventoryInvalidationReader`, `GET /api/inventory-events`), Task 18 (client), Task 21 (`App` wiring) | `InventoryVersionBumpTests` (one bump per audited commit, none on denial, none on rollback, independent per Inventory, no foreign key, fallback insertion), `InventoryInvalidationReaderTests`, `InventoryEventStreamHttpTests` (snapshot, change via the conversational worker, change by another Participant over HTTP, revocation, non-disclosure, and a change made while nothing was connected arriving in the reconnect snapshot - the proof that no cursor is needed), `inventoryStream.test.ts`, `App.test.tsx` (version-driven refetch, and a local signal never swallowing the server's next version), `WebConversationContinuitySqlScenarioTests` (a genuinely concurrent pair of commits, asserted from a captured baseline) |
+| 4 | One browser-profile ChannelConversation resumes across refreshes, restarts, and tabs while preserving the shared FIFO queue | Shipped `WebConversationCookie` + `SqlInboxStore` FIFO, Task 17 (`conversationStorage`), Task 20 (mount-time resume, cross-tab `storage` subscription) | `SharedBrowserProfileScenario` (one ChannelConversation across tabs, one shared FIFO order, a second tab watching the first tab's Turn, identical replay on reconnect), `conversationStorage.test.ts`, `TurnTracer.test.tsx` (resume on mount, adopt another tab's Turn), Task 22 Step 7.3 |
+| 5 | Disconnect recovery retrieves recorded status and Outcome without resubmitting unknown mutation-capable work | Task 6 (the stream is a pure `GET`; disconnect cancels and undoes nothing), Task 17 (idempotency key recorded before the request leaves), Task 20 (resume reads; resubmits only the same native message id, and at most once per mount) | `TurnEventStreamHttpTests` disconnect test, `SharedBrowserProfileScenario` resubmission test (one inbox row, quantity applied exactly once), `TurnTracer.test.tsx` (reconnect issues no fetch at all; the lost-response case reuses the same `nativeMessageId`; a parent re-render during the pre-Turn-id window resubmits nothing) |
+| 6 | "Use in this conversation" explicitly switches Active Inventory and records the switch; browsing never switches implicitly | Shipped `InventorySelectionService` + `POST /api/inventories/{id}/select`, Task 21 (the button is the only caller) | `SharedBrowserProfileScenario` (browsing lists, Stock, and references changes nothing; selection changes and records; a switch in one tab is every tab's switch), `App.test.tsx` (no `/select` call until the button is clicked), Task 22 Step 7.5 |
+| 7 | "New conversation" rotates Foundry history and clears pending clarification/confirmation state without removing authorized access | Task 9 (generation captured at acceptance), Task 10 (`SqlConversationRotationStore`, `ProposalStatus.ConversationReset`), Task 11 (a superseded-conversation Turn leaves nothing confirmable), Task 12 (`POST /api/conversation/new`), Task 21 (the control, its notice, and forgetting the in-flight Turn) | `SqlConversationRotationStoreTests` (new generation, settled proposal, Membership and selection untouched, other conversations untouched, two rotations advancing two generations), `ConversationRotationServiceTests`, `TurnExecutionContextFactoryTests` (superseded detection and its fallback), `ConfirmationProposalLifecycleTests` (settled before dispatch and after it), `TurnProcessingCoordinatorTests` (a stale mutation Turn leaves nothing pending), `ConversationRotationHttpTests` (generation changes, authorizations and Active Inventory survive, the held token stops working, the Initial Import proposal survives, CSRF and authentication required, work accepted before the reset still completes, and a proposal created after the reset out of work from before it can never be confirmed), `App.test.tsx` (the in-flight Turn is forgotten and no old stream reopens), `WebConversationContinuitySqlScenarioTests` (concurrent resets with a real deadlock retry, reset racing acceptance) |
 | — | No monetary budget enforcement within this initial scope | Nothing is built | No task adds a cost check, spend ceiling, or budget policy; the Scope section forbids it outright |
 
 ## Parent decisions (#26) this plan upholds
@@ -8138,14 +9177,18 @@ If Step 6 changed nothing, skip this commit rather than creating an empty one.
 | --- | --- |
 | Typed progress/status events, channel-neutral response parts, one terminal Outcome; never raw tokens | `TurnEventKind` is a closed set; `TurnEventReader.ResponseParts` derives parts only from the recorded `Outcome.Summary` and `Outcome.Payload`; no task streams model tokens (D1) |
 | Stable Turn/Participant/ChannelConversation/Foundry conversation identities | All four are unchanged; the stream is keyed by `TurnId`, the browser conversation by the shipped cookie, and the Foundry conversation is now captured per Turn (Task 9) |
-| One web browser-profile session maps to one active Foundry generation | `FoundryConversationBindings` keeps its `(ParticipantId, ChannelConversationId)` primary key; rotation replaces the row's generation rather than adding one (Task 10) |
-| FIFO per ChannelConversation; duplicates return the recorded outcome; processing and delivery separated | `SqlInboxStore.ClaimPendingAsync` is untouched; `SharedBrowserProfileScenario` proves both across tabs; `ITurnResultStore` keeps its atomic contract because the event log deliberately does not join it (D1) |
-| User stories 74-84 and 112 | 74/76: no mutation control in the workspace, asserted in `App.test.tsx` and `TurnTracer.test.tsx`. 75/79: Task 8 and Task 20. 77/78: Task 12 and `App.test.tsx`. 80/81/112: Tasks 3, 6, 15, 16, 19. 82: Task 12 and Task 16. 83: Tasks 10, 11, 20. 84: no token ever leaves the server; Task 16 stores only a Turn id and a native message id |
+| One web browser-profile session maps to one active Foundry generation | `FoundryConversationBindings` keeps its `(ParticipantId, ChannelConversationId)` primary key; rotation replaces the row's generation rather than adding one (Task 10), and a Turn accepted under a generation the conversation has moved past leaves nothing confirmable behind (Task 11) |
+| FIFO per ChannelConversation; duplicates return the recorded outcome; processing and delivery separated | `SqlInboxStore.ClaimPendingAsync` is untouched; `SharedBrowserProfileScenario` proves both across tabs; `ITurnResultStore` keeps its atomic contract because the event log deliberately does not join it (D1). FIFO is also load-bearing for D10: it is why every Turn accepted before a reset drains before any Turn accepted after it |
+| User stories 74-84 and 112 | 74/76: no mutation control in the workspace, asserted in `App.test.tsx` and `TurnTracer.test.tsx`. 75/79: Task 8 and Task 21. 77/78: Task 13 and `App.test.tsx`. 80/81/112: Tasks 3, 6, 16, 17, 20. 82: Task 13 and Task 17. 83: Tasks 10, 11, 12, 21. 84: no token ever leaves the server; Task 17 stores only a Turn id and a native message id |
 | Web authentication server-side | Unchanged. The two new streams are cookie-authenticated `GET`s behind `AuthorizationPolicies.ActiveTenantMember`; `startNewConversation` sends only the CSRF header |
 
 ## Known limits, stated rather than left to be discovered
 
-- **The per-Turn stream polls the database every 500 ms while a Turn is in flight.** That is a deliberate trade for replica-safety and a short-lived `DbContext` (D4). A Turn is in flight for seconds, and the alternative - the client's shipped 1.5-second polling - cost strictly more requests. If in-flight Turn volume ever makes this measurable, the seam to change is `TurnEventStreamResult`, and nothing else has to move.
-- **The Participant-level stream re-reads the authorized set every second per connected tab.** Same trade, same single seam (`InventoryEventStreamResult`). Membership changes being visible without a reload is worth it.
+- **Semantic response parts arrive with completion, not before it.** By D1 the `part` events are projected from the recorded `Outcomes` row, which does not exist until the Turn finishes - so `part`, `part`, `outcome` all become readable in the same poll and are written back to back. What is genuinely incremental is the status: `accepted` the moment the Turn has an identity, `processing` the moment it is claimed. That satisfies AC 2 as written ("progress, semantic parts, and terminal Outcomes with event IDs"), and it is deliberately not token-by-token streaming, which #26 forbids on every channel. Making the parts incremental would mean writing a second copy of the Outcome payload - including a plaintext confirmation token with its own retention - which D1 rejects with reasons. The client is built for it either way: `TurnTracer` renders whatever parts have arrived, so a future incremental source needs no change there.
+- **The per-Turn stream polls the database every 500 ms while a Turn is in flight.** That is a deliberate trade for replica-safety and a short-lived `DbContext` (D4). A Turn is in flight for seconds, and the alternative - the client's shipped 1.5-second polling - cost strictly more requests. The interval is `TurnStreamOptions.PollInterval`, so changing it is one registration; nothing else has to move.
+- **The Participant-level stream re-reads the authorized set every second per connected tab.** Same trade, same single knob (`InventoryStreamOptions.PollInterval`). Membership changes being visible without a reload is worth it.
+- **The Participant-level stream cannot be resumed from a position, only resynchronized.** That is the design (D5), and Task 8 proves it loses nothing. What it does mean is that a client which wants to know *what* changed while it was away cannot ask this stream; it learns only that the version moved and re-reads the projection. Nothing in #35 needs the former.
 - **A `processing` marker can be lost without failing the Turn.** `TurnProcessingCoordinator` appends it outside the atomic terminal write on purpose: a courtesy must never be able to stop a Turn from reaching its answer. The consequence is that a stream may go from `accepted` straight to the answer, which is honest.
-- **`InboxEntries.FoundryConversationId` is nullable forever.** Only Turns accepted before Task 9's migration can be null, and the migration backfills every one that has a binding. The fallback in `TurnExecutionContextFactory` exists for the residue and is covered by its own test; making the column non-nullable later is a separate, safe migration once no such rows remain.
+- **A Turn accepted before a reset still answers, and its answer may still say "confirmation required".** By D10 the proposal behind it is settled in the same pass, so the code in that answer will not work - deliberately, because the Participant asked for the reset after asking for the change. The Outcome is recorded exactly as decided rather than rewritten, because `ITurnResultStore.RecordAsync` is the atomic contract this plan does not touch. A Participant who tries the code is told there is nothing to confirm.
+- **`InboxEntries.FoundryConversationId` is nullable forever.** Only Turns accepted before Task 9's migration can be null, and the migration backfills every one that has a binding. The fallback in `TurnExecutionContextFactory` exists for the residue, is covered by its own test, and treats such a Turn as never superseded - which is correct, because it predates every reset. Making the column non-nullable later is a separate, safe migration once no such rows remain.
+- **`InventoryVersions` has no foreign key to `Inventories`.** Deliberate (D5), and it means a version row could in principle outlive an Inventory row if one were ever deleted - nothing in this system deletes one. The three mechanisms that keep the table consistent (migration backfill, save-time seeding, guarded fallback insertion) are each asserted in Task 7.
