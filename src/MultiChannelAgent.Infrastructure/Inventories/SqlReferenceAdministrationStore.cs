@@ -15,8 +15,8 @@ namespace MultiChannelAgent.Infrastructure.Inventories;
 /// SQL Server-backed <see cref="IReferenceAdministrationStore"/>: the one transaction Unit and
 /// Location administration rests on.
 ///
-/// One <see cref="ApplyAsync"/> call consumes the proposal, verifies and locks every touched
-/// reference, verifies every term it means to claim, <em>re-checks every Retire against current
+/// One <see cref="ApplyAsync"/> call locks and verifies every touched reference, consumes the
+/// proposal, verifies every term it means to claim, <em>re-checks every Retire against current
 /// Stock Entries</em>, applies every change, appends one minimal semantic audit fact per change,
 /// settles every other pending proposal that referenced a retired identity, and writes the ledger -
 /// all inside one explicit transaction. Any failure rolls the whole thing back, so a caller that

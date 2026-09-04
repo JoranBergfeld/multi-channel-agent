@@ -325,16 +325,7 @@ public sealed class SqlStockProposalRetireLockOrderTests : SqlIntegrationTestBas
             ActorId = new ParticipantId(participantId),
             ConfirmedByTurnId = TurnId.NewId(),
             ConsumesProposalId = null,
-            Changes =
-            [
-                new ProposedReferenceChange
-                {
-                    Order = 1,
-                    Kind = ReferenceChangeKind.RetireUnit,
-                    Target = new ProposedReferenceState(
-                        ReferenceKind.Unit, unitId, "Cardboard Box", "cardboard box", Reserved: false),
-                },
-            ],
+            Changes = [RetireChange(unitId)],
             ExpectedVersions = [new ExpectedReferenceVersion(ReferenceKind.Unit, unitId, unitStamp)],
             ExpectedTermAbsences = [],
             Now = Now,
