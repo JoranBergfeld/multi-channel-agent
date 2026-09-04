@@ -15,6 +15,9 @@ public class ScriptedModelBoundaryTests
     private static InboundTurn Turn(string contentText) =>
         TestTurns.Text("native-1", SomeParticipant, "conversation-1", contentText, null, DateTimeOffset.UtcNow, null);
 
+    private static Task<ModelProposal> ProposeAsync(string contentText) =>
+        new ScriptedModelBoundary().ProposeAsync(Turn(contentText), BoundConversation, CancellationToken.None);
+
     [Fact]
     public async Task Ordinary_unrecognized_content_produces_a_direct_completed_outcome_with_one_echo_delivery()
     {
@@ -359,5 +362,100 @@ public class ScriptedModelBoundaryTests
 
         Assert.Equal(ModelProposalKind.Direct, proposal.Kind);
         Assert.Equal("echoed", proposal.Direct!.Code);
+    }
+    [Fact]
+    public async Task List_units_proposes_the_bounded_read()
+    {
+        var proposal = await ProposeAsync("list units page size 5");
+
+        Assert.Equal("list_units", proposal.ToolCall!.ToolName);
+        Assert.Equal("5", proposal.ToolCall.UntrustedArgs["pageSize"]);
+    }
+
+    [Fact]
+    public async Task List_locations_proposes_the_bounded_read()
+    {
+        var proposal = await ProposeAsync("list locations");
+
+        Assert.Equal("list_locations", proposal.ToolCall!.ToolName);
+        Assert.Empty(proposal.ToolCall.UntrustedArgs);
+    }
+
+    [Fact]
+    public async Task Create_unit_proposes_one_homogeneous_change_with_its_initial_aliases()
+    {
+        var proposal = await ProposeAsync("create unit Cardboard Box aliases boxes, bx");
+
+        Assert.Equal("create_units", proposal.ToolCall!.ToolName);
+        Assert.Equal(
+            """[{"name":"Cardboard Box","aliases":"boxes, bx"}]""",
+            proposal.ToolCall.UntrustedArgs["changes"]);
+    }
+
+    [Fact]
+    public async Task Create_location_proposes_one_homogeneous_change()
+    {
+        var proposal = await ProposeAsync("create location Shelf A");
+
+        Assert.Equal("create_locations", proposal.ToolCall!.ToolName);
+        Assert.Equal("""[{"name":"Shelf A"}]""", proposal.ToolCall.UntrustedArgs["changes"]);
+    }
+
+    [Fact]
+    public async Task Rename_unit_carries_the_reference_and_the_new_name()
+    {
+        var proposal = await ProposeAsync("rename unit boxes to Carton");
+
+        Assert.Equal("rename_units", proposal.ToolCall!.ToolName);
+        Assert.Equal("""[{"unit":"boxes","newName":"Carton"}]""", proposal.ToolCall.UntrustedArgs["changes"]);
+    }
+
+    [Fact]
+    public async Task Rename_location_carries_the_reference_and_the_new_name()
+    {
+        var proposal = await ProposeAsync("rename location Shelf A to Aisle 3");
+
+        Assert.Equal("rename_locations", proposal.ToolCall!.ToolName);
+        Assert.Equal("""[{"location":"Shelf A","newName":"Aisle 3"}]""", proposal.ToolCall.UntrustedArgs["changes"]);
+    }
+
+    [Fact]
+    public async Task Adding_and_removing_an_alias_each_carry_one_alias()
+    {
+        var added = await ProposeAsync("add alias cartons to unit Cardboard Box");
+        var removed = await ProposeAsync("remove alias cartons from unit Cardboard Box");
+
+        Assert.Equal("add_unit_aliases", added.ToolCall!.ToolName);
+        Assert.Equal("""[{"unit":"Cardboard Box","alias":"cartons"}]""", added.ToolCall.UntrustedArgs["changes"]);
+        Assert.Equal("remove_unit_aliases", removed.ToolCall!.ToolName);
+        Assert.Equal("""[{"unit":"Cardboard Box","alias":"cartons"}]""", removed.ToolCall.UntrustedArgs["changes"]);
+    }
+
+    [Fact]
+    public async Task Retiring_a_Unit_and_a_Location_each_name_only_the_reference()
+    {
+        var unit = await ProposeAsync("retire unit Cardboard Box");
+        var location = await ProposeAsync("retire location Shelf A");
+
+        Assert.Equal("retire_units", unit.ToolCall!.ToolName);
+        Assert.Equal("""[{"unit":"Cardboard Box"}]""", unit.ToolCall.UntrustedArgs["changes"]);
+        Assert.Equal("retire_locations", location.ToolCall!.ToolName);
+        Assert.Equal("""[{"location":"Shelf A"}]""", location.ToolCall.UntrustedArgs["changes"]);
+    }
+
+    [Fact]
+    public async Task An_administration_command_never_swallows_a_stock_command()
+    {
+        var proposal = await ProposeAsync("rename stock Steel Bolts to Brass Rivets");
+
+        Assert.Equal("rename_stock", proposal.ToolCall!.ToolName);
+    }
+
+    [Fact]
+    public async Task An_administration_command_with_nothing_to_act_on_falls_back_to_the_echo()
+    {
+        var proposal = await ProposeAsync("retire unit");
+
+        Assert.Equal(ModelProposalKind.Direct, proposal.Kind);
     }
 }
