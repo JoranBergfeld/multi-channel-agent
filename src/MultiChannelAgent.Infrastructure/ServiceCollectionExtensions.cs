@@ -43,6 +43,7 @@ public static class ServiceCollectionExtensions
         services.AddScoped<TurnProcessingCoordinator>();
         services.AddScoped<DeliveryDispatchCoordinator>();
         services.AddScoped<OutcomePayloadCleanupCoordinator>();
+        services.AddScoped<TurnProgressEventCleanupCoordinator>();
         services.AddScoped<TurnOutcomeReader>();
         services.AddScoped<TurnEventReader>();
         services.AddScoped<IFoundryConversationBindingStore, SqlFoundryConversationBindingStore>();

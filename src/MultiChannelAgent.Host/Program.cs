@@ -44,6 +44,7 @@ builder.Services.AddAntiforgery(options =>
 builder.Services.AddHostedService<TurnProcessingWorker>();
 builder.Services.AddHostedService<DeliveryDispatchWorker>();
 builder.Services.AddHostedService<OutcomePayloadCleanupWorker>();
+builder.Services.AddHostedService<TurnProgressEventCleanupWorker>();
 builder.Services.AddHostedService<ConfirmationProposalCleanupWorker>();
 builder.Services.AddHostedService<ImportCleanupWorker>();
 
