@@ -74,6 +74,7 @@ app.MapInventoryGovernanceEndpoints();
 app.MapInventoryRecoveryEndpoints();
 app.MapStockEndpoints();
 app.MapReferenceEndpoints();
+app.MapImportEndpoints();
 app.MapAuthEndpoints(challengeScheme);
 
 if (challengeScheme == ProviderSchemes.Test)
