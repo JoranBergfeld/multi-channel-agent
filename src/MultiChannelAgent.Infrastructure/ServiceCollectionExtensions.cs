@@ -53,6 +53,11 @@ public static class ServiceCollectionExtensions
         services.AddScoped<IInventoryReferenceStore, SqlInventoryReferenceStore>();
         services.AddScoped<IConfirmationProposalStore, SqlConfirmationProposalStore>();
         services.AddScoped<IStockChangeSetStore, SqlStockChangeSetStore>();
+        services.AddScoped<IReferenceCatalogStore, SqlReferenceCatalogStore>();
+        services.AddScoped<IReferenceAdministrationStore, SqlReferenceAdministrationStore>();
+        services.AddScoped<ReferenceChangeResolver>();
+        services.AddScoped<ReferenceAdministrationService>();
+        services.AddScoped<ReferenceListingService>();
 
         // Only ever constructed (and its TokenCredential only ever built/validated) the first time
         // something actually resolves ITenantMemberDirectory - which never happens for
