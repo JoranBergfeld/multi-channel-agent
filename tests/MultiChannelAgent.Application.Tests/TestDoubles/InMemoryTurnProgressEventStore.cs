@@ -7,15 +7,40 @@ public sealed class InMemoryTurnProgressEventStore : ITurnProgressEventStore
 {
     private readonly Lock gate = new();
     private readonly Dictionary<(Guid TurnId, long Sequence), TurnProgressEvent> events = [];
+    private bool failNextAppend;
 
     public bool ModelWasCalled { get; set; }
 
     public bool WasAppendedBeforeFirstModelCall { get; private set; }
 
+    public bool FailNextAppend
+    {
+        get
+        {
+            lock (gate)
+            {
+                return failNextAppend;
+            }
+        }
+        set
+        {
+            lock (gate)
+            {
+                failNextAppend = value;
+            }
+        }
+    }
+
     public Task<bool> AppendAsync(TurnProgressEvent progressEvent, CancellationToken cancellationToken)
     {
         lock (gate)
         {
+            if (failNextAppend)
+            {
+                failNextAppend = false;
+                throw new InvalidOperationException("Synthetic progress append failure.");
+            }
+
             var appended = events.TryAdd((progressEvent.TurnId.Value, progressEvent.Sequence), progressEvent);
             if (appended && events.Count == 1)
             {

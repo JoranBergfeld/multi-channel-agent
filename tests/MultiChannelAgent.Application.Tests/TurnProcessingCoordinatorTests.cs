@@ -52,11 +52,24 @@ public class TurnProcessingCoordinatorTests
         }
     }
 
+    private sealed class CancelingProgressEventStore : ITurnProgressEventStore
+    {
+        public Task<bool> AppendAsync(TurnProgressEvent progressEvent, CancellationToken cancellationToken) =>
+            throw new OperationCanceledException(cancellationToken);
+
+        public Task<IReadOnlyList<TurnProgressEvent>> ReadAsync(TurnId turnId, CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+
+        public Task<int> DeleteExpiredAsync(DateTimeOffset now, int maxCount, CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+    }
+
     private static (TurnProcessingCoordinator Coordinator, InMemoryInboxStore Inbox, InMemoryOutcomeStore Outcomes, InMemoryDeliveryStore Deliveries, InMemoryTurnResultStore ResultStore, InMemoryFoundryConversationBindingStore Bindings)
         CreateCoordinator(
             TimeProvider timeProvider,
             IModelBoundary? modelBoundary = null,
-            InMemoryTurnProgressEventStore? progressStore = null)
+            InMemoryTurnProgressEventStore? progressStore = null,
+            ITurnProgressEventStore? progressEventStore = null)
     {
         var inbox = new InMemoryInboxStore();
         var outcomes = new InMemoryOutcomeStore();
@@ -93,7 +106,7 @@ public class TurnProcessingCoordinatorTests
         var coordinator = new TurnProcessingCoordinator(
             inbox,
             resultStore,
-            progressStore,
+            progressEventStore ?? progressStore,
             leases,
             new ProgressObservingModelBoundary(modelBoundary ?? new ScriptedModelBoundary(), progressStore),
             executionContextFactory,
@@ -103,6 +116,43 @@ public class TurnProcessingCoordinatorTests
             NullLogger<TurnProcessingCoordinator>.Instance);
 
         return (coordinator, inbox, outcomes, deliveries, resultStore, bindingStore);
+    }
+
+    [Fact]
+    public async Task A_progress_append_failure_does_not_block_terminal_outcomes_or_later_turns_in_the_conversation()
+    {
+        var timeProvider = new FakeTimeProvider(Now);
+        var progressStore = new InMemoryTurnProgressEventStore { FailNextAppend = true };
+        var (coordinator, inbox, outcomes, _, _, _) = CreateCoordinator(timeProvider, progressStore: progressStore);
+        var firstTurn = TestTurns.Text("native-1", SomeParticipant, "conversation-1", "hello", null, Now, null);
+        var laterTurn = TestTurns.Text(
+            "native-2", SomeParticipant, "conversation-1", "hello again", null, Now.AddSeconds(1), null);
+        await inbox.AcceptAsync(firstTurn, CancellationToken.None);
+        await inbox.AcceptAsync(laterTurn, CancellationToken.None);
+
+        var processedCount = await coordinator.ProcessPendingAsync(CancellationToken.None);
+
+        Assert.Equal(2, processedCount);
+        Assert.Equal(OutcomeStatus.Completed, (await outcomes.FindAsync(firstTurn.TurnId, CancellationToken.None))!.Status);
+        Assert.Equal(OutcomeStatus.Completed, (await outcomes.FindAsync(laterTurn.TurnId, CancellationToken.None))!.Status);
+        Assert.Empty(await progressStore.ReadAsync(firstTurn.TurnId, CancellationToken.None));
+        Assert.Single(await progressStore.ReadAsync(laterTurn.TurnId, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Cancellation_from_progress_publication_propagates()
+    {
+        var timeProvider = new FakeTimeProvider(Now);
+        using var cancellationSource = new CancellationTokenSource();
+        cancellationSource.Cancel();
+        var (coordinator, inbox, _, _, _, _) = CreateCoordinator(
+            timeProvider,
+            progressEventStore: new CancelingProgressEventStore());
+        var turn = TestTurns.Text("native-1", SomeParticipant, "conversation-1", "hello", null, Now, null);
+        await inbox.AcceptAsync(turn, CancellationToken.None);
+
+        await Assert.ThrowsAsync<OperationCanceledException>(
+            () => coordinator.ProcessPendingAsync(cancellationSource.Token));
     }
 
     [Fact]
@@ -155,10 +205,15 @@ public class TurnProcessingCoordinatorTests
         resultStore.FailNextRecord = true;
 
         Assert.Equal(0, await coordinator.ProcessPendingAsync(CancellationToken.None));
+        timeProvider.Advance(TimeSpan.FromMinutes(1));
         Assert.Equal(1, await coordinator.ProcessPendingAsync(CancellationToken.None));
 
         var progressEvent = Assert.Single(await progressStore.ReadAsync(turn.TurnId, CancellationToken.None));
+        Assert.Equal(turn.TurnId, progressEvent.TurnId);
         Assert.Equal(TurnEventSequence.Processing, progressEvent.Sequence);
+        Assert.Equal(Now, progressEvent.OccurredAt);
+        Assert.Equal(Now + TurnProgressEvent.Retention, progressEvent.ExpiresAt);
+        Assert.NotEqual(timeProvider.GetUtcNow(), progressEvent.OccurredAt);
     }
 
     [Fact]

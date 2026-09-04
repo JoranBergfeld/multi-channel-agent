@@ -124,7 +124,19 @@ public sealed class TurnProcessingCoordinator(
         // any later one - to trigger.
         await proposalLifecycle.ReconcileAsync(executionContext, now, cancellationToken);
 
-        await turnProgressEventStore.AppendAsync(TurnProgressEvent.Processing(turn.TurnId, now), cancellationToken);
+        // Processing progress is a courtesy write separate from the terminal result transaction.
+        // Losing it must never block model processing or the terminal Outcome.
+        try
+        {
+            await turnProgressEventStore.AppendAsync(TurnProgressEvent.Processing(turn.TurnId, now), cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogError(
+                ex,
+                "Failed to publish processing progress for Turn {TurnId}; terminal processing will continue.",
+                turn.TurnId);
+        }
 
         var proposal = await modelBoundary.ProposeAsync(
             turn,
