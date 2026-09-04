@@ -176,6 +176,31 @@ public class InitialImportServiceTests
     }
 
     [Fact]
+    public async Task An_invalid_revalidation_leaves_the_original_pending_proposal_exactly_as_it_was()
+    {
+        GrantMembership(MembershipRole.Editor);
+        var csv = $"{Header}\nSteel Bolts,4,,,\n";
+
+        var first = await ValidateAsync(csv);
+        var firstStored = await _proposals.FindPendingAsync(_participantId, _inventoryId, CancellationToken.None);
+        var firstRaw = await _proposals.FindRawContentAsync(firstStored!.Id, CancellationToken.None);
+
+        var second = await ValidateAsync($"{Header}\n,4,,,\n");
+
+        Assert.Equal(ImportResultKind.Invalid, second.Kind);
+
+        var stillPending = await _proposals.FindPendingAsync(_participantId, _inventoryId, CancellationToken.None);
+        Assert.NotNull(stillPending);
+        Assert.Equal(firstStored.Id, stillPending!.Id);
+        Assert.Equal(firstStored.TokenHash, stillPending.TokenHash);
+        Assert.Equal(ConfirmationToken.HashOf(first.View!.Token), stillPending.TokenHash);
+        Assert.Equal(ImportProposalStatus.Pending, await _proposals.FindStatusAsync(firstStored.Id, CancellationToken.None));
+
+        var stillRaw = await _proposals.FindRawContentAsync(firstStored.Id, CancellationToken.None);
+        Assert.Equal(firstRaw!.Value.ToArray(), stillRaw!.Value.ToArray());
+    }
+
+    [Fact]
     public async Task Every_actionable_error_comes_back_together_and_nothing_is_stored()
     {
         GrantMembership(MembershipRole.Editor);
@@ -188,6 +213,26 @@ public class InitialImportServiceTests
             ["missing_name", "invalid_quantity", "unknown_unit", "unknown_location"],
             result.Errors.Select(error => error.Code));
         Assert.Equal([2, 3, 4, 5], result.Errors.Select(error => error.LineNumber));
+        Assert.Null(await _proposals.FindPendingAsync(_participantId, _inventoryId, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Every_independent_error_is_reported_together_even_when_other_rows_only_have_reference_errors()
+    {
+        GrantMembership(MembershipRole.Editor);
+
+        // Line 2 is malformed (no Name), line 3 names an unknown Unit, and lines 4-5 are two fully
+        // resolvable equivalent rows that conflict on Note - none of these three problems depends on
+        // any other, so all three must come back in one answer rather than the first two on this
+        // upload and the third on the next.
+        var result = await ValidateAsync(
+            $"{Header}\n,4,,,\nBrass Rivets,1,crate,,\nSteel Bolts,4,,,Blue box\nSteel Bolts,4,,,Red box\n");
+
+        Assert.Equal(ImportResultKind.Invalid, result.Kind);
+        Assert.Equal(
+            ["missing_name", "unknown_unit", "conflicting_notes"],
+            result.Errors.Select(error => error.Code));
+        Assert.Equal([2, 3, 5], result.Errors.Select(error => error.LineNumber));
         Assert.Null(await _proposals.FindPendingAsync(_participantId, _inventoryId, CancellationToken.None));
     }
 

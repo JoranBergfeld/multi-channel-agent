@@ -71,6 +71,13 @@ public sealed record ImportValidationResult(
 /// actionable row/column errors. Never partially import." - and the phases are ordered so a
 /// Participant is never told about an unknown Unit on a line whose Name is missing, because the line
 /// they need to fix is the same line either way.
+///
+/// A reference error on one row never withholds the merge from every other row: the merge always runs
+/// over whatever resolved, because a row's own resolution never depended on any other row's, and a
+/// Participant fixing an unknown Unit on line 4 deserves to hear about a Notes conflict on lines 9 and
+/// 12 in the same answer rather than on a second upload. Nothing is ever stored, though, while any
+/// error - row, reference, or merge - remains; "report everything, store nothing but a clean file" is
+/// one rule, not two.
 /// </summary>
 public sealed class InitialImportService(
     InventoryAuthorizationService authorizationService,
@@ -144,19 +151,21 @@ public sealed class InitialImportService(
 
         // Phase 3: this Inventory's references, resolved only for the rows that parsed - a row with
         // its own error was never readable enough to look anything up for, so it contributes nothing
-        // here and its Unit or Location is never even queried.
-        var resolution = await resolver.ResolveAsync(inventoryId, rows, cancellationToken);
+        // here and its Unit or Location is never even queried. A row's resolution never depends on any
+        // other row's, so a reference error on one row is never a reason to withhold a resolved row
+        // from Phase 4 - only its own line is unusable, not the file.
+        var resolution = await resolver.ResolveAsync(inventoryId, rows, ImportContract.MaxReportedErrors, cancellationToken);
 
-        if (rowErrors.Count > 0 || resolution.Errors.Count > 0)
-        {
-            return Invalid(Combined(rowErrors, resolution.Errors));
-        }
-
-        // Phase 4: equivalence and Notes.
+        // Phase 4: equivalence and Notes, over whatever resolved. This runs even when Phase 2 or
+        // Phase 3 already found errors elsewhere, because a merge error here (a Notes conflict, a
+        // Quantity overflow) is just as independent of those as they are of each other - a Participant
+        // fixing an unknown Unit on one line deserves to hear about a Notes conflict on two entirely
+        // different lines in the same answer.
         var merged = ImportMergePlan.Create(resolution.Rows);
-        if (merged.Errors.Count > 0)
+
+        if (rowErrors.Count > 0 || resolution.Errors.Count > 0 || merged.Errors.Count > 0)
         {
-            return Invalid(Ordered(merged.Errors).Select(Plain));
+            return Invalid(Combined(rowErrors, resolution.Errors, merged.Errors));
         }
 
         var token = ConfirmationToken.Issue();
@@ -192,20 +201,21 @@ public sealed class InitialImportService(
         entry.Note,
         entry.SourceLineNumbers);
 
-    /// <summary>Source order, so a Participant reads the report the way they read the file.</summary>
-    private static IEnumerable<ImportRowError> Ordered(IEnumerable<ImportRowError> errors) =>
-        errors.OrderBy(error => error.LineNumber).ThenBy(error => error.ColumnIndex ?? -1);
-
     /// <summary>
-    /// Row errors and reference errors together, in source order. Both phases run over disjoint rows
-    /// - a row's own error means its Unit and Location were never looked up, so nothing here is ever
-    /// reported twice for the same line.
+    /// Row errors, reference errors, and merge errors together, in source order. All three phases run
+    /// over disjoint rows - a row's own error means its Unit and Location were never looked up, and a
+    /// merge error only ever names a row that did resolve - so nothing here is ever reported twice for
+    /// the same line, however many of the three independently found something wrong.
     /// </summary>
     private static IEnumerable<ImportErrorView> Combined(
-        IEnumerable<ImportRowError> rowErrors, IEnumerable<ImportReferenceError> referenceErrors)
+        IEnumerable<ImportRowError> rowErrors,
+        IEnumerable<ImportReferenceError> referenceErrors,
+        IEnumerable<ImportRowError> mergeErrors)
     {
-        var views = rowErrors.Select(Plain).Concat(referenceErrors.Select(error => new ImportErrorView(
-            ImportFacts.ToMachineText(error.Code), error.LineNumber, error.ColumnIndex, error.Suggestions)));
+        var views = rowErrors.Select(Plain)
+            .Concat(referenceErrors.Select(error => new ImportErrorView(
+                ImportFacts.ToMachineText(error.Code), error.LineNumber, error.ColumnIndex, error.Suggestions)))
+            .Concat(mergeErrors.Select(Plain));
 
         return views.OrderBy(view => view.LineNumber).ThenBy(view => view.ColumnIndex ?? -1);
     }

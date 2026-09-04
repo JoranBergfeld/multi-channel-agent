@@ -15,7 +15,13 @@ public sealed record ImportReferenceError(ImportRowError Error, IReadOnlyList<st
     public int? ColumnIndex => Error.ColumnIndex;
 }
 
-/// <summary>The rows whose references resolved, and the errors for those that did not. Rows are empty whenever anything failed.</summary>
+/// <summary>
+/// Every row whose Unit and Location resolved, and the errors for those that did not. <see cref="Rows"/>
+/// carries every successfully resolved row even when other rows in the same call have reference
+/// errors - a row's own resolution never depends on any other row's - so a caller can still act on
+/// what did resolve (merge it, report merge errors alongside these) rather than deferring all of it to
+/// a second upload just because some other line named an unknown Unit.
+/// </summary>
 public sealed record ImportResolutionResult(IReadOnlyList<ResolvedImportRow> Rows, IReadOnlyList<ImportReferenceError> Errors);
 
 /// <summary>
@@ -33,18 +39,34 @@ public sealed record ImportResolutionResult(IReadOnlyList<ResolvedImportRow> Row
 /// resolves by, so "each", " each ", and "EACH" share one entry rather than three: a raw
 /// case-insensitive key would still miss whenever rows disagree only on internal whitespace. The
 /// cache never outlives the call, so it can never serve a reference that was retired since.
+///
+/// Suggestions are bounded separately from resolution itself: <paramref name="suggestionBudget" />
+/// (see <see cref="ResolveAsync"/>) caps how many distinct unknown terms may ever query
+/// <see cref="IReferenceCatalogStore.SuggestAsync"/> in one call, because a caller can only ever act on
+/// <see cref="ImportContract.MaxReportedErrors"/> of them anyway. Identity resolution is never bounded
+/// by this budget - every row is still resolved and every unknown reference still becomes an exact
+/// error - only the catalog round trip behind its suggestions is skipped once the budget is spent, and
+/// such an error simply carries no suggestions.
 /// </summary>
 public sealed class ImportReferenceResolver(IInventoryReferenceStore references, IReferenceCatalogStore catalog)
 {
+    /// <param name="suggestionBudget">
+    /// How many distinct unknown terms may query <see cref="IReferenceCatalogStore.SuggestAsync"/> in
+    /// this call. A repeated unknown term never spends the budget twice - it is served from the same
+    /// per-call cache resolution itself uses. Zero means no catalog calls at all; every unknown
+    /// reference is still reported, just with an empty suggestion list. Must not be negative.
+    /// </param>
     public async Task<ImportResolutionResult> ResolveAsync(
-        InventoryId inventoryId, IReadOnlyList<ImportRow> rows, CancellationToken cancellationToken)
+        InventoryId inventoryId, IReadOnlyList<ImportRow> rows, int suggestionBudget, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(rows);
+        ArgumentOutOfRangeException.ThrowIfNegative(suggestionBudget);
         cancellationToken.ThrowIfCancellationRequested();
 
         var units = new Dictionary<string, (UnitId Id, string CanonicalName)?>(StringComparer.Ordinal);
         var locations = new Dictionary<string, (LocationId Id, string Name)?>(StringComparer.Ordinal);
         var suggestions = new Dictionary<(ReferenceKind Kind, string Normalized), IReadOnlyList<string>>();
+        var budget = new SuggestionBudget(suggestionBudget);
 
         var resolved = new List<ResolvedImportRow>(rows.Count);
         var errors = new List<ImportReferenceError>();
@@ -70,14 +92,14 @@ public sealed class ImportReferenceResolver(IInventoryReferenceStore references,
             {
                 errors.Add(await UnknownAsync(
                     inventoryId, ReferenceKind.Unit, row.UnitTerm, ImportErrorCode.UnknownUnit,
-                    row.LineNumber, ImportContract.UnitColumn, suggestions, cancellationToken));
+                    row.LineNumber, ImportContract.UnitColumn, suggestions, budget, cancellationToken));
             }
 
             if (locationUnknown)
             {
                 errors.Add(await UnknownAsync(
                     inventoryId, ReferenceKind.Location, row.LocationName!, ImportErrorCode.UnknownLocation,
-                    row.LineNumber, ImportContract.LocationColumn, suggestions, cancellationToken));
+                    row.LineNumber, ImportContract.LocationColumn, suggestions, budget, cancellationToken));
             }
 
             if (unit is null || locationUnknown)
@@ -99,9 +121,7 @@ public sealed class ImportReferenceResolver(IInventoryReferenceStore references,
             });
         }
 
-        return errors.Count > 0
-            ? new ImportResolutionResult([], errors)
-            : new ImportResolutionResult(resolved, []);
+        return new ImportResolutionResult(resolved, errors);
     }
 
     private async Task<(UnitId Id, string CanonicalName)?> ResolveUnitAsync(
@@ -160,6 +180,7 @@ public sealed class ImportReferenceResolver(IInventoryReferenceStore references,
         int lineNumber,
         int columnIndex,
         Dictionary<(ReferenceKind Kind, string Normalized), IReadOnlyList<string>> cache,
+        SuggestionBudget budget,
         CancellationToken cancellationToken)
     {
         var key = (kind, NameNormalization.Normalize(reference));
@@ -169,10 +190,38 @@ public sealed class ImportReferenceResolver(IInventoryReferenceStore references,
             // ever naming references the caller could list anyway, so suggestions disclose nothing
             // new. Cached alongside resolution, for the same reason: one unknown term repeated across
             // a file should cost one suggestion lookup, not one per row.
-            suggestions = await catalog.SuggestAsync(inventoryId, kind, reference, cancellationToken);
+            //
+            // The budget is spent here, on a cache miss, and only here: a term already in the cache -
+            // whether it queried the catalog or not - never spends it again. Once the budget is gone,
+            // resolution keeps going (a five-thousand-row file still gets an exact error per unknown
+            // row) but no further term ever reaches the catalog; it is cached as having no suggestions
+            // so a second occurrence still costs nothing.
+            suggestions = budget.TryConsume()
+                ? await catalog.SuggestAsync(inventoryId, kind, reference, cancellationToken)
+                : [];
             cache[key] = suggestions;
         }
 
         return new ImportReferenceError(new ImportRowError(code, lineNumber, columnIndex), suggestions);
+    }
+
+    /// <summary>
+    /// How many more distinct unknown terms may query the catalog in one <see cref="ResolveAsync"/>
+    /// call. A mutable per-call counter rather than a plain int, because <see cref="UnknownAsync"/> is
+    /// its own method rather than a closure and an async method cannot take a <see langword="ref"/>
+    /// parameter.
+    /// </summary>
+    private sealed class SuggestionBudget(int remaining)
+    {
+        public bool TryConsume()
+        {
+            if (remaining <= 0)
+            {
+                return false;
+            }
+
+            remaining--;
+            return true;
+        }
     }
 }

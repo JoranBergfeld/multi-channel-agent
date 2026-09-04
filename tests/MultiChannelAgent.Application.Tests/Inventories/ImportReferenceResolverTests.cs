@@ -39,7 +39,10 @@ public class ImportReferenceResolverTests
         };
 
     private Task<ImportResolutionResult> ResolveAsync(params ImportRow[] rows) =>
-        Resolver().ResolveAsync(_inventoryId, rows, CancellationToken.None);
+        ResolveAsync(suggestionBudget: 10_000, rows);
+
+    private Task<ImportResolutionResult> ResolveAsync(int suggestionBudget, params ImportRow[] rows) =>
+        Resolver().ResolveAsync(_inventoryId, rows, suggestionBudget, CancellationToken.None);
 
     [Fact]
     public async Task A_Unit_resolves_by_its_canonical_name_or_by_any_active_alias()
@@ -269,6 +272,71 @@ public class ImportReferenceResolverTests
         await cancelled.CancelAsync();
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(
-            () => Resolver().ResolveAsync(_inventoryId, [Row()], cancelled.Token));
+            () => Resolver().ResolveAsync(_inventoryId, [Row()], suggestionBudget: 10, cancelled.Token));
+    }
+
+    [Fact]
+    public async Task A_row_that_resolves_survives_even_when_another_row_has_a_reference_error()
+    {
+        var result = await ResolveAsync(Row(2, unitTerm: "crate"), Row(3, unitTerm: "each"));
+
+        var error = Assert.Single(result.Errors);
+        Assert.Equal(ImportErrorCode.UnknownUnit, error.Code);
+        Assert.Equal(2, error.LineNumber);
+
+        var row = Assert.Single(result.Rows);
+        Assert.Equal(3, row.LineNumber);
+        Assert.Equal(_eachId, row.UnitId);
+    }
+
+    [Fact]
+    public async Task A_suggestion_budget_bounds_catalog_lookups_while_every_unknown_term_still_reports()
+    {
+        var rows = Enumerable.Range(0, 5_000)
+            .Select(index => Row(index + 2, unitTerm: $"unknown-unit-{index}"))
+            .ToArray();
+
+        var result = await ResolveAsync(suggestionBudget: ImportContract.MaxReportedErrors, rows);
+
+        Assert.Equal(5_000, result.Errors.Count);
+        Assert.True(_catalog.SuggestionCount <= ImportContract.MaxReportedErrors);
+        Assert.Equal(ImportContract.MaxReportedErrors, _catalog.SuggestionCount);
+
+        // Everything past the budget is still an exact, actionable error - just with no catalog round
+        // trip behind it, so the count a Participant is told about is never a guess.
+        Assert.All(
+            result.Errors.Skip(ImportContract.MaxReportedErrors),
+            error => Assert.Empty(error.Suggestions));
+    }
+
+    [Fact]
+    public async Task A_repeated_unknown_term_still_costs_one_suggestion_query_however_small_the_budget()
+    {
+        var variants = new[] { "crate", " crate ", "CRATE", "crate  " };
+        var rows = Enumerable.Range(0, 50).Select(index => Row(index + 2, unitTerm: variants[index % variants.Length])).ToArray();
+
+        var result = await ResolveAsync(suggestionBudget: 3, rows);
+
+        Assert.Equal(50, result.Errors.Count);
+        Assert.Equal(1, _catalog.SuggestionCount);
+        Assert.All(result.Errors, error => Assert.Empty(error.Suggestions));
+    }
+
+    [Fact]
+    public async Task A_zero_suggestion_budget_makes_no_catalog_calls_at_all()
+    {
+        var result = await ResolveAsync(suggestionBudget: 0, Row(unitTerm: "crate"));
+
+        var error = Assert.Single(result.Errors);
+        Assert.Equal(ImportErrorCode.UnknownUnit, error.Code);
+        Assert.Empty(error.Suggestions);
+        Assert.Equal(0, _catalog.SuggestionCount);
+    }
+
+    [Fact]
+    public async Task A_negative_suggestion_budget_is_refused()
+    {
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
+            () => Resolver().ResolveAsync(_inventoryId, [Row()], suggestionBudget: -1, CancellationToken.None));
     }
 }
