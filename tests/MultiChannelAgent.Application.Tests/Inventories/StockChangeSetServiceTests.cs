@@ -388,4 +388,57 @@ public sealed class StockChangeSetServiceTests
         Assert.Null(result.Applied);
         Assert.Empty(harness.ChangeSetStore.AuditFacts);
     }
+    [Fact]
+    public async Task A_batch_that_creates_the_same_Equivalent_Stock_twice_is_refused_rather_than_left_to_the_database()
+    {
+        var harness = CreateHarness();
+
+        var result = await ApplyAsync(harness,
+        [
+            new StockChangeRequest { Order = 1, Kind = StockMutationKind.Add, Reference = "Copper Nails", QuantityText = "4" },
+            new StockChangeRequest { Order = 2, Kind = StockMutationKind.Add, Reference = "Copper Nails", QuantityText = "5" },
+        ]);
+
+        // Both changes land on one Equivalent Stock key. Left to execution they would violate the
+        // uniqueness index mid-transaction; refusing here keeps the answer a plain "ask one at a time".
+        Assert.Equal(StockChangeSetResultKind.Invalid, result.Kind);
+        Assert.Equal("conflicting_changes", result.Code);
+        Assert.Null(await harness.ProposalStore.FindPendingAsync(Editor, Conversation, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task A_batch_that_renames_two_Stock_Entries_into_one_name_is_refused_for_the_same_reason()
+    {
+        var harness = CreateHarness();
+        Seed(harness, "Steel Bolts", "4");
+        Seed(harness, "Brass Rivets", "6", ShelfA);
+
+        var result = await ApplyAsync(harness,
+        [
+            new StockChangeRequest { Order = 1, Kind = StockMutationKind.Rename, Reference = "Steel Bolts", NewName = "Copper Pins" },
+            new StockChangeRequest { Order = 2, Kind = StockMutationKind.Rename, Reference = "Brass Rivets", NewName = "Copper Pins" },
+        ]);
+
+        // Different placements, so these two do not collide - the batch is proposed exactly.
+        Assert.Equal(StockChangeSetResultKind.ConfirmationRequired, result.Kind);
+    }
+
+    [Fact]
+    public async Task A_relocation_reports_where_the_Stock_came_from_and_where_it_went()
+    {
+        var harness = CreateHarness();
+        var source = Seed(harness, "Steel Bolts", "10");
+
+        var result = await ApplyAsync(harness, [MoveAll("Steel Bolts", "Shelf A")]);
+
+        var change = Assert.Single(result.Applied!.Changes);
+        Assert.Equal("placed", change.Effect);
+        Assert.Equal(source.Id.ToString(), change.Source.StockEntryId);
+
+        // The read-back must say where the Stock was and where it is now; reporting the destination as
+        // the origin would tell the Participant the move went the other way.
+        Assert.Null(change.Source.Location);
+        Assert.Equal("Shelf A", change.Destination!.Location);
+        Assert.Equal(source.Id.ToString(), change.Destination.StockEntryId);
+    }
 }

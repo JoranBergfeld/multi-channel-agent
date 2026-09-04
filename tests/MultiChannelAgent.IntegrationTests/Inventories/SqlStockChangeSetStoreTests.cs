@@ -400,6 +400,12 @@ public sealed class SqlStockChangeSetStoreTests : SqlIntegrationTestBase
         Assert.Equal(
             proposalId.Value,
             (await reader.StockChangeSetOperations.AsNoTracking().SingleAsync(o => o.OperationId == operationId.Value)).ProposalId);
+
+        // Consumed inside the mutation transaction, and still settled in the form the retention sweep
+        // compares on - a confirmed proposal must not outlive every other terminal status.
+        var consumed = await reader.ConfirmationProposals.AsNoTracking().SingleAsync(p => p.ProposalId == proposalId.Value);
+        Assert.Equal(Now, consumed.SettledAt);
+        Assert.Equal(Now.UtcTicks, consumed.SettledAtTicks);
     }
 
     [SkippableFact]

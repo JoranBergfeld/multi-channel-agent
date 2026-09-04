@@ -331,7 +331,10 @@ public sealed class StockChangeResolver(IStockStore stockStore, IInventoryRefere
             TransferredQuantity = plan.TransferredQuantity,
         };
 
-        if (plan.Effect == StockChangeEffectKind.Split)
+        // Split creates a Stock Entry at the destination, and Placed relocates this one into it. Both
+        // land on a placement that must still hold no Equivalent Stock, so both pin it - otherwise a
+        // competing writer who fills it turns a clean conflict into a uniqueness violation mid-write.
+        if (plan.Effect is StockChangeEffectKind.Split or StockChangeEffectKind.Placed)
         {
             var versions = await ReadVersionsAsync(inventoryId, [target.Id], cancellationToken);
             if (versions is null)
@@ -393,9 +396,24 @@ public sealed class StockChangeResolver(IStockStore stockStore, IInventoryRefere
             NewNormalizedName = newNormalizedName,
         };
 
-        var touched = colliding is null ? new[] { target.Id } : [target.Id, colliding.Id];
+        if (colliding is null)
+        {
+            // The entry keeps its identity and moves to a name that must still be free at this Unit
+            // and Location, so that key is pinned for exactly the same reason a Placed Move pins its
+            // destination.
+            var versions = await ReadVersionsAsync(inventoryId, [target.Id], cancellationToken);
 
-        return await VersionedAsync(inventoryId, change, touched, cancellationToken);
+            return versions is null
+                ? Conflict("state_changed")
+                : new StockChangeResolution(
+                    StockChangeResolutionKind.Resolved,
+                    "resolved",
+                    change,
+                    versions,
+                    new ExpectedEquivalentStockAbsence(newNormalizedName, target.UnitId, target.LocationId));
+        }
+
+        return await VersionedAsync(inventoryId, change, [target.Id, colliding.Id], cancellationToken);
     }
 
     private async Task<StockChangeResolution> ResolveForgetAsync(

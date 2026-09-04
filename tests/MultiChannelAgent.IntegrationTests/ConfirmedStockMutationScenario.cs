@@ -75,6 +75,11 @@ internal static class ConfirmedStockMutationScenario
         Assert.Equal(2, await CountAuditsAsync(factory, inventoryId, "StockMoved"));
         Assert.Equal(2, await CountChangeSetsAsync(factory, inventoryId));
 
+        // A confirmed proposal is settled inside the very transaction that applied it, and must be as
+        // sweepable as one that was rejected - otherwise the commonest terminal state is retained for
+        // the life of the database.
+        Assert.Equal(0, await CountUnsweepableSettledProposalsAsync(factory));
+
         // 6. The token is single use: presenting it again finds nothing pending.
         var reused = await OutcomeAsync(factory, owner, "native-confirm-2", $"confirm {mergeToken}");
         Assert.Equal("not_found", reused.GetProperty("category").GetString());
@@ -330,6 +335,20 @@ internal static class ConfirmedStockMutationScenario
         using var scope = factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<MultiChannelAgentDbContext>();
         return await db.StockChangeSetOperations.AsNoTracking().CountAsync(o => o.InventoryId == inventoryId);
+    }
+
+    /// <summary>
+    /// How many settled proposals the retention sweep could never see, because they carry no settle
+    /// instant in the form it compares on. Always zero: every terminal transition records both forms.
+    /// </summary>
+    private static async Task<int> CountUnsweepableSettledProposalsAsync(WebApplicationFactory<Program> factory)
+    {
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<MultiChannelAgentDbContext>();
+
+        return await db.ConfirmationProposals
+            .AsNoTracking()
+            .CountAsync(p => p.Status != nameof(ProposalStatus.Pending) && p.SettledAtTicks == null);
     }
 
     /// <summary>

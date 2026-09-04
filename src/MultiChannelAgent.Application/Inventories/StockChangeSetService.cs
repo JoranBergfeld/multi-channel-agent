@@ -135,6 +135,7 @@ public sealed class StockChangeSetService(
         var versions = new Dictionary<StockEntryId, ExpectedEntryVersion>();
         var absences = new List<ExpectedEquivalentStockAbsence>();
         var touched = new HashSet<StockEntryId>();
+        var claimedKeys = new HashSet<ExpectedEquivalentStockAbsence>();
 
         foreach (var request in requests.OrderBy(request => request.Order))
         {
@@ -158,6 +159,16 @@ public sealed class StockChangeSetService(
                 .ToHashSet();
 
             if (touchedByThisChange.Overlaps(touched))
+            {
+                return new StockChangeSetResult(StockChangeSetResultKind.Invalid, "conflicting_changes");
+            }
+
+            // Two changes can also collide without sharing a Stock Entry, by both landing on one
+            // Equivalent Stock key - two creates of the same name, or two Renames into it. Each was
+            // resolved against a state in which that key was free, so left to execution they would
+            // violate the uniqueness index halfway through a transaction. Refusing here answers the
+            // Participant plainly instead.
+            if (resolution.ExpectedAbsence is { } claimed && !claimedKeys.Add(claimed))
             {
                 return new StockChangeSetResult(StockChangeSetResultKind.Invalid, "conflicting_changes");
             }

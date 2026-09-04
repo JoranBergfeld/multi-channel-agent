@@ -413,4 +413,37 @@ public sealed class StockChangeResolverTests
         Assert.Equal("insufficient_quantity", resolution.Code);
         Assert.Null(resolution.Change);
     }
+    [Fact]
+    public async Task Relocating_a_Stock_Entry_pins_the_placement_it_expects_to_still_be_empty()
+    {
+        Seed("Steel Bolts", "10");
+
+        var resolution = await ResolveAsync(new StockChangeRequest
+        {
+            Order = 1,
+            Kind = StockMutationKind.Move,
+            Reference = "Steel Bolts",
+            MoveAll = true,
+            DestinationLocationReference = "Shelf A",
+        });
+
+        // The row moves into a placement that must still hold no Equivalent Stock when it lands, so
+        // a competing writer who fills it turns into a clean conflict rather than an index violation.
+        Assert.Equal(StockChangeEffectKind.Placed, resolution.Change!.Effect);
+        Assert.Equal(new ExpectedEquivalentStockAbsence("steel bolts", _each, _shelfA), resolution.ExpectedAbsence);
+    }
+
+    [Fact]
+    public async Task Renaming_pins_the_name_it_expects_to_still_be_free()
+    {
+        Seed("Steel Bolts", "4", _shelfA);
+
+        var resolution = await ResolveAsync(new StockChangeRequest
+        {
+            Order = 1, Kind = StockMutationKind.Rename, Reference = "Steel Bolts", NewName = "Brass Rivets",
+        });
+
+        Assert.Equal(StockChangeEffectKind.Renamed, resolution.Change!.Effect);
+        Assert.Equal(new ExpectedEquivalentStockAbsence("brass rivets", _each, _shelfA), resolution.ExpectedAbsence);
+    }
 }

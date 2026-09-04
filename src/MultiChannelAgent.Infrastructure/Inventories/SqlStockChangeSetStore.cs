@@ -76,7 +76,8 @@ public sealed class SqlStockChangeSetStore(MultiChannelAgentDbContext db) : ISto
                     .ExecuteUpdateAsync(
                         setters => setters
                             .SetProperty(p => p.Status, nameof(ProposalStatus.Confirmed))
-                            .SetProperty(p => p.SettledAt, command.Now),
+                            .SetProperty(p => p.SettledAt, command.Now)
+                            .SetProperty(p => p.SettledAtTicks, command.Now.UtcTicks),
                         cancellationToken);
 
                 if (consumed != 1)
@@ -224,7 +225,12 @@ public sealed class SqlStockChangeSetStore(MultiChannelAgentDbContext db) : ISto
                             .SetProperty(e => e.ConcurrencyStamp, Guid.NewGuid()),
                         cancellationToken);
 
-                return updated == 1 ? Effect(change, Recorded(destination, change.Source.StockEntryId), null) : null;
+                // Recorded as origin-then-destination, exactly as the proposal described it: the row
+                // keeps its identity, so both sides name it, and a read-back that put the destination
+                // in the source's place would tell the Participant the Move went the other way.
+                return updated == 1
+                    ? Effect(change, Recorded(change.Source), Recorded(destination, change.Source.StockEntryId))
+                    : null;
             }
 
             case StockChangeEffectKind.Split:

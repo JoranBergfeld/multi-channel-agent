@@ -127,7 +127,11 @@ public sealed class InMemoryStockChangeSetStore(InMemoryStockStore stockStore, I
                 var moved = stockStore.Relocate(
                     inventoryId, change.Source.StockEntryId!.Value, change.Destination!.LocationId, change.Destination.LocationName);
 
-                return Effect(change, Recorded(moved, change.Source.PreviousQuantity, retired: false), null);
+                // Origin, then destination - the same shape SqlStockChangeSetStore records.
+                return Effect(
+                    change,
+                    Recorded(change.Source),
+                    Recorded(moved, change.Source.PreviousQuantity, retired: false));
             }
 
             case StockChangeEffectKind.Split:
@@ -198,6 +202,16 @@ public sealed class InMemoryStockChangeSetStore(InMemoryStockStore stockStore, I
 
     private static RecordedEntryState Recorded(StockEntrySummary row, Quantity previousQuantity, bool retired) =>
         new(row.Id, row.Name, row.UnitCanonicalName, row.LocationName, previousQuantity, row.Quantity, retired);
+
+    /// <summary>The recorded form of one proposed state, for the sides an effect does not re-read.</summary>
+    private static RecordedEntryState Recorded(ProposedEntryState state) => new(
+        state.StockEntryId!.Value,
+        state.Name,
+        state.UnitCanonicalName,
+        state.LocationName,
+        state.PreviousQuantity,
+        state.ResultingQuantity,
+        state.Retired);
 
     private static RecordedEntryState RetiredSource(ProposedChange change) => new(
         change.Source.StockEntryId!.Value,
