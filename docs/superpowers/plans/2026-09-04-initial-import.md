@@ -2202,7 +2202,11 @@ public enum ImportExecutionOutcome
 /// identities, no SQL detail, and no file contents.
 /// </summary>
 public sealed record RecordedImport(
-    ImportOperationId OperationId, ImportProposalId ProposalId, FileDigest FileDigest, int CreatedEntryCount);
+    ImportOperationId OperationId,
+    ImportProposalId ProposalId,
+    ParticipantId ActorId,
+    FileDigest FileDigest,
+    int CreatedEntryCount);
 
 /// <summary>The store's answer; <see cref="Recorded"/> is present exactly when the outcome is not <see cref="ImportExecutionOutcome.Conflict"/>.</summary>
 public sealed record ImportExecutionResult(ImportExecutionOutcome Outcome, RecordedImport? Recorded);
