@@ -85,6 +85,8 @@ public sealed class InitialImportService(
     ImportReferenceResolver resolver,
     IImportProposalStore proposalStore)
 {
+    private const int MaxSuggestionEnrichedErrors = 10;
+
     public async Task<ImportEligibilityResult> ReadEligibilityAsync(
         ParticipantId participantId, InventoryId inventoryId, DateTimeOffset now, CancellationToken cancellationToken)
     {
@@ -154,7 +156,12 @@ public sealed class InitialImportService(
         // here and its Unit or Location is never even queried. A row's resolution never depends on any
         // other row's, so a reference error on one row is never a reason to withhold a resolved row
         // from Phase 4 - only its own line is unusable, not the file.
-        var resolution = await resolver.ResolveAsync(inventoryId, rows, ImportContract.MaxReportedErrors, cancellationToken);
+        // Every unknown remains an exact error, but only the first few distinct terms are enriched
+        // with catalog suggestions. The SQL catalog may need two ordered reads per term, so tying
+        // enrichment to the 500-error response cap would permit roughly 1,000 sequential round trips
+        // for one invalid upload. Ten enriched errors are enough to expose the correction pattern
+        // without making an already-invalid file expensive to diagnose.
+        var resolution = await resolver.ResolveAsync(inventoryId, rows, MaxSuggestionEnrichedErrors, cancellationToken);
 
         // Phase 4: equivalence and Notes, over whatever resolved. This runs even when Phase 2 or
         // Phase 3 already found errors elsewhere, because a merge error here (a Notes conflict, a

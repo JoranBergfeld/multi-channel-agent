@@ -270,6 +270,26 @@ public class InitialImportServiceTests
     }
 
     [Fact]
+    public async Task Suggestion_enrichment_is_limited_without_hiding_any_reportable_reference_error()
+    {
+        GrantMembership(MembershipRole.Editor);
+        _catalog.AddUnit(_inventoryId, "Known Unit", []);
+        var builder = new StringBuilder(Header).Append('\n');
+        for (var row = 0; row < ImportContract.MaxReportedErrors; row++)
+        {
+            builder.Append($"Stock {row},1,unknown-unit-{row},,\n");
+        }
+
+        var result = await ValidateAsync(builder.ToString());
+
+        Assert.Equal(ImportContract.MaxReportedErrors, result.Errors.Count);
+        Assert.Equal(0, result.OmittedErrorCount);
+        Assert.Equal(10, _catalog.SuggestionCount);
+        Assert.All(result.Errors.Take(10), error => Assert.Equal(["Known Unit"], error.Suggestions));
+        Assert.All(result.Errors.Skip(10), error => Assert.Empty(error.Suggestions));
+    }
+
+    [Fact]
     public async Task An_answer_never_carries_more_than_the_bounded_number_of_errors_and_says_how_many_it_omitted()
     {
         GrantMembership(MembershipRole.Editor);

@@ -43,11 +43,10 @@ public sealed record ImportResolutionResult(IReadOnlyList<ResolvedImportRow> Row
 ///
 /// Suggestions are bounded separately from resolution itself: <paramref name="suggestionBudget" />
 /// (see <see cref="ResolveAsync"/>) caps how many distinct unknown terms may ever query
-/// <see cref="IReferenceCatalogStore.SuggestAsync"/> in one call, because a caller can only ever act on
-/// <see cref="ImportContract.MaxReportedErrors"/> of them anyway. Identity resolution is never bounded
+/// <see cref="IReferenceCatalogStore.SuggestAsync"/> in one call. Identity resolution is never bounded
 /// by this budget - every row is still resolved and every unknown reference still becomes an exact
-/// error - only the catalog round trip behind its suggestions is skipped once the budget is spent, and
-/// such an error simply carries no suggestions.
+/// error - only the optional catalog round trip behind its suggestions is skipped once the budget is
+/// spent, and such an error simply carries no suggestions.
 /// </summary>
 public sealed class ImportReferenceResolver(IInventoryReferenceStore references, IReferenceCatalogStore catalog)
 {
