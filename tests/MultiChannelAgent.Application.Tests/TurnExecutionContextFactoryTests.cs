@@ -101,4 +101,41 @@ public class TurnExecutionContextFactoryTests
 
         Assert.Null(context.ActiveInventoryId);
     }
+    [Fact]
+    public async Task The_trusted_context_carries_the_Turns_own_confirmation_evidence()
+    {
+        var (factory, _, _) = CreateFactory();
+        var turn = ConfirmationTurn("confirm");
+
+        var context = await factory.CreateAsync(turn, Now, CancellationToken.None);
+
+        Assert.Equal(DirectConfirmationEvidence.Confirmed, context.Confirmation);
+        Assert.False(context.WasInterrupted);
+    }
+
+    [Fact]
+    public async Task An_interrupted_Turn_reaches_tool_dispatch_marked_as_such_and_confirming_nothing()
+    {
+        var (factory, _, _) = CreateFactory();
+        var turn = ConfirmationTurn("confirm", wasInterrupted: true);
+
+        var context = await factory.CreateAsync(turn, Now, CancellationToken.None);
+
+        Assert.Equal(DirectConfirmationEvidence.None, context.Confirmation);
+        Assert.True(context.WasInterrupted);
+    }
+
+    private static InboundTurn ConfirmationTurn(string contentText, bool wasInterrupted = false) =>
+        InboundTurn.Create(InboundTurnDraft.DirectText(
+            "native-confirm",
+            SomeParticipant,
+            "conversation-1",
+            "web",
+            ChannelPrincipal.EntraUser(SomeParticipant.Value.ToString(), "22222222-2222-2222-2222-222222222222"),
+            ChannelCapabilities.Text,
+            contentText,
+            locale: null,
+            Now,
+            traceId: null,
+            wasInterrupted));
 }
