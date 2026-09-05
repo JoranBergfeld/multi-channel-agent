@@ -8,6 +8,9 @@ namespace MultiChannelAgent.Application.Voice;
 /// </summary>
 public enum VoiceAdmissionDenialReason
 {
+    /// <summary>The voice feature is disabled; no store or gateway work was performed.</summary>
+    VoiceDisabled,
+
     /// <summary>The participant already has a Negotiating or Active session occupying a slot.</summary>
     AlreadyActive,
 

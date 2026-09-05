@@ -12,9 +12,16 @@ public sealed class FakeVoiceLiveGateway : IVoiceLiveGateway
     private readonly Lock gate = new();
     private readonly HashSet<string> activeSessions = [];
     private Exception? nextNegotiationFailure;
+    private int negotiationCount;
 
     /// <summary>SDP answer text returned by every successful negotiation.</summary>
     public string SdpAnswerTemplate { get; set; } = "v=0\r\no=fake-server 0 0 IN IP4 127.0.0.1\r\n";
+
+    /// <summary>Total number of <see cref="NegotiateAsync"/> invocations (including failures).</summary>
+    public int NegotiationCount { get { lock (gate) { return negotiationCount; } } }
+
+    /// <summary>Number of currently active (non-terminated) sessions.</summary>
+    public int ActiveSessionCount { get { lock (gate) { return activeSessions.Count; } } }
 
     /// <summary>
     /// When set, the next call to <see cref="NegotiateAsync"/> throws this exception and clears
@@ -31,6 +38,8 @@ public sealed class FakeVoiceLiveGateway : IVoiceLiveGateway
     {
         lock (gate)
         {
+            negotiationCount++;
+
             if (nextNegotiationFailure is not null)
             {
                 var failure = nextNegotiationFailure;
