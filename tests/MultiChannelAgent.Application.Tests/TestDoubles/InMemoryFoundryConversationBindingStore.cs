@@ -33,4 +33,31 @@ public sealed class InMemoryFoundryConversationBindingStore : IFoundryConversati
             return Task.FromResult(created);
         }
     }
+
+    /// <summary>
+    /// Starts a fresh Foundry conversation generation for this pair, exactly as the durable rotation
+    /// does, so an Application-layer test can prove what a reset does to work either side of it
+    /// without needing a database.
+    /// </summary>
+    public FoundryConversationBinding Rotate(
+        ParticipantId participantId, ChannelConversationId channelConversationId, DateTimeOffset now)
+    {
+        lock (_gate)
+        {
+            var key = (participantId, channelConversationId);
+            var current = _bindings.TryGetValue(key, out var existing)
+                ? existing
+                : FoundryConversationBinding.CreateFirstGeneration(participantId, channelConversationId, now);
+
+            var rotated = current with
+            {
+                FoundryConversationId = new FoundryConversationId(Guid.NewGuid()),
+                Generation = current.Generation + 1,
+                CreatedAt = now,
+            };
+
+            _bindings[key] = rotated;
+            return rotated;
+        }
+    }
 }

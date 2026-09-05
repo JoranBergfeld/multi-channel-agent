@@ -12,6 +12,13 @@ namespace MultiChannelAgent.Application.Turns;
 public sealed record InboxAcceptResult(InboundTurn Turn, bool WasAlreadyAccepted);
 
 /// <summary>
+/// The Foundry conversation identity a Turn was accepted under, read back for processing. Captured at
+/// acceptance rather than resolved when the Turn is finally claimed, so a conversation reset between
+/// those two moments can never move already-accepted work into the history the reset created.
+/// </summary>
+public sealed record CapturedConversationBinding(FoundryConversationId FoundryConversationId, int Generation);
+
+/// <summary>
 /// Durable inbound acceptance boundary (the "inbox"). Implementations must make acceptance
 /// idempotent by <see cref="InboundTurn.NativeMessageKey"/> - the native id together with the
 /// Participant and ChannelConversation scope that issued it, never the bare id - and make claimed
@@ -31,13 +38,22 @@ public interface IInboxStore
     Task<InboundTurn?> FindByTurnIdAsync(TurnId turnId, CancellationToken cancellationToken);
 
     /// <summary>
-    /// Atomically accepts <paramref name="turn"/> unless a Turn for the same
-    /// <see cref="InboundTurn.NativeMessageKey"/> is already durably accepted - including one accepted
-    /// by a concurrent caller racing this same call - in which case that existing Turn is returned
+    /// Atomically accepts <paramref name="turn"/> - stamped with the Foundry conversation generation
+    /// <paramref name="binding"/> it was accepted under - unless a Turn for the same
+    /// <see cref="InboundTurn.NativeMessageKey"/> is already durably accepted, including one accepted
+    /// by a concurrent caller racing this same call, in which case that existing Turn is returned
     /// with <see cref="InboxAcceptResult.WasAlreadyAccepted"/> set, never a store-specific duplicate
-    /// exception.
+    /// exception. The loser's binding is never written over the winner's: the conversation the
+    /// winning Turn was accepted under is the one it keeps.
     /// </summary>
-    Task<InboxAcceptResult> AcceptAsync(InboundTurn turn, CancellationToken cancellationToken);
+    Task<InboxAcceptResult> AcceptAsync(
+        InboundTurn turn, FoundryConversationBinding binding, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// The Foundry conversation this Turn was accepted under, or null for a Turn accepted before that
+    /// was captured. Never used for authorization - only to continue the right conversation.
+    /// </summary>
+    Task<CapturedConversationBinding?> FindCapturedBindingAsync(TurnId turnId, CancellationToken cancellationToken);
 
     /// <summary>
     /// Offers pending work in a shape that makes per-ChannelConversation FIFO impossible to break:

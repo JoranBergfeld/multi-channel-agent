@@ -11,8 +11,10 @@ public sealed record TurnAcceptanceResult(TurnId TurnId, bool WasAlreadyAccepted
 /// ChannelConversation scope, returns the originally recorded Turn identity instead of creating a
 /// duplicate, so retries never rerun processing once accepted. The same native id issued in a
 /// different scope is a different message and is accepted on its own.
+/// Acceptance is also where a Turn's Foundry conversation generation is decided and stamped on it, so
+/// a conversation reset can never retroactively move work that was already accepted.
 /// </summary>
-public sealed class TurnAcceptanceService(IInboxStore inboxStore)
+public sealed class TurnAcceptanceService(IInboxStore inboxStore, IFoundryConversationBindingStore bindingStore)
 {
     public async Task<TurnAcceptanceResult> AcceptAsync(
         SubmitTurnRequest request,
@@ -43,7 +45,14 @@ public sealed class TurnAcceptanceService(IInboxStore inboxStore)
             request.TraceId,
             request.WasInterrupted));
 
-        var accepted = await inboxStore.AcceptAsync(turn, cancellationToken);
+        // The conversation this Turn belongs to is decided here, at acceptance, and stamped on the
+        // Turn itself. Resolving it later - when the Turn is finally claimed - would let a "New
+        // conversation" in between silently move this already-accepted work into the fresh history,
+        // which is exactly what a reset must not do.
+        var binding = await bindingStore.GetOrCreateAsync(
+            request.ParticipantId, key.ChannelConversationId, receivedAt, cancellationToken);
+
+        var accepted = await inboxStore.AcceptAsync(turn, binding, cancellationToken);
 
         return new TurnAcceptanceResult(accepted.Turn.TurnId, accepted.WasAlreadyAccepted);
     }

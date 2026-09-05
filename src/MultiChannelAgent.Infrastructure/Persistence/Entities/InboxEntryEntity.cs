@@ -51,6 +51,16 @@ public sealed class InboxEntryEntity
     /// </summary>
     public bool WasInterrupted { get; set; }
 
+    /// <summary>
+    /// The Foundry conversation this Turn was accepted into, captured at acceptance. Nullable only
+    /// for Turns accepted before this was recorded; every acceptance since writes it, which is what
+    /// stops a conversation reset from moving already-accepted work into the new history.
+    /// </summary>
+    public Guid? FoundryConversationId { get; set; }
+
+    /// <summary>The generation of <see cref="FoundryConversationId"/> at the moment this Turn was accepted.</summary>
+    public int? FoundryConversationGeneration { get; set; }
+
     public DateTimeOffset ReceivedAt { get; set; }
 
     /// <summary>

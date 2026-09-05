@@ -56,7 +56,7 @@ public sealed class InboundTurnContractSqliteTests : IDisposable
 
         using (var writeDb = CreateContext())
         {
-            await new SqlInboxStore(writeDb).AcceptAsync(accepted, CancellationToken.None);
+            await new SqlInboxStore(writeDb).AcceptAsync(accepted, Binding(accepted), CancellationToken.None);
         }
 
         using var readDb = CreateContext();
@@ -95,7 +95,7 @@ public sealed class InboundTurnContractSqliteTests : IDisposable
 
         using var db = CreateContext();
         var store = new SqlInboxStore(db);
-        await store.AcceptAsync(turn, CancellationToken.None);
+        await store.AcceptAsync(turn, Binding(turn), CancellationToken.None);
 
         var claimed = Assert.Single(await store.ClaimPendingAsync(10, CancellationToken.None));
 
@@ -121,7 +121,7 @@ public sealed class InboundTurnContractSqliteTests : IDisposable
 
         using (var writeDb = CreateContext())
         {
-            await new SqlInboxStore(writeDb).AcceptAsync(turn, CancellationToken.None);
+            await new SqlInboxStore(writeDb).AcceptAsync(turn, Binding(turn), CancellationToken.None);
         }
 
         using (var deleteDb = CreateContext())
@@ -133,6 +133,14 @@ public sealed class InboundTurnContractSqliteTests : IDisposable
         using var verifyDb = CreateContext();
         Assert.Empty(await verifyDb.InboxContentParts.AsNoTracking().Where(p => p.TurnId == turn.TurnId.Value).ToListAsync());
     }
+
+    /// <summary>
+    /// The first-generation Foundry conversation binding a Turn is accepted under. What these tests
+    /// prove has nothing to do with which generation a Turn landed in, so the binding is derived from
+    /// the Turn itself and stated once.
+    /// </summary>
+    private static FoundryConversationBinding Binding(InboundTurn turn) =>
+        FoundryConversationBinding.CreateFirstGeneration(turn.ParticipantId, turn.ChannelConversationId, turn.ReceivedAt);
 
     private MultiChannelAgentDbContext CreateContext()
     {

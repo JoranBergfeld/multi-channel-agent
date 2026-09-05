@@ -88,7 +88,7 @@ public class TurnProcessingCoordinatorTests
         var authorizationService = new InventoryAuthorizationService(inventoryStore, auditStore);
         var selectionService = new InventorySelectionService(authorizationService, selectionStore, new InMemoryConfirmationProposalStore());
         var bindingStore = new InMemoryFoundryConversationBindingStore();
-        var executionContextFactory = new TurnExecutionContextFactory(bindingStore, selectionService);
+        var executionContextFactory = new TurnExecutionContextFactory(inbox, bindingStore, selectionService);
         var stockStore = new InMemoryStockStore();
         var referenceStore = new InMemoryInventoryReferenceStore();
         var proposalStore = new InMemoryConfirmationProposalStore();
@@ -116,6 +116,20 @@ public class TurnProcessingCoordinatorTests
             NullLogger<TurnProcessingCoordinator>.Instance);
 
         return (coordinator, inbox, outcomes, deliveries, resultStore, bindingStore);
+    }
+
+    /// <summary>
+    /// Accepts a Turn the way production does: into the Foundry conversation its (Participant,
+    /// ChannelConversation) pair currently holds, resolved from the very same binding store the
+    /// coordinator's execution context reads back through.
+    /// </summary>
+    private static async Task AcceptAsync(
+        InMemoryInboxStore inbox, InMemoryFoundryConversationBindingStore bindings, InboundTurn turn)
+    {
+        var binding = await bindings.GetOrCreateAsync(
+            turn.ParticipantId, turn.ChannelConversationId, turn.ReceivedAt, CancellationToken.None);
+
+        await inbox.AcceptAsync(turn, binding, CancellationToken.None);
     }
 
     [Fact]
@@ -345,22 +359,25 @@ public class TurnProcessingCoordinatorTests
         Assert.Equal(2, modelBoundary.InvocationCount);
     }
     // Every processed Turn belongs to a Foundry conversation - including one the model answers
-    // directly, with no tool call. Establishing the binding only on the tool path would leave a
-    // conversation's history split across generations depending on what its Turns happened to ask
-    // for, and would deny the model boundary the trusted conversation it must continue.
+    // directly, with no tool call. That conversation is now settled at acceptance, so what this
+    // proves is that the direct-answer path still carries it all the way to the model boundary:
+    // losing it there would deny the model the conversation it must continue, and would split a
+    // conversation's history by what its Turns happened to ask for.
     [Fact]
     public async Task A_directly_answered_turn_still_establishes_its_foundry_conversation_binding()
     {
         var timeProvider = new FakeTimeProvider(Now);
-        var (coordinator, inbox, _, _, _, bindings) = CreateCoordinator(timeProvider);
+        var capturing = new CapturingModelBoundary(new ScriptedModelBoundary());
+        var (coordinator, inbox, _, _, _, bindings) = CreateCoordinator(timeProvider, capturing);
         var turn = TestTurns.Text("native-1", SomeParticipant, "conversation-1", "hello", null, Now, null);
-        await inbox.AcceptAsync(turn, CancellationToken.None);
+        await AcceptAsync(inbox, bindings, turn);
 
         await coordinator.ProcessPendingAsync(CancellationToken.None);
 
         var binding = Assert.Single(bindings.Bindings);
         Assert.Equal(SomeParticipant, binding.ParticipantId);
         Assert.Equal(turn.ChannelConversationId, binding.ChannelConversationId);
+        Assert.Equal(binding.FoundryConversationId, Assert.Single(capturing.Invocations).Foundry);
     }
 
     [Fact]
@@ -369,12 +386,9 @@ public class TurnProcessingCoordinatorTests
         var timeProvider = new FakeTimeProvider(Now);
         var capturing = new CapturingModelBoundary(new ScriptedModelBoundary());
         var (coordinator, inbox, _, _, _, bindings) = CreateCoordinator(timeProvider, capturing);
-        await inbox.AcceptAsync(
-            TestTurns.Text("native-1", SomeParticipant, "conversation-1", "hello", null, Now, null), CancellationToken.None);
-        await inbox.AcceptAsync(
-            TestTurns.Text("native-2", SomeParticipant, "conversation-1", "hello again", null, Now, null), CancellationToken.None);
-        await inbox.AcceptAsync(
-            TestTurns.Text("native-3", SomeParticipant, "conversation-2", "hello there", null, Now, null), CancellationToken.None);
+        await AcceptAsync(inbox, bindings, TestTurns.Text("native-1", SomeParticipant, "conversation-1", "hello", null, Now, null));
+        await AcceptAsync(inbox, bindings, TestTurns.Text("native-2", SomeParticipant, "conversation-1", "hello again", null, Now, null));
+        await AcceptAsync(inbox, bindings, TestTurns.Text("native-3", SomeParticipant, "conversation-2", "hello there", null, Now, null));
 
         await coordinator.ProcessPendingAsync(CancellationToken.None);
 

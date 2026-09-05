@@ -13,9 +13,15 @@ public class TurnExecutionContextFactoryTests
     private static readonly InventoryId SomeInventory = new(Guid.Parse("22222222-2222-2222-2222-222222222222"));
     private static readonly DateTimeOffset Now = new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
 
-    private static (TurnExecutionContextFactory Factory, InMemoryInventoryStore InventoryStore, InMemoryActiveInventorySelectionStore SelectionStore)
+    private static (
+        TurnExecutionContextFactory Factory,
+        InMemoryInventoryStore InventoryStore,
+        InMemoryActiveInventorySelectionStore SelectionStore,
+        InMemoryInboxStore Inbox,
+        InMemoryFoundryConversationBindingStore Bindings)
         CreateFactory()
     {
+        var inboxStore = new InMemoryInboxStore();
         var inventoryStore = new InMemoryInventoryStore(_ => "Owner Name");
         var selectionStore = new InMemoryActiveInventorySelectionStore();
         var auditStore = new InMemoryInventoryAuthorizationAuditStore(selectionStore);
@@ -23,7 +29,7 @@ public class TurnExecutionContextFactoryTests
         var selectionService = new InventorySelectionService(authorizationService, selectionStore, new InMemoryConfirmationProposalStore());
         var bindingStore = new InMemoryFoundryConversationBindingStore();
 
-        return (new TurnExecutionContextFactory(bindingStore, selectionService), inventoryStore, selectionStore);
+        return (new TurnExecutionContextFactory(inboxStore, bindingStore, selectionService), inventoryStore, selectionStore, inboxStore, bindingStore);
     }
 
     private static InboundTurn Turn(string conversationId, string nativeMessageId = "native-1") =>
@@ -32,7 +38,7 @@ public class TurnExecutionContextFactoryTests
     [Fact]
     public async Task Assembles_a_context_carrying_the_turns_own_identity()
     {
-        var (factory, _, _) = CreateFactory();
+        var (factory, _, _, _, _) = CreateFactory();
         var turn = Turn("conversation-1");
 
         var context = await factory.CreateAsync(turn, Now, CancellationToken.None);
@@ -46,7 +52,7 @@ public class TurnExecutionContextFactoryTests
     [Fact]
     public async Task Reuses_the_same_foundry_conversation_across_turns_in_the_same_channel_conversation()
     {
-        var (factory, _, _) = CreateFactory();
+        var (factory, _, _, _, _) = CreateFactory();
 
         var first = await factory.CreateAsync(Turn("conversation-1", "native-1"), Now, CancellationToken.None);
         var second = await factory.CreateAsync(Turn("conversation-1", "native-2"), Now.AddMinutes(1), CancellationToken.None);
@@ -57,7 +63,7 @@ public class TurnExecutionContextFactoryTests
     [Fact]
     public async Task Assigns_a_distinct_foundry_conversation_for_a_different_channel_conversation()
     {
-        var (factory, _, _) = CreateFactory();
+        var (factory, _, _, _, _) = CreateFactory();
 
         var first = await factory.CreateAsync(Turn("conversation-1"), Now, CancellationToken.None);
         var second = await factory.CreateAsync(Turn("conversation-2"), Now, CancellationToken.None);
@@ -65,10 +71,43 @@ public class TurnExecutionContextFactoryTests
         Assert.NotEqual(first.FoundryConversationId, second.FoundryConversationId);
     }
 
+    // The conversation a Turn belongs to was settled when it was accepted. Resolving it again here
+    // would quietly drag work accepted before a reset into the history that reset created.
     [Fact]
-    public async Task With_no_active_inventory_selected_the_context_carries_none()
+    public async Task A_turn_is_processed_in_the_conversation_it_was_accepted_under_not_the_current_one()
     {
-        var (factory, _, _) = CreateFactory();
+        var (factory, _, _, inbox, bindings) = CreateFactory();
+        var turn = Turn("conversation-1");
+        var acceptedUnder = await bindings.GetOrCreateAsync(
+            SomeParticipant, turn.ChannelConversationId, Now, CancellationToken.None);
+        await inbox.AcceptAsync(turn, acceptedUnder, CancellationToken.None);
+
+        var rotated = bindings.Rotate(SomeParticipant, turn.ChannelConversationId, Now.AddMinutes(1));
+
+        var context = await factory.CreateAsync(turn, Now.AddMinutes(2), CancellationToken.None);
+
+        Assert.Equal(acceptedUnder.FoundryConversationId, context.FoundryConversationId);
+        Assert.Equal(acceptedUnder.Generation, context.FoundryConversationGeneration);
+        Assert.NotEqual(rotated.FoundryConversationId, context.FoundryConversationId);
+    }
+
+    // A Turn accepted before its binding was captured predates any reset by definition, so the
+    // conversation its ChannelConversation currently holds is the one it belongs to.
+    [Fact]
+    public async Task A_turn_accepted_before_bindings_were_captured_falls_back_to_the_current_one()
+    {
+        var (factory, _, _, _, bindings) = CreateFactory();
+
+        var context = await factory.CreateAsync(Turn("conversation-legacy"), Now, CancellationToken.None);
+
+        var binding = Assert.Single(bindings.Bindings);
+        Assert.Equal(binding.FoundryConversationId, context.FoundryConversationId);
+        Assert.Equal(binding.Generation, context.FoundryConversationGeneration);
+    }
+
+    [Fact]
+    public async Task With_no_active_inventory_selected_the_context_carries_none()    {
+        var (factory, _, _, _, _) = CreateFactory();
 
         var context = await factory.CreateAsync(Turn("conversation-1"), Now, CancellationToken.None);
 
@@ -78,7 +117,7 @@ public class TurnExecutionContextFactoryTests
     [Fact]
     public async Task Reflects_the_currently_authorized_active_inventory_selection()
     {
-        var (factory, inventoryStore, selectionStore) = CreateFactory();
+        var (factory, inventoryStore, selectionStore, _, _) = CreateFactory();
         inventoryStore.GrantMembership(SomeInventory, SomeParticipant, MembershipRole.Viewer, Now);
         await selectionStore.UpsertAsync(new ActiveInventorySelection(SomeParticipant, "conversation-1", SomeInventory, Now), CancellationToken.None);
 
@@ -92,7 +131,7 @@ public class TurnExecutionContextFactoryTests
     [Fact]
     public async Task An_active_selection_whose_membership_was_since_revoked_is_not_reflected()
     {
-        var (factory, inventoryStore, selectionStore) = CreateFactory();
+        var (factory, inventoryStore, selectionStore, _, _) = CreateFactory();
         inventoryStore.GrantMembership(SomeInventory, SomeParticipant, MembershipRole.Viewer, Now);
         await selectionStore.UpsertAsync(new ActiveInventorySelection(SomeParticipant, "conversation-1", SomeInventory, Now), CancellationToken.None);
         inventoryStore.RevokeMembership(SomeInventory, SomeParticipant);
@@ -104,7 +143,7 @@ public class TurnExecutionContextFactoryTests
     [Fact]
     public async Task The_trusted_context_carries_the_Turns_own_confirmation_evidence()
     {
-        var (factory, _, _) = CreateFactory();
+        var (factory, _, _, _, _) = CreateFactory();
         var turn = ConfirmationTurn("confirm");
 
         var context = await factory.CreateAsync(turn, Now, CancellationToken.None);
@@ -116,7 +155,7 @@ public class TurnExecutionContextFactoryTests
     [Fact]
     public async Task An_interrupted_Turn_reaches_tool_dispatch_marked_as_such_and_confirming_nothing()
     {
-        var (factory, _, _) = CreateFactory();
+        var (factory, _, _, _, _) = CreateFactory();
         var turn = ConfirmationTurn("confirm", wasInterrupted: true);
 
         var context = await factory.CreateAsync(turn, Now, CancellationToken.None);
