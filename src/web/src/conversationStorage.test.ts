@@ -35,6 +35,20 @@ describe('readInFlightTurn', () => {
     expect(readInFlightTurn(CONVERSATION)).toBeNull()
   })
 
+  it('returns null for well-formed JSON with all three valid fields plus an unexpected extra field', () => {
+    localStorage.setItem(
+      rawKeyFor(CONVERSATION),
+      JSON.stringify({
+        nativeMessageId: 'native-1',
+        contentText: 'list stock',
+        turnId: 'turn-1',
+        secret: 'confirmation-token-should-never-be-here',
+      }),
+    )
+
+    expect(readInFlightTurn(CONVERSATION)).toBeNull()
+  })
+
   it('keeps records for different conversations isolated', () => {
     rememberSubmission(CONVERSATION, { nativeMessageId: 'native-1', contentText: 'list stock' })
 
@@ -67,7 +81,7 @@ describe('rememberTurnId', () => {
   it('updates the existing record with the turn id once the HTTP response arrives', () => {
     rememberSubmission(CONVERSATION, { nativeMessageId: 'native-1', contentText: 'list stock' })
 
-    rememberTurnId(CONVERSATION, 'turn-1')
+    rememberTurnId(CONVERSATION, 'native-1', 'turn-1')
 
     expect(readInFlightTurn(CONVERSATION)).toEqual({
       nativeMessageId: 'native-1',
@@ -76,8 +90,21 @@ describe('rememberTurnId', () => {
     })
   })
 
+  it('keeps the newer submission untouched when a turn id arrives for an older, already-superseded submission', () => {
+    rememberSubmission(CONVERSATION, { nativeMessageId: 'native-A', contentText: 'list stock' })
+    rememberSubmission(CONVERSATION, { nativeMessageId: 'native-B', contentText: 'find bolts' })
+
+    rememberTurnId(CONVERSATION, 'native-A', 'turn-A')
+
+    expect(readInFlightTurn(CONVERSATION)).toEqual({
+      nativeMessageId: 'native-B',
+      contentText: 'find bolts',
+      turnId: null,
+    })
+  })
+
   it('does not silently create a record when there is no existing submission', () => {
-    rememberTurnId(CONVERSATION, 'turn-1')
+    rememberTurnId(CONVERSATION, 'native-1', 'turn-1')
 
     expect(readInFlightTurn(CONVERSATION)).toBeNull()
   })
@@ -86,7 +113,7 @@ describe('rememberTurnId', () => {
 describe('clearInFlightTurn', () => {
   it('removes the record for the conversation', () => {
     rememberSubmission(CONVERSATION, { nativeMessageId: 'native-1', contentText: 'list stock' })
-    rememberTurnId(CONVERSATION, 'turn-1')
+    rememberTurnId(CONVERSATION, 'native-1', 'turn-1')
 
     clearInFlightTurn(CONVERSATION)
 

@@ -8088,115 +8088,159 @@ git commit -m "feat: add the typed resumable per-Turn stream client"
 Create `src/web/src/conversationStorage.test.ts`:
 
 ```ts
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest'
+
 import {
   clearInFlightTurn,
   readInFlightTurn,
   rememberSubmission,
   rememberTurnId,
   subscribeToConversationChanges,
-} from './conversationStorage';
+} from './conversationStorage'
 
-const CONVERSATION = 'web-conversation-1';
+const CONVERSATION = 'web-conversation-1'
+const OTHER_CONVERSATION = 'web-conversation-2'
 
-describe('conversation continuity storage', () => {
-  it('remembers nothing until a Turn is submitted', () => {
-    expect(readInFlightTurn(CONVERSATION)).toBeNull();
-  });
+/** The literal storage key layout, kept independent of the module's own (private) prefix constant
+ * so a test that pokes raw `localStorage` proves the real on-disk shape rather than whatever the
+ * module happens to compute internally. */
+function rawKeyFor(webConversationId: string): string {
+  return `mca.conversation.${webConversationId}`
+}
 
-  it('remembers the native message id before the submission is answered', () => {
-    rememberSubmission(CONVERSATION, { nativeMessageId: 'native-1', contentText: 'list stock' });
+describe('readInFlightTurn', () => {
+  it('returns null when no record has ever been stored for the conversation', () => {
+    expect(readInFlightTurn(CONVERSATION)).toBeNull()
+  })
+
+  it('returns null and does not throw for a corrupt, non-JSON value', () => {
+    localStorage.setItem(rawKeyFor(CONVERSATION), 'not-json{')
+
+    expect(readInFlightTurn(CONVERSATION)).toBeNull()
+  })
+
+  it('returns null for well-formed JSON that is the wrong shape', () => {
+    localStorage.setItem(rawKeyFor(CONVERSATION), JSON.stringify({ turnId: 42 }))
+
+    expect(readInFlightTurn(CONVERSATION)).toBeNull()
+  })
+
+  it('returns null for well-formed JSON with all three valid fields plus an unexpected extra field', () => {
+    localStorage.setItem(
+      rawKeyFor(CONVERSATION),
+      JSON.stringify({
+        nativeMessageId: 'native-1',
+        contentText: 'list stock',
+        turnId: 'turn-1',
+        secret: 'confirmation-token-should-never-be-here',
+      }),
+    )
+
+    expect(readInFlightTurn(CONVERSATION)).toBeNull()
+  })
+
+  it('keeps records for different conversations isolated', () => {
+    rememberSubmission(CONVERSATION, { nativeMessageId: 'native-1', contentText: 'list stock' })
+
+    expect(readInFlightTurn(OTHER_CONVERSATION)).toBeNull()
+  })
+})
+
+describe('rememberSubmission', () => {
+  it('stores the native message id and content text with turnId null before any HTTP response arrives', () => {
+    rememberSubmission(CONVERSATION, { nativeMessageId: 'native-1', contentText: 'list stock' })
 
     expect(readInFlightTurn(CONVERSATION)).toEqual({
       nativeMessageId: 'native-1',
       contentText: 'list stock',
       turnId: null,
-    });
-  });
+    })
+  })
 
-  it('remembers the Turn id once the server hands one back', () => {
-    rememberSubmission(CONVERSATION, { nativeMessageId: 'native-1', contentText: 'list stock' });
-    rememberTurnId(CONVERSATION, 'turn-1');
+  it('serializes exactly contentText, nativeMessageId, and turnId - never an answer, payload, or token', () => {
+    rememberSubmission(CONVERSATION, { nativeMessageId: 'native-1', contentText: 'list stock' })
 
-    expect(readInFlightTurn(CONVERSATION)?.turnId).toBe('turn-1');
-  });
+    const raw = localStorage.getItem(rawKeyFor(CONVERSATION))
+    expect(raw).not.toBeNull()
+    const parsed = JSON.parse(raw!) as Record<string, unknown>
+    expect(Object.keys(parsed).sort()).toEqual(['contentText', 'nativeMessageId', 'turnId'])
+  })
+})
 
-  it('never silently creates a record from a Turn id alone', () => {
-    rememberTurnId(CONVERSATION, 'turn-1');
+describe('rememberTurnId', () => {
+  it('updates the existing record with the turn id once the HTTP response arrives', () => {
+    rememberSubmission(CONVERSATION, { nativeMessageId: 'native-1', contentText: 'list stock' })
 
-    expect(readInFlightTurn(CONVERSATION)).toBeNull();
-  });
+    rememberTurnId(CONVERSATION, 'native-1', 'turn-1')
 
-  it('never stores the answer, because a proposal payload carries a short-lived secret', () => {
-    rememberSubmission(CONVERSATION, { nativeMessageId: 'native-1', contentText: 'forget stock Steel Bolts' });
-    rememberTurnId(CONVERSATION, 'turn-1');
+    expect(readInFlightTurn(CONVERSATION)).toEqual({
+      nativeMessageId: 'native-1',
+      contentText: 'list stock',
+      turnId: 'turn-1',
+    })
+  })
 
-    const stored = window.localStorage.getItem(`mca.conversation.${CONVERSATION}`)!;
+  it('keeps the newer submission untouched when a turn id arrives for an older, already-superseded submission', () => {
+    rememberSubmission(CONVERSATION, { nativeMessageId: 'native-A', contentText: 'list stock' })
+    rememberSubmission(CONVERSATION, { nativeMessageId: 'native-B', contentText: 'find bolts' })
 
-    expect(Object.keys(JSON.parse(stored)).sort()).toEqual(['contentText', 'nativeMessageId', 'turnId']);
-  });
+    rememberTurnId(CONVERSATION, 'native-A', 'turn-A')
 
-  it('keeps each browser conversation separate', () => {
-    rememberSubmission(CONVERSATION, { nativeMessageId: 'native-1', contentText: 'list stock' });
+    expect(readInFlightTurn(CONVERSATION)).toEqual({
+      nativeMessageId: 'native-B',
+      contentText: 'find bolts',
+      turnId: null,
+    })
+  })
 
-    expect(readInFlightTurn('web-conversation-2')).toBeNull();
-  });
+  it('does not silently create a record when there is no existing submission', () => {
+    rememberTurnId(CONVERSATION, 'native-1', 'turn-1')
 
-  it('forgets the in-flight Turn once it is finished', () => {
-    rememberSubmission(CONVERSATION, { nativeMessageId: 'native-1', contentText: 'list stock' });
-    rememberTurnId(CONVERSATION, 'turn-1');
+    expect(readInFlightTurn(CONVERSATION)).toBeNull()
+  })
+})
 
-    clearInFlightTurn(CONVERSATION);
+describe('clearInFlightTurn', () => {
+  it('removes the record for the conversation', () => {
+    rememberSubmission(CONVERSATION, { nativeMessageId: 'native-1', contentText: 'list stock' })
+    rememberTurnId(CONVERSATION, 'native-1', 'turn-1')
 
-    expect(readInFlightTurn(CONVERSATION)).toBeNull();
-  });
+    clearInFlightTurn(CONVERSATION)
 
-  it('ignores a corrupted record rather than failing the whole page', () => {
-    window.localStorage.setItem(`mca.conversation.${CONVERSATION}`, 'not json');
+    expect(readInFlightTurn(CONVERSATION)).toBeNull()
+  })
+})
 
-    expect(readInFlightTurn(CONVERSATION)).toBeNull();
-  });
+describe('subscribeToConversationChanges', () => {
+  it('invokes the callback for a storage event carrying exactly this conversation key', () => {
+    const onChanged = vi.fn()
+    subscribeToConversationChanges(CONVERSATION, onChanged)
 
-  it('ignores a record that is well-formed JSON but not the shape this application writes', () => {
-    window.localStorage.setItem(`mca.conversation.${CONVERSATION}`, JSON.stringify({ turnId: 42 }));
+    window.dispatchEvent(new StorageEvent('storage', { key: rawKeyFor(CONVERSATION) }))
 
-    expect(readInFlightTurn(CONVERSATION)).toBeNull();
-  });
+    expect(onChanged).toHaveBeenCalledTimes(1)
+  })
 
-  it('notifies other tabs when this conversation changes', () => {
-    const onChanged = vi.fn();
-    const unsubscribe = subscribeToConversationChanges(CONVERSATION, onChanged);
+  it('ignores storage events for another conversation and for unrelated keys', () => {
+    const onChanged = vi.fn()
+    subscribeToConversationChanges(CONVERSATION, onChanged)
 
-    window.dispatchEvent(
-      new StorageEvent('storage', { key: `mca.conversation.${CONVERSATION}`, newValue: null }),
-    );
+    window.dispatchEvent(new StorageEvent('storage', { key: rawKeyFor(OTHER_CONVERSATION) }))
+    window.dispatchEvent(new StorageEvent('storage', { key: 'unrelated.key' }))
 
-    expect(onChanged).toHaveBeenCalledTimes(1);
-    unsubscribe();
-  });
+    expect(onChanged).not.toHaveBeenCalled()
+  })
 
-  it('ignores changes to a different conversation or to unrelated storage', () => {
-    const onChanged = vi.fn();
-    const unsubscribe = subscribeToConversationChanges(CONVERSATION, onChanged);
+  it('stops delivering notifications once unsubscribed', () => {
+    const onChanged = vi.fn()
+    const unsubscribe = subscribeToConversationChanges(CONVERSATION, onChanged)
 
-    window.dispatchEvent(new StorageEvent('storage', { key: 'mca.conversation.other', newValue: null }));
-    window.dispatchEvent(new StorageEvent('storage', { key: 'something.else', newValue: null }));
+    unsubscribe()
+    window.dispatchEvent(new StorageEvent('storage', { key: rawKeyFor(CONVERSATION) }))
 
-    expect(onChanged).not.toHaveBeenCalled();
-    unsubscribe();
-  });
-
-  it('stops notifying once the subscription is dropped', () => {
-    const onChanged = vi.fn();
-    subscribeToConversationChanges(CONVERSATION, onChanged)();
-
-    window.dispatchEvent(
-      new StorageEvent('storage', { key: `mca.conversation.${CONVERSATION}`, newValue: null }),
-    );
-
-    expect(onChanged).not.toHaveBeenCalled();
-  });
-});
+    expect(onChanged).not.toHaveBeenCalled()
+  })
+})
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
@@ -8210,121 +8254,128 @@ Create `src/web/src/conversationStorage.ts`:
 
 ```ts
 /**
- * Continuity for one browser profile's conversation, across refreshes, restarts, and tabs.
+ * Persists one browser profile's single in-flight Turn for one web conversation, so a page
+ * refresh, a crashed tab, or a second tab open on the same browser profile can find - and resume
+ * watching - whatever Turn is still outstanding. Scoped under `localStorage` deliberately: that
+ * scope matches the lifetime and reach of the long-lived, HttpOnly `WebConversationCookie` this
+ * record is keyed against, so the two always agree on which browser profile they describe.
  *
- * What is stored here is deliberately tiny and deliberately not secret: the native message id of the
- * one Turn that has not finished yet, the text it was submitted with, and its Turn id once the server
- * hands one back. Authentication stays entirely server-side in the HttpOnly cookies it already lives
- * in, and the answer is never stored at all - a proposal payload carries a plaintext single-use
- * confirmation token, and `turnsApi` is explicit that it must not be persisted separately. It does
- * not need to be: reconnecting the Turn's stream replays it from the server.
- *
- * `localStorage` is the right home rather than `sessionStorage` because its scope - one origin, one
- * browser profile - is exactly the scope of the 400-day web conversation cookie this keys off. Its
- * `storage` event fires in every OTHER tab of that profile, which is why no second cross-tab
- * mechanism is needed: the one API required for persistence already provides the notification.
+ * This is a resumption breadcrumb, not a cache of the conversation itself - it never stores an
+ * answer, a payload, an auth token, or any other secret or confirmation-bearing value. Only the
+ * three fields below are ever written or read back.
  */
 
-const KEY_PREFIX = 'mca.conversation.';
+const KEY_PREFIX = 'mca.conversation.'
 
+/** One browser profile's outstanding Turn for a single web conversation. */
 export interface InFlightTurn {
-  /** The idempotency key this submission was made with. Resubmitting it can only ever converge on one Turn. */
-  nativeMessageId: string;
-  contentText: string;
-  /** Null while the submission's response has not been seen - a dropped connection, a closed lid. */
-  turnId: string | null;
+  nativeMessageId: string
+  contentText: string
+  turnId: string | null
 }
 
-function keyFor(webConversationId: string) {
-  return `${KEY_PREFIX}${webConversationId}`;
+function keyFor(webConversationId: string): string {
+  return `${KEY_PREFIX}${webConversationId}`
 }
 
+/** Runtime type guard: rejects anything that is not exactly the three-field shape above - no fewer
+ * and no more - so a corrupted or foreign value read back from storage is treated as absent rather
+ * than trusted. Rejecting rather than normalizing away extra keys matters here: it guarantees an
+ * unknown or secret field can never be re-persisted by a later write that spreads the record read
+ * back in (e.g. `rememberTurnId`), because that write never sees the record at all. */
 function isInFlightTurn(value: unknown): value is InFlightTurn {
   if (typeof value !== 'object' || value === null) {
-    return false;
+    return false
   }
 
-  const candidate = value as Record<string, unknown>;
+  const record = value as Record<string, unknown>
 
   return (
-    typeof candidate.nativeMessageId === 'string' &&
-    typeof candidate.contentText === 'string' &&
-    (candidate.turnId === null || typeof candidate.turnId === 'string')
-  );
+    Object.keys(record).length === 3 &&
+    typeof record.nativeMessageId === 'string' &&
+    typeof record.contentText === 'string' &&
+    (record.turnId === null || typeof record.turnId === 'string')
+  )
 }
 
-/**
- * The unfinished Turn this browser profile last submitted, or null. Anything that is not exactly the
- * shape this module writes - corrupted, tampered with, or written by an older revision - is treated
- * as if nothing had been stored, so a bad record can never break the page it is meant to restore.
- */
+/** Reads the in-flight Turn for a conversation, or null if there is none - including when the
+ * stored value is corrupt (not JSON) or well-formed JSON of the wrong shape. Never throws. */
 export function readInFlightTurn(webConversationId: string): InFlightTurn | null {
-  const stored = window.localStorage.getItem(keyFor(webConversationId));
-  if (stored === null) {
-    return null;
+  const raw = localStorage.getItem(keyFor(webConversationId))
+
+  if (raw === null) {
+    return null
   }
+
+  let parsed: unknown
 
   try {
-    const parsed: unknown = JSON.parse(stored);
-    return isInFlightTurn(parsed) ? parsed : null;
+    parsed = JSON.parse(raw)
   } catch {
-    return null;
+    return null
   }
+
+  return isInFlightTurn(parsed) ? parsed : null
 }
 
-/**
- * Records a submission BEFORE it is sent. That order is the point: if the response never arrives, the
- * next page load still knows the native message id, and resubmitting that same id is answered from
- * the recorded Turn rather than doing the work a second time.
- */
+/** Records a just-submitted message as the conversation's in-flight Turn, overwriting whatever
+ * was there before. `turnId` is always null here: it is filled in later, by `rememberTurnId`, once
+ * the HTTP response naming the Turn actually arrives. */
 export function rememberSubmission(
   webConversationId: string,
   submission: { nativeMessageId: string; contentText: string },
-) {
-  const record: InFlightTurn = { ...submission, turnId: null };
-  window.localStorage.setItem(keyFor(webConversationId), JSON.stringify(record));
+): void {
+  const record: InFlightTurn = { ...submission, turnId: null }
+  localStorage.setItem(keyFor(webConversationId), JSON.stringify(record))
 }
 
-/** Records the stable Turn identity the server assigned, so a later load can reconnect its stream instead of resubmitting. */
-export function rememberTurnId(webConversationId: string, turnId: string) {
-  const existing = readInFlightTurn(webConversationId);
-  if (existing === null) {
-    return;
+/** Fills in the Turn id on an existing in-flight record once the HTTP response names it. Requires
+ * the `nativeMessageId` that response belongs to, and does nothing unless a valid existing record
+ * is stored AND its `nativeMessageId` equals the one supplied here - it never silently creates a
+ * record from just a turn id (missing the `nativeMessageId`/`contentText` a resumed UI needs), and
+ * it never lets a response for a submission that has since been superseded overwrite whatever the
+ * browser profile submitted next. Without that check, a stale response arriving after a second
+ * submission - in this tab or another tab of the same browser profile - would stamp its turn id
+ * onto the newer, unrelated record. */
+export function rememberTurnId(webConversationId: string, nativeMessageId: string, turnId: string): void {
+  const existing = readInFlightTurn(webConversationId)
+
+  if (existing === null || existing.nativeMessageId !== nativeMessageId) {
+    return
   }
 
-  window.localStorage.setItem(keyFor(webConversationId), JSON.stringify({ ...existing, turnId }));
+  const record: InFlightTurn = { ...existing, turnId }
+  localStorage.setItem(keyFor(webConversationId), JSON.stringify(record))
 }
 
-/** Forgets the in-flight Turn. Called once it has reached a terminal Outcome, and on New conversation. */
-export function clearInFlightTurn(webConversationId: string) {
-  window.localStorage.removeItem(keyFor(webConversationId));
+/** Removes the in-flight Turn record for a conversation, e.g. once its outcome has been
+ * delivered and there is nothing left to resume. */
+export function clearInFlightTurn(webConversationId: string): void {
+  localStorage.removeItem(keyFor(webConversationId))
 }
 
-/**
- * Notifies this tab when another tab of the same browser profile changes this conversation - submits
- * a Turn, or starts a new conversation. The `storage` event fires only in other tabs by
- * specification, which is exactly the semantics wanted: a tab never needs to be told about its own
- * write.
- */
+/** Notifies `onChanged` whenever another tab on the same browser profile changes this exact
+ * conversation's in-flight Turn record (the browser's `storage` event only ever fires in other
+ * tabs, never the one that made the change). Returns an unsubscribe function. */
 export function subscribeToConversationChanges(webConversationId: string, onChanged: () => void): () => void {
-  const key = keyFor(webConversationId);
+  const key = keyFor(webConversationId)
 
   const listener = (event: StorageEvent) => {
     if (event.key === key) {
-      onChanged();
+      onChanged()
     }
-  };
+  }
 
-  window.addEventListener('storage', listener);
+  window.addEventListener('storage', listener)
 
-  return () => window.removeEventListener('storage', listener);
+  return () => window.removeEventListener('storage', listener)
 }
 ```
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `cd src/web && npm test`
-Expected: PASS, all 12 tests from Step 1 (which includes a hardening case proving `rememberTurnId` never silently creates a record when there is no existing submission to update).
+Expected: PASS, all 14 tests from Step 1 (which includes a hardening case proving `rememberTurnId` never silently creates a record when there is no existing submission to update, a case proving a stale response for a superseded submission never overwrites the submission that replaced it, and a case proving a record with a valid shape plus an unexpected extra field is rejected outright rather than partly trusted).
 
 - [ ] **Step 5: Commit**
 
@@ -9102,7 +9153,7 @@ describe('TurnTracer', () => {
   it('reconnects to a Turn it had already submitted, without submitting anything again', async () => {
     const fetchMock = stubFetch(() => acceptedResponse('turn-should-not-happen'));
     rememberSubmission(CONVERSATION, { nativeMessageId: 'native-1', contentText: 'list stock' });
-    rememberTurnId(CONVERSATION, 'turn-resumed');
+    rememberTurnId(CONVERSATION, 'native-1', 'turn-resumed');
 
     const { opened, factory } = recordingEventStreamFactory();
     renderTracer(factory);
@@ -9155,7 +9206,7 @@ describe('TurnTracer', () => {
     expect(opened).toHaveLength(0);
 
     rememberSubmission(CONVERSATION, { nativeMessageId: 'native-other-tab', contentText: 'list stock' });
-    rememberTurnId(CONVERSATION, 'turn-other-tab');
+    rememberTurnId(CONVERSATION, 'native-other-tab', 'turn-other-tab');
     window.dispatchEvent(
       new StorageEvent('storage', { key: `mca.conversation.${CONVERSATION}`, newValue: 'changed' }),
     );
@@ -9452,7 +9503,7 @@ function TurnTracer({ csrfToken, webConversationId, onTerminalOutcome, createSou
         return;
       }
 
-      rememberTurnId(webConversationId, result.acceptance.turnId);
+      rememberTurnId(webConversationId, stored.nativeMessageId, result.acceptance.turnId);
       watchTurn(result.acceptance.turnId);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -9515,7 +9566,7 @@ function TurnTracer({ csrfToken, webConversationId, onTerminalOutcome, createSou
         return;
       }
 
-      rememberTurnId(webConversationId, result.acceptance.turnId);
+      rememberTurnId(webConversationId, nativeMessageId, result.acceptance.turnId);
       watchTurn(result.acceptance.turnId);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -9917,7 +9968,7 @@ describe('App', () => {
     // Something this browser profile was already waiting on. If the reset left it behind, the remounted
     // conversation would immediately reconnect - or re-POST - work from the conversation just ended.
     rememberSubmission('web-conversation-1', { nativeMessageId: 'native-old', contentText: 'list stock' });
-    rememberTurnId('web-conversation-1', 'turn-old');
+    rememberTurnId('web-conversation-1', 'native-old', 'turn-old');
 
     render(<App />);
     await screen.findByRole('banner');
@@ -10320,7 +10371,7 @@ export default App;
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `cd src/web && npm test`
-Expected: PASS. The whole web suite - roughly 60 tests across seven files - is green.
+Expected: PASS. The whole web suite - roughly 62 tests across seven files - is green.
 
 - [ ] **Step 5: Check types, lint, and build**
 

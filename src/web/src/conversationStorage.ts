@@ -23,8 +23,11 @@ function keyFor(webConversationId: string): string {
   return `${KEY_PREFIX}${webConversationId}`
 }
 
-/** Runtime type guard: rejects anything that is not exactly the three-field shape above, so a
- * corrupted or foreign value read back from storage is treated as absent rather than trusted. */
+/** Runtime type guard: rejects anything that is not exactly the three-field shape above - no fewer
+ * and no more - so a corrupted or foreign value read back from storage is treated as absent rather
+ * than trusted. Rejecting rather than normalizing away extra keys matters here: it guarantees an
+ * unknown or secret field can never be re-persisted by a later write that spreads the record read
+ * back in (e.g. `rememberTurnId`), because that write never sees the record at all. */
 function isInFlightTurn(value: unknown): value is InFlightTurn {
   if (typeof value !== 'object' || value === null) {
     return false
@@ -33,6 +36,7 @@ function isInFlightTurn(value: unknown): value is InFlightTurn {
   const record = value as Record<string, unknown>
 
   return (
+    Object.keys(record).length === 3 &&
     typeof record.nativeMessageId === 'string' &&
     typeof record.contentText === 'string' &&
     (record.turnId === null || typeof record.turnId === 'string')
@@ -70,13 +74,18 @@ export function rememberSubmission(
   localStorage.setItem(keyFor(webConversationId), JSON.stringify(record))
 }
 
-/** Fills in the Turn id on an existing in-flight record once the HTTP response names it. Does
- * nothing if there is no valid existing record - it never silently creates one from just a turn
- * id, which would be missing the `nativeMessageId`/`contentText` a resumed UI needs. */
-export function rememberTurnId(webConversationId: string, turnId: string): void {
+/** Fills in the Turn id on an existing in-flight record once the HTTP response names it. Requires
+ * the `nativeMessageId` that response belongs to, and does nothing unless a valid existing record
+ * is stored AND its `nativeMessageId` equals the one supplied here - it never silently creates a
+ * record from just a turn id (missing the `nativeMessageId`/`contentText` a resumed UI needs), and
+ * it never lets a response for a submission that has since been superseded overwrite whatever the
+ * browser profile submitted next. Without that check, a stale response arriving after a second
+ * submission - in this tab or another tab of the same browser profile - would stamp its turn id
+ * onto the newer, unrelated record. */
+export function rememberTurnId(webConversationId: string, nativeMessageId: string, turnId: string): void {
   const existing = readInFlightTurn(webConversationId)
 
-  if (existing === null) {
+  if (existing === null || existing.nativeMessageId !== nativeMessageId) {
     return
   }
 
