@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
@@ -144,16 +145,77 @@ public sealed class SharedBrowserProfileScenario : IAsyncLifetime
         using var timeout = new CancellationTokenSource(ReadTimeout);
 
         using var firstConnection = await participant.OpenTurnStreamAsync(turnId, cancellationToken: timeout.Token);
+        Assert.Equal(HttpStatusCode.OK, firstConnection.StatusCode);
+        Assert.Equal("text/event-stream", firstConnection.Content.Headers.ContentType!.MediaType);
         await using var firstReader = await ServerSentEventReader.OpenAsync(firstConnection, timeout.Token);
         var firstEvents = await firstReader.ReadAsync(5, timeout.Token);
+        Assert.Equal(5, firstEvents.Count);
+        Assert.Equal(
+            ["accepted", "processing", "part", "part", "outcome"],
+            firstEvents.Select(e => e.Name));
 
         using var secondConnection = await participant.OpenTurnStreamAsync(turnId, cancellationToken: timeout.Token);
+        Assert.Equal(HttpStatusCode.OK, secondConnection.StatusCode);
+        Assert.Equal("text/event-stream", secondConnection.Content.Headers.ContentType!.MediaType);
         await using var secondReader = await ServerSentEventReader.OpenAsync(secondConnection, timeout.Token);
         var secondEvents = await secondReader.ReadAsync(5, timeout.Token);
+        Assert.Equal(5, secondEvents.Count);
+        Assert.Equal(
+            ["accepted", "processing", "part", "part", "outcome"],
+            secondEvents.Select(e => e.Name));
 
         Assert.Equal(
             firstEvents.Select(e => (e.Id, e.Name, e.Data)),
             secondEvents.Select(e => (e.Id, e.Name, e.Data)));
+    }
+
+    [Fact]
+    public async Task Browser_restart_cookie_is_secure_httponly_and_persists_for_about_400_days()
+    {
+        var http = ConversationTestClient.CreateHttpsClient(_factory);
+        var observedAt = DateTimeOffset.UtcNow;
+        string? setCookieHeader = null;
+
+        await ConversationTestClient.SignInAsync(
+            http,
+            "Restarting Participant",
+            bootstrapResponse =>
+            {
+                setCookieHeader = bootstrapResponse.Headers
+                    .GetValues("Set-Cookie")
+                    .Single(header => header.StartsWith("mca_web_conversation=", StringComparison.OrdinalIgnoreCase));
+            });
+
+        Assert.NotNull(setCookieHeader);
+        var attributes = setCookieHeader.Split(';', StringSplitOptions.TrimEntries).Skip(1).ToArray();
+        Assert.Contains(attributes, attribute => attribute.Equals("HttpOnly", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(attributes, attribute => attribute.Equals("Secure", StringComparison.OrdinalIgnoreCase));
+
+        var maxAgeValue = CookieAttributeValue(attributes, "Max-Age");
+        var expiresValue = CookieAttributeValue(attributes, "Expires");
+        TimeSpan? persistence = null;
+
+        if (maxAgeValue is not null)
+        {
+            Assert.True(
+                long.TryParse(maxAgeValue, NumberStyles.Integer, CultureInfo.InvariantCulture, out var maxAgeSeconds),
+                $"The Max-Age cookie attribute was not an integer: {maxAgeValue}");
+            persistence = TimeSpan.FromSeconds(maxAgeSeconds);
+        }
+        else if (expiresValue is not null)
+        {
+            Assert.True(
+                DateTimeOffset.TryParse(
+                    expiresValue,
+                    CultureInfo.InvariantCulture,
+                    DateTimeStyles.AllowWhiteSpaces | DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal,
+                    out var expiresAt),
+                $"The Expires cookie attribute was not an HTTP date: {expiresValue}");
+            persistence = expiresAt - observedAt;
+        }
+
+        Assert.True(persistence.HasValue, "The web conversation cookie must have an Expires or Max-Age attribute.");
+        Assert.InRange(persistence.GetValueOrDefault().TotalDays, 390, 410);
     }
 
     [Fact]
@@ -227,5 +289,19 @@ public sealed class SharedBrowserProfileScenario : IAsyncLifetime
                 return;
             }
         }
+    }
+
+    private static string? CookieAttributeValue(IEnumerable<string> attributes, string name)
+    {
+        foreach (var attribute in attributes)
+        {
+            var separator = attribute.IndexOf('=');
+            if (separator > 0 && attribute[..separator].Equals(name, StringComparison.OrdinalIgnoreCase))
+            {
+                return attribute[(separator + 1)..];
+            }
+        }
+
+        return null;
     }
 }

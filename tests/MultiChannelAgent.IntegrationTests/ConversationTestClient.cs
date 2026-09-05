@@ -36,7 +36,10 @@ public sealed class ConversationTestClient
         });
 
     /// <summary>Signs a fresh Participant in and bootstraps their session, yielding a ready client.</summary>
-    public static async Task<ConversationTestClient> SignInAsync(HttpClient client, string displayName)
+    public static async Task<ConversationTestClient> SignInAsync(
+        HttpClient client,
+        string displayName,
+        Action<HttpResponseMessage>? inspectBootstrapResponse = null)
     {
         var participant = new ConversationTestClient(client, new CookieJar());
 
@@ -53,7 +56,10 @@ public sealed class ConversationTestClient
         });
         Assert.Equal(HttpStatusCode.OK, signInResponse.StatusCode);
 
-        var bootstrapResponse = await participant.SendAsync(new HttpRequestMessage(HttpMethod.Get, "/api/session/bootstrap"));
+        var bootstrapResponse = await participant.SendAsync(
+            new HttpRequestMessage(HttpMethod.Get, "/api/session/bootstrap"),
+            withCsrf: false,
+            beforeCookieCapture: inspectBootstrapResponse);
         Assert.Equal(HttpStatusCode.OK, bootstrapResponse.StatusCode);
 
         var body = await bootstrapResponse.Content.ReadFromJsonAsync<JsonElement>();
@@ -104,7 +110,13 @@ public sealed class ConversationTestClient
     public async Task<HttpResponseMessage> StartNewConversationAsync() =>
         await SendAsync(new HttpRequestMessage(HttpMethod.Post, "/api/conversation/new"), withCsrf: true);
 
-    public async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, bool withCsrf = false)
+    public Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, bool withCsrf = false) =>
+        SendAsync(request, withCsrf, beforeCookieCapture: null);
+
+    private async Task<HttpResponseMessage> SendAsync(
+        HttpRequestMessage request,
+        bool withCsrf,
+        Action<HttpResponseMessage>? beforeCookieCapture)
     {
         _jar.Apply(request);
         if (withCsrf)
@@ -113,6 +125,7 @@ public sealed class ConversationTestClient
         }
 
         var response = await _client.SendAsync(request);
+        beforeCookieCapture?.Invoke(response);
         _jar.Capture(response);
         return response;
     }
