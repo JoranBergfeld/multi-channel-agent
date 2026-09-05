@@ -62,16 +62,15 @@ public sealed class VoiceAdmissionService(
         }
 
         // 6. Activate with ControlSessionId and persist.
-        session.Activate(negotiation.ControlSessionId, timeProvider.GetUtcNow());
-
         bool activated;
         try
         {
+            session.Activate(negotiation.ControlSessionId, timeProvider.GetUtcNow());
             activated = await store.UpdateAsync(session, VoiceSessionStatus.Negotiating, ct);
         }
         catch (Exception ex)
         {
-            // 7. Activation persist threw — terminate gateway, release reservation.
+            // 7. Activation domain or persistence failure — terminate gateway, release reservation.
             await CleanupAfterActivationFailureAsync(session, negotiation.ControlSessionId, ex);
             throw; // Unreachable — cleanup always throws.
         }

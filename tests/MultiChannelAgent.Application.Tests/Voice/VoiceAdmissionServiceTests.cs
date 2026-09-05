@@ -140,6 +140,30 @@ public sealed class VoiceAdmissionServiceTests
         Assert.True(retry.Admitted);
     }
 
+    // ── Activation domain failure ────────────────────────────────────────────
+
+    [Fact]
+    public async Task Activation_domain_failure_terminates_provider_session_and_releases_reservation()
+    {
+        var observableGateway = new BlankControlIdGateway();
+        var svc = new VoiceAdmissionService(
+            _store, observableGateway, EnabledOptions(), _time, OwnerInstance);
+
+        // Activate rejects blank ControlSessionId — original exception preserved.
+        var ex = await Assert.ThrowsAsync<ArgumentException>(
+            () => svc.AdmitAsync(Alice, Conv1, SomeOffer, CancellationToken.None));
+        Assert.Contains("Control session ID", ex.Message);
+
+        // Provider session was cleaned up with the exact identifier returned by NegotiateAsync.
+        Assert.True(observableGateway.TerminationRequested);
+        Assert.Equal("", observableGateway.TerminatedControlSessionId);
+
+        // Reservation was released — same participant can retry with a working gateway.
+        var retrySvc = CreateService();
+        var retry = await retrySvc.AdmitAsync(Alice, Conv1, SomeOffer, CancellationToken.None);
+        Assert.True(retry.Admitted);
+    }
+
     // ── Cancellation ─────────────────────────────────────────────────────────
 
     [Fact]
@@ -296,5 +320,31 @@ public sealed class VoiceAdmissionServiceTests
 
         public Task<IReadOnlyList<VoiceSession>> FindByOwnerInstanceAsync(string ownerInstanceId, CancellationToken ct) =>
             inner.FindByOwnerInstanceAsync(ownerInstanceId, ct);
+    }
+
+    /// <summary>
+    /// Observable gateway that returns a successful negotiation with a blank ControlSessionId,
+    /// triggering an <see cref="VoiceSession.Activate"/> domain validation failure. Records
+    /// whether <see cref="TerminateAsync"/> was called and the exact identifier it received.
+    /// </summary>
+    private sealed class BlankControlIdGateway : IVoiceLiveGateway
+    {
+        public bool TerminationRequested { get; private set; }
+        public string? TerminatedControlSessionId { get; private set; }
+
+        public Task<VoiceLiveNegotiationResult> NegotiateAsync(
+            VoiceLiveNegotiationRequest request, CancellationToken cancellationToken)
+        {
+            return Task.FromResult(new VoiceLiveNegotiationResult("", "v=0\r\no=answer\r\n"));
+        }
+
+        public Task TerminateAsync(string controlSessionId, CancellationToken cancellationToken)
+        {
+            TerminationRequested = true;
+            TerminatedControlSessionId = controlSessionId;
+            return Task.CompletedTask;
+        }
+
+        public bool OwnsSession(string controlSessionId) => false;
     }
 }
