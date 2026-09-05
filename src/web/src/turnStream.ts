@@ -13,6 +13,14 @@ export const TURN_EVENT_SEQUENCE = {
   outcome: 1_000_000,
 } as const
 
+/**
+ * The numeric value of the browser's `EventSource.readyState` once a connection has permanently
+ * failed. Written as a literal rather than read off the global `EventSource` constructor so this
+ * module never depends on that global being defined - a fake source in tests supplies the same
+ * number without needing to exist as a real constructor.
+ */
+const EVENT_SOURCE_CLOSED = 2
+
 export interface TurnAcceptedEvent {
   turnId: string
   receivedAt: string
@@ -52,6 +60,13 @@ export interface TurnStreamHandlers {
    * only ever uses this to reflect connection state, never to react by reconnecting itself.
    */
   onDisconnected?: () => void
+  /**
+   * Called once the connection has failed permanently - the browser has set `readyState` to
+   * `CLOSED` and given up reconnecting on its own (a 401/403/404 response, or a response that is
+   * not `text/event-stream`, all end this way). Unlike `onDisconnected`, the stream is over: a
+   * caller needs to surface this rather than silently keep waiting for events that will never come.
+   */
+  onFailed?: () => void
 }
 
 /** The minimal shape of the browser's `EventSource` this client depends on. */
@@ -59,6 +74,8 @@ export interface EventStreamSource {
   addEventListener(type: string, listener: (event: MessageEvent<string>) => void): void
   close(): void
   onerror: ((event: Event) => void) | null
+  /** 0 (`CONNECTING`), 1 (`OPEN`), or 2 (`CLOSED`) - mirrors the real `EventSource.readyState`. */
+  readonly readyState: number
 }
 
 export type EventStreamFactory = (url: string) => EventStreamSource
@@ -97,12 +114,16 @@ export function openTurnStream(options: OpenTurnStreamOptions): TurnStream {
   const url = seen > 0 ? `/api/turns/${turnId}/events?lastEventId=${seen}` : `/api/turns/${turnId}/events`
   const source = factory(url)
 
-  // Only a finite identity greater than what is already recorded ever moves the resume point -
-  // an out-of-order or unparseable id (which should never happen against this server, but a
-  // client should not trust the wire blindly) simply leaves it where it was.
+  // Only a safe-integer identity greater than what is already recorded ever moves the resume
+  // point - an out-of-order, non-numeric, non-integer, or unsafely-large id (which should never
+  // happen against this server, but a client should not trust the wire blindly) simply leaves it
+  // where it was. `Number.isSafeInteger` rejects non-integers (a fractional id makes no sense for
+  // a monotonic counter) and anything beyond `MAX_SAFE_INTEGER`, where `Number` can no longer tell
+  // adjacent integers apart - accepting one of those could silently corrupt the resume point with
+  // a value neither this id nor any real one the server ever issued.
   function observe(rawId: string): void {
     const id = Number(rawId)
-    if (Number.isFinite(id) && id > seen) {
+    if (Number.isSafeInteger(id) && id > seen) {
       seen = id
     }
   }
@@ -116,14 +137,17 @@ export function openTurnStream(options: OpenTurnStreamOptions): TurnStream {
       }
 
       observe(event.lastEventId)
-      handler?.(JSON.parse(event.data) as T)
 
       if (terminal) {
-        // The terminal outcome is the last event this stream will ever carry - closing here is
-        // what stops the browser's EventSource from reconnecting to a Turn with nothing left to say.
+        // Closed before the payload is parsed or the handler is invoked, not after: the terminal
+        // event is this stream's last regardless of whether `JSON.parse` throws on a malformed
+        // payload or the handler itself throws, and closing here is what stops the browser's
+        // EventSource from reconnecting to a Turn with nothing left to say.
         closed = true
         source.close()
       }
+
+      handler?.(JSON.parse(event.data) as T)
     })
   }
 
@@ -134,6 +158,16 @@ export function openTurnStream(options: OpenTurnStreamOptions): TurnStream {
 
   source.onerror = () => {
     if (closed) {
+      return
+    }
+
+    if (source.readyState === EVENT_SOURCE_CLOSED) {
+      // The browser has already given up - permanently, not just for this attempt - so the stream
+      // really is over. Closing here is idempotent (the browser put it in this state already) but
+      // guarantees the caller-visible `closed` flag agrees with reality regardless.
+      closed = true
+      source.close()
+      handlers.onFailed?.()
       return
     }
 

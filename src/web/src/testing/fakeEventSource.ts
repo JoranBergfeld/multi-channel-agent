@@ -12,6 +12,12 @@ export class FakeEventSource {
   readonly url: string
   closed = false
   onerror: ((event: Event) => void) | null = null
+  /**
+   * Mirrors the real `EventSource.readyState`: 0 (`CONNECTING`), 1 (`OPEN`), or 2 (`CLOSED`). Starts
+   * `OPEN`, since a test drives a source that has already connected rather than modelling the
+   * initial handshake.
+   */
+  readyState = 1
 
   private readonly listeners = new Map<string, Set<SseListener>>()
 
@@ -35,6 +41,7 @@ export class FakeEventSource {
 
   close(): void {
     this.closed = true
+    this.readyState = 2
   }
 
   /**
@@ -48,11 +55,23 @@ export class FakeEventSource {
   }
 
   /**
-   * Simulates the underlying connection failing - exactly how a real `EventSource` reports one:
-   * through `onerror`, never by throwing. Does not close the stream by itself, since a real
-   * `EventSource` reconnects on its own after a transient error unless the server ends the stream.
+   * Simulates a transient connection failure - exactly how a real `EventSource` reports one while
+   * it silently reconnects on its own: `readyState` drops to `CONNECTING` (0) and `onerror` fires,
+   * but the stream is not over. Does not close the stream by itself, since a real `EventSource`
+   * reconnects on its own after a transient error unless the server ends the stream.
    */
   fail(): void {
+    this.readyState = 0
+    this.onerror?.(new Event('error'))
+  }
+
+  /**
+   * Simulates a permanent connection failure - a 401/403/404 response, or one that isn't
+   * `text/event-stream` - after which a real `EventSource` sets `readyState` to `CLOSED` (2) and
+   * never reconnects, while still reporting the failure through `onerror` rather than throwing.
+   */
+  failFatally(): void {
+    this.readyState = 2
     this.onerror?.(new Event('error'))
   }
 }

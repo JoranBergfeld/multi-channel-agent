@@ -7502,6 +7502,12 @@ export class FakeEventSource {
   readonly url: string
   closed = false
   onerror: ((event: Event) => void) | null = null
+  /**
+   * Mirrors the real `EventSource.readyState`: 0 (`CONNECTING`), 1 (`OPEN`), or 2 (`CLOSED`). Starts
+   * `OPEN`, since a test drives a source that has already connected rather than modelling the
+   * initial handshake.
+   */
+  readyState = 1
 
   private readonly listeners = new Map<string, Set<SseListener>>()
 
@@ -7525,6 +7531,7 @@ export class FakeEventSource {
 
   close(): void {
     this.closed = true
+    this.readyState = 2
   }
 
   /**
@@ -7538,11 +7545,23 @@ export class FakeEventSource {
   }
 
   /**
-   * Simulates the underlying connection failing - exactly how a real `EventSource` reports one:
-   * through `onerror`, never by throwing. Does not close the stream by itself, since a real
-   * `EventSource` reconnects on its own after a transient error unless the server ends the stream.
+   * Simulates a transient connection failure - exactly how a real `EventSource` reports one while
+   * it silently reconnects on its own: `readyState` drops to `CONNECTING` (0) and `onerror` fires,
+   * but the stream is not over. Does not close the stream by itself, since a real `EventSource`
+   * reconnects on its own after a transient error unless the server ends the stream.
    */
   fail(): void {
+    this.readyState = 0
+    this.onerror?.(new Event('error'))
+  }
+
+  /**
+   * Simulates a permanent connection failure - a 401/403/404 response, or one that isn't
+   * `text/event-stream` - after which a real `EventSource` sets `readyState` to `CLOSED` (2) and
+   * never reconnects, while still reporting the failure through `onerror` rather than throwing.
+   */
+  failFatally(): void {
+    this.readyState = 2
     this.onerror?.(new Event('error'))
   }
 }
@@ -7758,14 +7777,69 @@ describe('openTurnStream', () => {
   it('reports a connection failure through onDisconnected exactly once without closing, so the browser can reconnect on its own', () => {
     const { opened, factory } = recordingEventStreamFactory()
     const onDisconnected = vi.fn()
+    const onFailed = vi.fn()
 
-    openTurnStream({ turnId: 'turn-1', factory, handlers: { onDisconnected } })
+    openTurnStream({ turnId: 'turn-1', factory, handlers: { onDisconnected, onFailed } })
 
     const source = opened[0]!
     source.fail()
 
     expect(onDisconnected).toHaveBeenCalledTimes(1)
+    expect(onFailed).not.toHaveBeenCalled()
     expect(source.closed).toBe(false)
+  })
+
+  it('reports a permanent connection failure through onFailed exactly once, closing the source and suppressing onDisconnected', () => {
+    const { opened, factory } = recordingEventStreamFactory()
+    const onDisconnected = vi.fn()
+    const onFailed = vi.fn()
+
+    openTurnStream({ turnId: 'turn-1', factory, handlers: { onDisconnected, onFailed } })
+
+    const source = opened[0]!
+    source.failFatally()
+
+    expect(onFailed).toHaveBeenCalledTimes(1)
+    expect(onDisconnected).not.toHaveBeenCalled()
+    expect(source.closed).toBe(true)
+  })
+
+  it('closes the source before invoking the terminal handler, so a throwing onOutcome still leaves the stream closed', () => {
+    const { opened, factory } = recordingEventStreamFactory()
+    const boom = new Error('boom')
+    const onOutcome = vi.fn(() => {
+      throw boom
+    })
+
+    openTurnStream({ turnId: 'turn-1', factory, handlers: { onOutcome } })
+
+    const source = opened[0]!
+
+    expect(() =>
+      source.emit(
+        'outcome',
+        { turnId: 'turn-1', status: 'succeeded', category: 'completed', code: 'ok', summary: '', deliveries: [] },
+        String(TURN_EVENT_SEQUENCE.outcome),
+      ),
+    ).toThrow(boom)
+
+    expect(source.closed).toBe(true)
+  })
+
+  it('rejects a stale, non-numeric, non-integer, or unsafe-integer event id, never regressing or corrupting lastEventId()', () => {
+    const { opened, factory } = recordingEventStreamFactory()
+
+    const stream = openTurnStream({ turnId: 'turn-1', factory })
+    const source = opened[0]!
+
+    source.emit('part', { turnId: 'turn-1', order: 1, kind: 'text', text: 'seed', payload: null }, '100')
+    expect(stream.lastEventId()).toBe(100)
+
+    const rejectedIds = ['2', 'not-a-number', '2.5', String(Number.MAX_SAFE_INTEGER + 2)]
+    for (const rawId of rejectedIds) {
+      source.emit('part', { turnId: 'turn-1', order: 2, kind: 'text', text: 'noise', payload: null }, rawId)
+      expect(stream.lastEventId()).toBe(100)
+    }
   })
 
   it('suppresses events observed after the caller closes the stream, and closes the underlying source', () => {
@@ -7811,6 +7885,14 @@ export const TURN_EVENT_SEQUENCE = {
   outcome: 1_000_000,
 } as const
 
+/**
+ * The numeric value of the browser's `EventSource.readyState` once a connection has permanently
+ * failed. Written as a literal rather than read off the global `EventSource` constructor so this
+ * module never depends on that global being defined - a fake source in tests supplies the same
+ * number without needing to exist as a real constructor.
+ */
+const EVENT_SOURCE_CLOSED = 2
+
 export interface TurnAcceptedEvent {
   turnId: string
   receivedAt: string
@@ -7850,6 +7932,13 @@ export interface TurnStreamHandlers {
    * only ever uses this to reflect connection state, never to react by reconnecting itself.
    */
   onDisconnected?: () => void
+  /**
+   * Called once the connection has failed permanently - the browser has set `readyState` to
+   * `CLOSED` and given up reconnecting on its own (a 401/403/404 response, or a response that is
+   * not `text/event-stream`, all end this way). Unlike `onDisconnected`, the stream is over: a
+   * caller needs to surface this rather than silently keep waiting for events that will never come.
+   */
+  onFailed?: () => void
 }
 
 /** The minimal shape of the browser's `EventSource` this client depends on. */
@@ -7857,6 +7946,8 @@ export interface EventStreamSource {
   addEventListener(type: string, listener: (event: MessageEvent<string>) => void): void
   close(): void
   onerror: ((event: Event) => void) | null
+  /** 0 (`CONNECTING`), 1 (`OPEN`), or 2 (`CLOSED`) - mirrors the real `EventSource.readyState`. */
+  readonly readyState: number
 }
 
 export type EventStreamFactory = (url: string) => EventStreamSource
@@ -7895,12 +7986,16 @@ export function openTurnStream(options: OpenTurnStreamOptions): TurnStream {
   const url = seen > 0 ? `/api/turns/${turnId}/events?lastEventId=${seen}` : `/api/turns/${turnId}/events`
   const source = factory(url)
 
-  // Only a finite identity greater than what is already recorded ever moves the resume point -
-  // an out-of-order or unparseable id (which should never happen against this server, but a
-  // client should not trust the wire blindly) simply leaves it where it was.
+  // Only a safe-integer identity greater than what is already recorded ever moves the resume
+  // point - an out-of-order, non-numeric, non-integer, or unsafely-large id (which should never
+  // happen against this server, but a client should not trust the wire blindly) simply leaves it
+  // where it was. `Number.isSafeInteger` rejects non-integers (a fractional id makes no sense for
+  // a monotonic counter) and anything beyond `MAX_SAFE_INTEGER`, where `Number` can no longer tell
+  // adjacent integers apart - accepting one of those could silently corrupt the resume point with
+  // a value neither this id nor any real one the server ever issued.
   function observe(rawId: string): void {
     const id = Number(rawId)
-    if (Number.isFinite(id) && id > seen) {
+    if (Number.isSafeInteger(id) && id > seen) {
       seen = id
     }
   }
@@ -7914,14 +8009,17 @@ export function openTurnStream(options: OpenTurnStreamOptions): TurnStream {
       }
 
       observe(event.lastEventId)
-      handler?.(JSON.parse(event.data) as T)
 
       if (terminal) {
-        // The terminal outcome is the last event this stream will ever carry - closing here is
-        // what stops the browser's EventSource from reconnecting to a Turn with nothing left to say.
+        // Closed before the payload is parsed or the handler is invoked, not after: the terminal
+        // event is this stream's last regardless of whether `JSON.parse` throws on a malformed
+        // payload or the handler itself throws, and closing here is what stops the browser's
+        // EventSource from reconnecting to a Turn with nothing left to say.
         closed = true
         source.close()
       }
+
+      handler?.(JSON.parse(event.data) as T)
     })
   }
 
@@ -7932,6 +8030,16 @@ export function openTurnStream(options: OpenTurnStreamOptions): TurnStream {
 
   source.onerror = () => {
     if (closed) {
+      return
+    }
+
+    if (source.readyState === EVENT_SOURCE_CLOSED) {
+      // The browser has already given up - permanently, not just for this attempt - so the stream
+      // really is over. Closing here is idempotent (the browser put it in this state already) but
+      // guarantees the caller-visible `closed` flag agrees with reality regardless.
+      closed = true
+      source.close()
+      handlers.onFailed?.()
       return
     }
 
@@ -7953,7 +8061,7 @@ export function openTurnStream(options: OpenTurnStreamOptions): TurnStream {
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `cd src/web && npm test`
-Expected: PASS, 10 tests (3 existing plus 7 for `openTurnStream`).
+Expected: PASS, 13 tests (3 existing plus 10 for `openTurnStream`).
 
 - [ ] **Step 5: Check types and lint**
 
@@ -9271,6 +9379,14 @@ function TurnTracer({ csrfToken, webConversationId, onTerminalOutcome, createSou
             clearInFlightTurn(webConversationId);
             onTerminalOutcome();
           },
+          onFailed: () => {
+            // The connection is permanently gone (a 401/403/404, or a response that was never an
+            // event stream at all) rather than the transient drop the browser recovers from on its
+            // own - the same error state every other failure in this component already renders, so
+            // there is nothing new to build, only this one more way of reaching it.
+            setError('Lost the connection to this Turn and cannot resume it automatically. Refresh to try again.');
+            setProgress('idle');
+          },
         },
         factory: createSource,
       });
@@ -10179,7 +10295,7 @@ export default App;
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `cd src/web && npm test`
-Expected: PASS. The whole web suite - roughly 55 tests across seven files - is green.
+Expected: PASS. The whole web suite - roughly 58 tests across seven files - is green.
 
 - [ ] **Step 5: Check types, lint, and build**
 
