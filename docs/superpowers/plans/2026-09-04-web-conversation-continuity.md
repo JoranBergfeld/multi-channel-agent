@@ -9889,6 +9889,14 @@ function stubApi(overrides: Record<string, () => Response> = {}) {
       return Promise.resolve(json({ rows: [], nextCursor: null, hasMore: false }));
     }
 
+    if (url.includes('/units')) {
+      return Promise.resolve(json({ units: [], nextCursor: null, hasMore: false }));
+    }
+
+    if (url.includes('/locations')) {
+      return Promise.resolve(json({ locations: [], nextCursor: null, hasMore: false }));
+    }
+
     return Promise.resolve(json({}));
   });
 
