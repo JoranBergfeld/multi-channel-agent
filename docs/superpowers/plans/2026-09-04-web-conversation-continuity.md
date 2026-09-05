@@ -8093,6 +8093,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 import {
   clearInFlightTurn,
+  clearInFlightTurnIfMatches,
   readInFlightTurn,
   rememberSubmission,
   rememberTurnId,
@@ -8101,34 +8102,36 @@ import {
 
 const CONVERSATION = 'web-conversation-1'
 const OTHER_CONVERSATION = 'web-conversation-2'
+const PARTICIPANT = 'participant-1'
+const OTHER_PARTICIPANT = 'participant-2'
 
 /** The literal storage key layout, kept independent of the module's own (private) prefix constant
  * so a test that pokes raw `localStorage` proves the real on-disk shape rather than whatever the
  * module happens to compute internally. */
-function rawKeyFor(webConversationId: string): string {
-  return `mca.conversation.${webConversationId}`
+function rawKeyFor(webConversationId: string, participantId: string): string {
+  return `mca.conversation.${webConversationId}.${participantId}`
 }
 
 describe('readInFlightTurn', () => {
   it('returns null when no record has ever been stored for the conversation', () => {
-    expect(readInFlightTurn(CONVERSATION)).toBeNull()
+    expect(readInFlightTurn(CONVERSATION, PARTICIPANT)).toBeNull()
   })
 
   it('returns null and does not throw for a corrupt, non-JSON value', () => {
-    localStorage.setItem(rawKeyFor(CONVERSATION), 'not-json{')
+    localStorage.setItem(rawKeyFor(CONVERSATION, PARTICIPANT), 'not-json{')
 
-    expect(readInFlightTurn(CONVERSATION)).toBeNull()
+    expect(readInFlightTurn(CONVERSATION, PARTICIPANT)).toBeNull()
   })
 
   it('returns null for well-formed JSON that is the wrong shape', () => {
-    localStorage.setItem(rawKeyFor(CONVERSATION), JSON.stringify({ turnId: 42 }))
+    localStorage.setItem(rawKeyFor(CONVERSATION, PARTICIPANT), JSON.stringify({ turnId: 42 }))
 
-    expect(readInFlightTurn(CONVERSATION)).toBeNull()
+    expect(readInFlightTurn(CONVERSATION, PARTICIPANT)).toBeNull()
   })
 
   it('returns null for well-formed JSON with all three valid fields plus an unexpected extra field', () => {
     localStorage.setItem(
-      rawKeyFor(CONVERSATION),
+      rawKeyFor(CONVERSATION, PARTICIPANT),
       JSON.stringify({
         nativeMessageId: 'native-1',
         contentText: 'list stock',
@@ -8137,31 +8140,57 @@ describe('readInFlightTurn', () => {
       }),
     )
 
-    expect(readInFlightTurn(CONVERSATION)).toBeNull()
+    expect(readInFlightTurn(CONVERSATION, PARTICIPANT)).toBeNull()
   })
 
   it('keeps records for different conversations isolated', () => {
-    rememberSubmission(CONVERSATION, { nativeMessageId: 'native-1', contentText: 'list stock' })
+    rememberSubmission(CONVERSATION, PARTICIPANT, { nativeMessageId: 'native-1', contentText: 'list stock' })
 
-    expect(readInFlightTurn(OTHER_CONVERSATION)).toBeNull()
+    expect(readInFlightTurn(OTHER_CONVERSATION, PARTICIPANT)).toBeNull()
+  })
+
+  it('keeps records for two Participants sharing the same web conversation id isolated', () => {
+    // The same browser profile, signed out and back in as someone else, still carries the same
+    // long-lived `WebConversationCookie` - so the conversation id alone is not enough to tell the
+    // two Participants' records apart. Only the Participant scope does.
+    rememberSubmission(CONVERSATION, PARTICIPANT, { nativeMessageId: 'native-1', contentText: 'list stock' })
+
+    expect(readInFlightTurn(CONVERSATION, OTHER_PARTICIPANT)).toBeNull()
+  })
+
+  it('never lets a newly signed-in Participant resume or resubmit a prior Participant\'s message on the same browser profile', () => {
+    rememberSubmission(CONVERSATION, PARTICIPANT, { nativeMessageId: 'native-1', contentText: 'confidential request' })
+    rememberTurnId(CONVERSATION, PARTICIPANT, 'native-1', 'turn-1')
+
+    // A new Participant signs in on the same browser profile, before the prior Participant's
+    // in-flight Turn ever resolved. Their own read of this conversation must see nothing at all -
+    // not the prior Participant's content, and not their unresolved Turn id.
+    expect(readInFlightTurn(CONVERSATION, OTHER_PARTICIPANT)).toBeNull()
+
+    // And the prior Participant's own record is untouched by the new Participant ever having looked.
+    expect(readInFlightTurn(CONVERSATION, PARTICIPANT)).toEqual({
+      nativeMessageId: 'native-1',
+      contentText: 'confidential request',
+      turnId: 'turn-1',
+    })
   })
 })
 
 describe('rememberSubmission', () => {
   it('stores the native message id and content text with turnId null before any HTTP response arrives', () => {
-    rememberSubmission(CONVERSATION, { nativeMessageId: 'native-1', contentText: 'list stock' })
+    rememberSubmission(CONVERSATION, PARTICIPANT, { nativeMessageId: 'native-1', contentText: 'list stock' })
 
-    expect(readInFlightTurn(CONVERSATION)).toEqual({
+    expect(readInFlightTurn(CONVERSATION, PARTICIPANT)).toEqual({
       nativeMessageId: 'native-1',
       contentText: 'list stock',
       turnId: null,
     })
   })
 
-  it('serializes exactly contentText, nativeMessageId, and turnId - never an answer, payload, or token', () => {
-    rememberSubmission(CONVERSATION, { nativeMessageId: 'native-1', contentText: 'list stock' })
+  it('serializes exactly contentText, nativeMessageId, and turnId - never a Participant id, answer, payload, or token', () => {
+    rememberSubmission(CONVERSATION, PARTICIPANT, { nativeMessageId: 'native-1', contentText: 'list stock' })
 
-    const raw = localStorage.getItem(rawKeyFor(CONVERSATION))
+    const raw = localStorage.getItem(rawKeyFor(CONVERSATION, PARTICIPANT))
     expect(raw).not.toBeNull()
     const parsed = JSON.parse(raw!) as Record<string, unknown>
     expect(Object.keys(parsed).sort()).toEqual(['contentText', 'nativeMessageId', 'turnId'])
@@ -8170,11 +8199,11 @@ describe('rememberSubmission', () => {
 
 describe('rememberTurnId', () => {
   it('updates the existing record with the turn id once the HTTP response arrives', () => {
-    rememberSubmission(CONVERSATION, { nativeMessageId: 'native-1', contentText: 'list stock' })
+    rememberSubmission(CONVERSATION, PARTICIPANT, { nativeMessageId: 'native-1', contentText: 'list stock' })
 
-    rememberTurnId(CONVERSATION, 'native-1', 'turn-1')
+    rememberTurnId(CONVERSATION, PARTICIPANT, 'native-1', 'turn-1')
 
-    expect(readInFlightTurn(CONVERSATION)).toEqual({
+    expect(readInFlightTurn(CONVERSATION, PARTICIPANT)).toEqual({
       nativeMessageId: 'native-1',
       contentText: 'list stock',
       turnId: 'turn-1',
@@ -8182,12 +8211,12 @@ describe('rememberTurnId', () => {
   })
 
   it('keeps the newer submission untouched when a turn id arrives for an older, already-superseded submission', () => {
-    rememberSubmission(CONVERSATION, { nativeMessageId: 'native-A', contentText: 'list stock' })
-    rememberSubmission(CONVERSATION, { nativeMessageId: 'native-B', contentText: 'find bolts' })
+    rememberSubmission(CONVERSATION, PARTICIPANT, { nativeMessageId: 'native-A', contentText: 'list stock' })
+    rememberSubmission(CONVERSATION, PARTICIPANT, { nativeMessageId: 'native-B', contentText: 'find bolts' })
 
-    rememberTurnId(CONVERSATION, 'native-A', 'turn-A')
+    rememberTurnId(CONVERSATION, PARTICIPANT, 'native-A', 'turn-A')
 
-    expect(readInFlightTurn(CONVERSATION)).toEqual({
+    expect(readInFlightTurn(CONVERSATION, PARTICIPANT)).toEqual({
       nativeMessageId: 'native-B',
       contentText: 'find bolts',
       turnId: null,
@@ -8195,49 +8224,139 @@ describe('rememberTurnId', () => {
   })
 
   it('does not silently create a record when there is no existing submission', () => {
-    rememberTurnId(CONVERSATION, 'native-1', 'turn-1')
+    rememberTurnId(CONVERSATION, PARTICIPANT, 'native-1', 'turn-1')
 
-    expect(readInFlightTurn(CONVERSATION)).toBeNull()
+    expect(readInFlightTurn(CONVERSATION, PARTICIPANT)).toBeNull()
+  })
+
+  it('never stamps a turn id onto another Participant\'s record for the same web conversation id', () => {
+    rememberSubmission(CONVERSATION, OTHER_PARTICIPANT, { nativeMessageId: 'native-1', contentText: 'list stock' })
+
+    rememberTurnId(CONVERSATION, PARTICIPANT, 'native-1', 'turn-1')
+
+    expect(readInFlightTurn(CONVERSATION, PARTICIPANT)).toBeNull()
+    expect(readInFlightTurn(CONVERSATION, OTHER_PARTICIPANT)).toEqual({
+      nativeMessageId: 'native-1',
+      contentText: 'list stock',
+      turnId: null,
+    })
   })
 })
 
 describe('clearInFlightTurn', () => {
   it('removes the record for the conversation', () => {
-    rememberSubmission(CONVERSATION, { nativeMessageId: 'native-1', contentText: 'list stock' })
-    rememberTurnId(CONVERSATION, 'native-1', 'turn-1')
+    rememberSubmission(CONVERSATION, PARTICIPANT, { nativeMessageId: 'native-1', contentText: 'list stock' })
+    rememberTurnId(CONVERSATION, PARTICIPANT, 'native-1', 'turn-1')
 
-    clearInFlightTurn(CONVERSATION)
+    clearInFlightTurn(CONVERSATION, PARTICIPANT)
 
-    expect(readInFlightTurn(CONVERSATION)).toBeNull()
+    expect(readInFlightTurn(CONVERSATION, PARTICIPANT)).toBeNull()
+  })
+
+  it('never removes another Participant\'s record for the same web conversation id', () => {
+    rememberSubmission(CONVERSATION, OTHER_PARTICIPANT, { nativeMessageId: 'native-1', contentText: 'list stock' })
+
+    clearInFlightTurn(CONVERSATION, PARTICIPANT)
+
+    expect(readInFlightTurn(CONVERSATION, OTHER_PARTICIPANT)).toEqual({
+      nativeMessageId: 'native-1',
+      contentText: 'list stock',
+      turnId: null,
+    })
+  })
+})
+
+describe('clearInFlightTurnIfMatches', () => {
+  it('removes the record when the turnId discriminator matches the stored turnId', () => {
+    rememberSubmission(CONVERSATION, PARTICIPANT, { nativeMessageId: 'native-1', contentText: 'list stock' })
+    rememberTurnId(CONVERSATION, PARTICIPANT, 'native-1', 'turn-1')
+
+    clearInFlightTurnIfMatches(CONVERSATION, PARTICIPANT, { turnId: 'turn-1' })
+
+    expect(readInFlightTurn(CONVERSATION, PARTICIPANT)).toBeNull()
+  })
+
+  it('leaves the record untouched when the turnId discriminator does not match a newer, superseding record', () => {
+    // Turn A's own stream reports its terminal Outcome after a Turn B has already been submitted,
+    // overwriting the record. A's belated completion names only itself and must not erase B's.
+    rememberSubmission(CONVERSATION, PARTICIPANT, { nativeMessageId: 'native-A', contentText: 'list stock' })
+    rememberTurnId(CONVERSATION, PARTICIPANT, 'native-A', 'turn-A')
+    rememberSubmission(CONVERSATION, PARTICIPANT, { nativeMessageId: 'native-B', contentText: 'find bolts' })
+
+    clearInFlightTurnIfMatches(CONVERSATION, PARTICIPANT, { turnId: 'turn-A' })
+
+    expect(readInFlightTurn(CONVERSATION, PARTICIPANT)).toEqual({
+      nativeMessageId: 'native-B',
+      contentText: 'find bolts',
+      turnId: null,
+    })
+  })
+
+  it('removes the record when the nativeMessageId discriminator matches the stored nativeMessageId', () => {
+    rememberSubmission(CONVERSATION, PARTICIPANT, { nativeMessageId: 'native-1', contentText: 'list stock' })
+
+    clearInFlightTurnIfMatches(CONVERSATION, PARTICIPANT, { nativeMessageId: 'native-1' })
+
+    expect(readInFlightTurn(CONVERSATION, PARTICIPANT)).toBeNull()
+  })
+
+  it('leaves the record untouched when the nativeMessageId discriminator does not match a newer, superseding record', () => {
+    // The direct, synchronous "already answered" reply to a submission whose response was slow to
+    // arrive - by the time it does, a newer submission has already overwritten the record.
+    rememberSubmission(CONVERSATION, PARTICIPANT, { nativeMessageId: 'native-A', contentText: 'list stock' })
+    rememberSubmission(CONVERSATION, PARTICIPANT, { nativeMessageId: 'native-B', contentText: 'find bolts' })
+
+    clearInFlightTurnIfMatches(CONVERSATION, PARTICIPANT, { nativeMessageId: 'native-A' })
+
+    expect(readInFlightTurn(CONVERSATION, PARTICIPANT)).toEqual({
+      nativeMessageId: 'native-B',
+      contentText: 'find bolts',
+      turnId: null,
+    })
+  })
+
+  it('does nothing when there is no record at all', () => {
+    expect(() => clearInFlightTurnIfMatches(CONVERSATION, PARTICIPANT, { turnId: 'turn-1' })).not.toThrow()
+
+    expect(readInFlightTurn(CONVERSATION, PARTICIPANT)).toBeNull()
   })
 })
 
 describe('subscribeToConversationChanges', () => {
-  it('invokes the callback for a storage event carrying exactly this conversation key', () => {
+  it('invokes the callback for a storage event carrying exactly this conversation and Participant scope', () => {
     const onChanged = vi.fn()
-    subscribeToConversationChanges(CONVERSATION, onChanged)
+    subscribeToConversationChanges(CONVERSATION, PARTICIPANT, onChanged)
 
-    window.dispatchEvent(new StorageEvent('storage', { key: rawKeyFor(CONVERSATION) }))
+    window.dispatchEvent(new StorageEvent('storage', { key: rawKeyFor(CONVERSATION, PARTICIPANT) }))
 
     expect(onChanged).toHaveBeenCalledTimes(1)
   })
 
   it('ignores storage events for another conversation and for unrelated keys', () => {
     const onChanged = vi.fn()
-    subscribeToConversationChanges(CONVERSATION, onChanged)
+    subscribeToConversationChanges(CONVERSATION, PARTICIPANT, onChanged)
 
-    window.dispatchEvent(new StorageEvent('storage', { key: rawKeyFor(OTHER_CONVERSATION) }))
+    window.dispatchEvent(new StorageEvent('storage', { key: rawKeyFor(OTHER_CONVERSATION, PARTICIPANT) }))
     window.dispatchEvent(new StorageEvent('storage', { key: 'unrelated.key' }))
+
+    expect(onChanged).not.toHaveBeenCalled()
+  })
+
+  it('ignores a storage event for the same web conversation id but a different Participant', () => {
+    const onChanged = vi.fn()
+    subscribeToConversationChanges(CONVERSATION, PARTICIPANT, onChanged)
+
+    window.dispatchEvent(new StorageEvent('storage', { key: rawKeyFor(CONVERSATION, OTHER_PARTICIPANT) }))
 
     expect(onChanged).not.toHaveBeenCalled()
   })
 
   it('stops delivering notifications once unsubscribed', () => {
     const onChanged = vi.fn()
-    const unsubscribe = subscribeToConversationChanges(CONVERSATION, onChanged)
+    const unsubscribe = subscribeToConversationChanges(CONVERSATION, PARTICIPANT, onChanged)
 
     unsubscribe()
-    window.dispatchEvent(new StorageEvent('storage', { key: rawKeyFor(CONVERSATION) }))
+    window.dispatchEvent(new StorageEvent('storage', { key: rawKeyFor(CONVERSATION, PARTICIPANT) }))
 
     expect(onChanged).not.toHaveBeenCalled()
   })
@@ -8261,6 +8380,13 @@ Create `src/web/src/conversationStorage.ts`:
  * scope matches the lifetime and reach of the long-lived, HttpOnly `WebConversationCookie` this
  * record is keyed against, so the two always agree on which browser profile they describe.
  *
+ * Every record is scoped by BOTH `webConversationId` and `participantId`. The conversation cookie
+ * alone is not enough: it is as long-lived as the browser profile itself, so it survives a sign-out
+ * and a different Participant signing back in on the very same browser - without the Participant
+ * scope, that new Participant could resume, or even resubmit, a message the prior Participant never
+ * saw answered. `participantId` lives only in the storage *key*, never in the record's own fields,
+ * so it can never end up serialized as if it were part of the resumption breadcrumb itself.
+ *
  * This is a resumption breadcrumb, not a cache of the conversation itself - it never stores an
  * answer, a payload, an auth token, or any other secret or confirmation-bearing value. Only the
  * three fields below are ever written or read back.
@@ -8275,8 +8401,8 @@ export interface InFlightTurn {
   turnId: string | null
 }
 
-function keyFor(webConversationId: string): string {
-  return `${KEY_PREFIX}${webConversationId}`
+function keyFor(webConversationId: string, participantId: string): string {
+  return `${KEY_PREFIX}${webConversationId}.${participantId}`
 }
 
 /** Runtime type guard: rejects anything that is not exactly the three-field shape above - no fewer
@@ -8299,10 +8425,11 @@ function isInFlightTurn(value: unknown): value is InFlightTurn {
   )
 }
 
-/** Reads the in-flight Turn for a conversation, or null if there is none - including when the
- * stored value is corrupt (not JSON) or well-formed JSON of the wrong shape. Never throws. */
-export function readInFlightTurn(webConversationId: string): InFlightTurn | null {
-  const raw = localStorage.getItem(keyFor(webConversationId))
+/** Reads the in-flight Turn for a conversation and Participant, or null if there is none -
+ * including when the stored value is corrupt (not JSON) or well-formed JSON of the wrong shape.
+ * Never throws. */
+export function readInFlightTurn(webConversationId: string, participantId: string): InFlightTurn | null {
+  const raw = localStorage.getItem(keyFor(webConversationId, participantId))
 
   if (raw === null) {
     return null
@@ -8320,14 +8447,15 @@ export function readInFlightTurn(webConversationId: string): InFlightTurn | null
 }
 
 /** Records a just-submitted message as the conversation's in-flight Turn, overwriting whatever
- * was there before. `turnId` is always null here: it is filled in later, by `rememberTurnId`, once
- * the HTTP response naming the Turn actually arrives. */
+ * was there before for this Participant. `turnId` is always null here: it is filled in later, by
+ * `rememberTurnId`, once the HTTP response naming the Turn actually arrives. */
 export function rememberSubmission(
   webConversationId: string,
+  participantId: string,
   submission: { nativeMessageId: string; contentText: string },
 ): void {
   const record: InFlightTurn = { ...submission, turnId: null }
-  localStorage.setItem(keyFor(webConversationId), JSON.stringify(record))
+  localStorage.setItem(keyFor(webConversationId, participantId), JSON.stringify(record))
 }
 
 /** Fills in the Turn id on an existing in-flight record once the HTTP response names it. Requires
@@ -8338,28 +8466,68 @@ export function rememberSubmission(
  * browser profile submitted next. Without that check, a stale response arriving after a second
  * submission - in this tab or another tab of the same browser profile - would stamp its turn id
  * onto the newer, unrelated record. */
-export function rememberTurnId(webConversationId: string, nativeMessageId: string, turnId: string): void {
-  const existing = readInFlightTurn(webConversationId)
+export function rememberTurnId(
+  webConversationId: string,
+  participantId: string,
+  nativeMessageId: string,
+  turnId: string,
+): void {
+  const existing = readInFlightTurn(webConversationId, participantId)
 
   if (existing === null || existing.nativeMessageId !== nativeMessageId) {
     return
   }
 
   const record: InFlightTurn = { ...existing, turnId }
-  localStorage.setItem(keyFor(webConversationId), JSON.stringify(record))
+  localStorage.setItem(keyFor(webConversationId, participantId), JSON.stringify(record))
 }
 
-/** Removes the in-flight Turn record for a conversation, e.g. once its outcome has been
- * delivered and there is nothing left to resume. */
-export function clearInFlightTurn(webConversationId: string): void {
-  localStorage.removeItem(keyFor(webConversationId))
+/** Unconditionally removes the in-flight Turn record for a conversation and Participant, e.g. once
+ * starting a new conversation makes whatever was outstanding irrelevant regardless of which Turn it
+ * named. Prefer `clearInFlightTurnIfMatches` wherever a specific Turn - rather than the whole
+ * conversation - is what just concluded, since an unconditional clear here can discard a newer,
+ * unrelated record that has since superseded it. */
+export function clearInFlightTurn(webConversationId: string, participantId: string): void {
+  localStorage.removeItem(keyFor(webConversationId, participantId))
+}
+
+/**
+ * Removes the in-flight Turn record only if it still matches the given discriminator - either the
+ * same `nativeMessageId` (the direct, synchronous "this submission was already answered" case) or
+ * the same `turnId` (the streamed terminal-Outcome case). A Turn's own belated completion names
+ * only itself; without this check, it could otherwise clear a newer Turn's record out from under it
+ * - one a Participant had already submitted by the time the belated one concluded.
+ */
+export function clearInFlightTurnIfMatches(
+  webConversationId: string,
+  participantId: string,
+  discriminator: { nativeMessageId: string } | { turnId: string },
+): void {
+  const existing = readInFlightTurn(webConversationId, participantId)
+
+  if (existing === null) {
+    return
+  }
+
+  const matches =
+    'nativeMessageId' in discriminator
+      ? existing.nativeMessageId === discriminator.nativeMessageId
+      : existing.turnId === discriminator.turnId
+
+  if (matches) {
+    clearInFlightTurn(webConversationId, participantId)
+  }
 }
 
 /** Notifies `onChanged` whenever another tab on the same browser profile changes this exact
- * conversation's in-flight Turn record (the browser's `storage` event only ever fires in other
- * tabs, never the one that made the change). Returns an unsubscribe function. */
-export function subscribeToConversationChanges(webConversationId: string, onChanged: () => void): () => void {
-  const key = keyFor(webConversationId)
+ * conversation-and-Participant scope's in-flight Turn record (the browser's `storage` event only
+ * ever fires in other tabs, never the one that made the change). Returns an unsubscribe function. */
+export function subscribeToConversationChanges(
+  webConversationId: string,
+  participantId: string,
+  onChanged: () => void,
+): () => void {
+  const key = keyFor(webConversationId, participantId)
 
   const listener = (event: StorageEvent) => {
     if (event.key === key) {
@@ -8376,7 +8544,11 @@ export function subscribeToConversationChanges(webConversationId: string, onChan
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `cd src/web && npm test`
-Expected: PASS, all 14 tests from Step 1 (which includes a hardening case proving `rememberTurnId` never silently creates a record when there is no existing submission to update, a case proving a stale response for a superseded submission never overwrites the submission that replaced it, and a case proving a record with a valid shape plus an unexpected extra field is rejected outright rather than partly trusted).
+Expected: PASS, all 24 tests from Step 1 (which includes a hardening case proving `rememberTurnId` never silently creates a record when there is no existing submission to update, a case proving a stale response for a superseded submission never overwrites the submission that replaced it, and a case proving a record with a valid shape plus an unexpected extra field is rejected outright rather than partly trusted).
+
+A quality review found a genuine gap in Steps 1-3 as first written: every record was keyed by `webConversationId` alone. The long-lived `WebConversationCookie` that id comes from survives a sign-out, so a second Participant signing in on the very same browser profile - before the first Participant's in-flight Turn ever resolved - could resume watching, or even resubmit with its idempotency key, a message that was never theirs. Every function now also takes `participantId` and folds it into the storage key (`mca.conversation.{webConversationId}.{participantId}`); `participantId` lives only in the key, never in the record's own three fields, so the stored shape and its privacy invariant are unchanged. Added a compare-and-delete `clearInFlightTurnIfMatches(webConversationId, participantId, { nativeMessageId } | { turnId })`, which Task 20 needs to keep one superseded Turn's belated completion from clearing a newer one's record - `clearInFlightTurn` itself stays as an unconditional remove, which Task 21's New conversation control still uses (now with both ids).
+
+Steps 1-3 above already carry this fix. Step 1's test file adds: two-Participant isolation for `readInFlightTurn` (including a message never leaking across a sign-out/sign-in on the same browser profile), `rememberTurnId` never stamping a Turn id onto another Participant's record, `clearInFlightTurn` never removing another Participant's record, five tests for the new `clearInFlightTurnIfMatches` (matches by `turnId`, leaves a superseding record alone by `turnId`, matches by `nativeMessageId`, leaves a superseding record alone by `nativeMessageId`, and does nothing when there is no record at all), and `subscribeToConversationChanges` ignoring a storage event for the same web conversation id but a different Participant. `conversationStorage.test.ts` grew from 14 to 24 tests.
 
 - [ ] **Step 5: Commit**
 
@@ -9407,7 +9579,7 @@ git commit -m "feat: make the web layout responsive with an accessible workspace
 - Create: `src/web/src/conversationApi.ts`
 - Modify: `src/web/src/TurnTracer.tsx`
 - Test: `src/web/src/TurnTracer.test.tsx`
-- Modify: `src/web/src/App.tsx` (one line only - see Step 7)
+- Modify: `src/web/src/App.tsx` (one prop line each hardening pass - see Step 7)
 
 - [ ] **Step 1: Write the failing test**
 
@@ -9416,13 +9588,14 @@ Create `src/web/src/TurnTracer.test.tsx`:
 ```tsx
 import { StrictMode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { recordingEventStreamFactory } from './testing/fakeEventSource';
 import { rememberSubmission, rememberTurnId, readInFlightTurn } from './conversationStorage';
 import TurnTracer from './TurnTracer';
 
 const CONVERSATION = 'web-conversation-1';
+const PARTICIPANT = 'participant-1';
 
 function stubFetch(responder: (url: string, init?: RequestInit) => Response) {
   const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) =>
@@ -9439,11 +9612,22 @@ function acceptedResponse(turnId: string) {
   });
 }
 
+/** Flushes the microtask chain a pending `fetch`/`response.json()`/component continuation runs
+ * through once its response resolves, without depending on any observable side effect - which is
+ * exactly what a post-unmount continuation must not have. A macrotask tick is enough: every
+ * microtask already queued (however many `await`s deep) always drains before it fires. */
+async function flushAsyncWork() {
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+}
+
 function renderTracer(createSource: ReturnType<typeof recordingEventStreamFactory>['factory']) {
   return render(
     <TurnTracer
       csrfToken="csrf-token"
       webConversationId={CONVERSATION}
+      participantId={PARTICIPANT}
       onTerminalOutcome={() => {}}
       createSource={createSource}
     />,
@@ -9552,8 +9736,8 @@ describe('TurnTracer', () => {
 
   it('reconnects to a Turn it had already submitted, without submitting anything again', async () => {
     const fetchMock = stubFetch(() => acceptedResponse('turn-should-not-happen'));
-    rememberSubmission(CONVERSATION, { nativeMessageId: 'native-1', contentText: 'list stock' });
-    rememberTurnId(CONVERSATION, 'native-1', 'turn-resumed');
+    rememberSubmission(CONVERSATION, PARTICIPANT, { nativeMessageId: 'native-1', contentText: 'list stock' });
+    rememberTurnId(CONVERSATION, PARTICIPANT, 'native-1', 'turn-resumed');
 
     const { opened, factory } = recordingEventStreamFactory();
     renderTracer(factory);
@@ -9567,8 +9751,8 @@ describe('TurnTracer', () => {
 
   it('recovers a live stream after StrictMode\'s development-only mount/cleanup/mount', async () => {
     const fetchMock = stubFetch(() => acceptedResponse('turn-should-not-happen'));
-    rememberSubmission(CONVERSATION, { nativeMessageId: 'native-1', contentText: 'list stock' });
-    rememberTurnId(CONVERSATION, 'native-1', 'turn-resumed');
+    rememberSubmission(CONVERSATION, PARTICIPANT, { nativeMessageId: 'native-1', contentText: 'list stock' });
+    rememberTurnId(CONVERSATION, PARTICIPANT, 'native-1', 'turn-resumed');
 
     const { opened, factory } = recordingEventStreamFactory();
     render(
@@ -9576,6 +9760,7 @@ describe('TurnTracer', () => {
         <TurnTracer
           csrfToken="csrf-token"
           webConversationId={CONVERSATION}
+          participantId={PARTICIPANT}
           onTerminalOutcome={() => {}}
           createSource={factory}
         />
@@ -9593,7 +9778,7 @@ describe('TurnTracer', () => {
 
   it('resubmits the very same native message id when it never learned the Turn id', async () => {
     const fetchMock = stubFetch(() => acceptedResponse('turn-recovered'));
-    rememberSubmission(CONVERSATION, { nativeMessageId: 'native-lost', contentText: 'list stock' });
+    rememberSubmission(CONVERSATION, PARTICIPANT, { nativeMessageId: 'native-lost', contentText: 'list stock' });
 
     const { opened, factory } = recordingEventStreamFactory();
     renderTracer(factory);
@@ -9621,7 +9806,66 @@ describe('TurnTracer', () => {
       '1000000',
     );
 
-    await waitFor(() => expect(readInFlightTurn(CONVERSATION)).toBeNull());
+    await waitFor(() => expect(readInFlightTurn(CONVERSATION, PARTICIPANT)).toBeNull());
+  });
+
+  it('keeps a newer Turn B intact when a superseded Turn A\'s streamed Outcome arrives after B was submitted', async () => {
+    let resolveB: (response: Response) => void = () => {};
+    const pendingB = new Promise<Response>((resolve) => {
+      resolveB = resolve;
+    });
+
+    let callCount = 0;
+    const fetchMock = vi.fn(() => {
+      callCount += 1;
+      return callCount === 1 ? Promise.resolve(acceptedResponse('turn-A')) : pendingB;
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const { opened, factory } = recordingEventStreamFactory();
+    renderTracer(factory);
+
+    // A is submitted and streaming.
+    await userEvent.click(screen.getByRole('button', { name: 'Send' }));
+    await waitFor(() => expect(opened).toHaveLength(1));
+    const streamA = opened[0];
+
+    // B is submitted before A ever answers. Its POST is still pending.
+    await userEvent.click(screen.getByRole('button', { name: 'Send' }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+
+    const storedWhileBPending = readInFlightTurn(CONVERSATION, PARTICIPANT);
+    expect(storedWhileBPending?.turnId).toBeNull();
+    expect(storedWhileBPending?.nativeMessageId).toBeDefined();
+
+    // A's own stream reports its terminal Outcome only now, after B already exists. It must be
+    // ignored entirely - not rendered, and not allowed to clear or touch B's stored record.
+    streamA.emit(
+      'outcome',
+      {
+        turnId: 'turn-A',
+        status: 'completed',
+        category: 'completed',
+        code: 'a.echo',
+        summary: 'A done.',
+        deliveries: [],
+      },
+      '1000000',
+    );
+    // Flushed explicitly: `emit` is a raw synchronous call outside any React event, so a state
+    // update it triggered still needs a tick to reach the DOM before a synchronous query could see
+    // it - without this, an assertion that it never arrives would pass for the wrong reason.
+    await flushAsyncWork();
+
+    expect(screen.queryByText('a.echo')).not.toBeInTheDocument();
+    expect(readInFlightTurn(CONVERSATION, PARTICIPANT)).toEqual(storedWhileBPending);
+
+    // B's own response now arrives and associates correctly.
+    resolveB(acceptedResponse('turn-B'));
+    await waitFor(() =>
+      expect(opened.some((source) => source.url === '/api/turns/turn-B/events' && !source.closed)).toBe(true),
+    );
+    expect(readInFlightTurn(CONVERSATION, PARTICIPANT)?.turnId).toBe('turn-B');
   });
 
   it('picks up a Turn another tab of the same browser profile started', async () => {
@@ -9631,10 +9875,10 @@ describe('TurnTracer', () => {
     renderTracer(factory);
     expect(opened).toHaveLength(0);
 
-    rememberSubmission(CONVERSATION, { nativeMessageId: 'native-other-tab', contentText: 'list stock' });
-    rememberTurnId(CONVERSATION, 'native-other-tab', 'turn-other-tab');
+    rememberSubmission(CONVERSATION, PARTICIPANT, { nativeMessageId: 'native-other-tab', contentText: 'list stock' });
+    rememberTurnId(CONVERSATION, PARTICIPANT, 'native-other-tab', 'turn-other-tab');
     window.dispatchEvent(
-      new StorageEvent('storage', { key: `mca.conversation.${CONVERSATION}`, newValue: 'changed' }),
+      new StorageEvent('storage', { key: `mca.conversation.${CONVERSATION}.${PARTICIPANT}`, newValue: 'changed' }),
     );
 
     await waitFor(() => expect(opened).toHaveLength(1));
@@ -9652,12 +9896,13 @@ describe('TurnTracer', () => {
 
     // The one dangerous window: a stored submission whose response was never seen, so the component
     // is mid-resubmit and `turnId` is still null.
-    rememberSubmission(CONVERSATION, { nativeMessageId: 'native-lost', contentText: 'list stock' });
+    rememberSubmission(CONVERSATION, PARTICIPANT, { nativeMessageId: 'native-lost', contentText: 'list stock' });
 
     const { opened, factory } = recordingEventStreamFactory();
     const props = {
       csrfToken: 'csrf-token',
       webConversationId: CONVERSATION,
+      participantId: PARTICIPANT,
       onTerminalOutcome: () => {},
       createSource: factory,
     };
@@ -9684,12 +9929,13 @@ describe('TurnTracer', () => {
     const fetchMock = vi.fn(() => pending);
     vi.stubGlobal('fetch', fetchMock);
 
-    rememberSubmission(CONVERSATION, { nativeMessageId: 'native-lost', contentText: 'list stock' });
+    rememberSubmission(CONVERSATION, PARTICIPANT, { nativeMessageId: 'native-lost', contentText: 'list stock' });
 
     const { opened, factory } = recordingEventStreamFactory();
     const props = {
       csrfToken: 'csrf-token',
       webConversationId: CONVERSATION,
+      participantId: PARTICIPANT,
       onTerminalOutcome: () => {},
       createSource: factory,
     };
@@ -9713,6 +9959,84 @@ describe('TurnTracer', () => {
 
     await waitFor(() => expect(opened).toHaveLength(1));
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not act on a submit response that arrives after the component has really unmounted', async () => {
+    let resolveSubmission: (response: Response) => void = () => {};
+    const pending = new Promise<Response>((resolve) => {
+      resolveSubmission = resolve;
+    });
+
+    const fetchMock = vi.fn(() => pending);
+    vi.stubGlobal('fetch', fetchMock);
+
+    const onTerminalOutcome = vi.fn();
+    const { opened, factory } = recordingEventStreamFactory();
+    const { unmount } = render(
+      <TurnTracer
+        csrfToken="csrf-token"
+        webConversationId={CONVERSATION}
+        participantId={PARTICIPANT}
+        onTerminalOutcome={onTerminalOutcome}
+        createSource={factory}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole('button', { name: 'Send' }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+
+    const storedBeforeUnmount = readInFlightTurn(CONVERSATION, PARTICIPANT);
+    expect(storedBeforeUnmount?.turnId).toBeNull();
+
+    // A real unmount - not StrictMode's simulated one, which always flips the mounted guard back to
+    // true before any awaited response could arrive.
+    unmount();
+
+    resolveSubmission(acceptedResponse('turn-after-unmount'));
+    await flushAsyncWork();
+
+    // Nobody is left to watch a stream for a response nobody is left to receive.
+    expect(opened).toHaveLength(0);
+    expect(onTerminalOutcome).not.toHaveBeenCalled();
+    // Exactly as it was at the moment of unmount - neither cleared nor stamped with the late Turn id.
+    expect(readInFlightTurn(CONVERSATION, PARTICIPANT)).toEqual(storedBeforeUnmount);
+  });
+
+  it('does not act on a resumed (lost-response) submission\'s response that arrives after the component has really unmounted', async () => {
+    let resolveSubmission: (response: Response) => void = () => {};
+    const pending = new Promise<Response>((resolve) => {
+      resolveSubmission = resolve;
+    });
+
+    const fetchMock = vi.fn(() => pending);
+    vi.stubGlobal('fetch', fetchMock);
+
+    rememberSubmission(CONVERSATION, PARTICIPANT, { nativeMessageId: 'native-lost', contentText: 'list stock' });
+
+    const onTerminalOutcome = vi.fn();
+    const { opened, factory } = recordingEventStreamFactory();
+    const { unmount } = render(
+      <TurnTracer
+        csrfToken="csrf-token"
+        webConversationId={CONVERSATION}
+        participantId={PARTICIPANT}
+        onTerminalOutcome={onTerminalOutcome}
+        createSource={factory}
+      />,
+    );
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+
+    const storedBeforeUnmount = readInFlightTurn(CONVERSATION, PARTICIPANT);
+
+    unmount();
+
+    resolveSubmission(acceptedResponse('turn-recovered-after-unmount'));
+    await flushAsyncWork();
+
+    expect(opened).toHaveLength(0);
+    expect(onTerminalOutcome).not.toHaveBeenCalled();
+    expect(readInFlightTurn(CONVERSATION, PARTICIPANT)).toEqual(storedBeforeUnmount);
   });
 
   it('never renders a control that would change a quantity directly', async () => {
@@ -9806,7 +10130,7 @@ In `src/web/src/TurnTracer.tsx`, replace the import block at the top of the file
 ```tsx
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  clearInFlightTurn,
+  clearInFlightTurnIfMatches,
   readInFlightTurn,
   rememberSubmission,
   rememberTurnId,
@@ -9841,6 +10165,8 @@ interface TurnTracerProps {
   csrfToken: string;
   /** This browser profile's stable web conversation identity, from the session bootstrap. */
   webConversationId: string;
+  /** The signed-in Participant's stable identity, from the session bootstrap. */
+  participantId: string;
   /** Called once a terminal Outcome arrives, so the workspace can refetch its authoritative projection. */
   onTerminalOutcome: () => void;
   /** Swapped in tests for a controllable double, since jsdom implements no EventSource. */
@@ -9870,7 +10196,7 @@ const PROGRESS_TEXT: Record<Exclude<ConversationProgress, 'idle'>, string> = {
  * Participant and ChannelConversation identity are always derived server-side; this component never
  * supplies either, and it holds no token of any kind.
  */
-function TurnTracer({ csrfToken, webConversationId, onTerminalOutcome, createSource }: TurnTracerProps) {
+function TurnTracer({ csrfToken, webConversationId, participantId, onTerminalOutcome, createSource }: TurnTracerProps) {
   const [contentText, setContentText] = useState('list stock');
   const [progress, setProgress] = useState<ConversationProgress>('idle');
   const [turnId, setTurnId] = useState<string | null>(null);
@@ -9890,6 +10216,13 @@ function TurnTracer({ csrfToken, webConversationId, onTerminalOutcome, createSou
   // The parts as they arrive, mirrored outside React state so the terminal handler can compose the
   // Outcome from them without reading state inside a state updater - which React may run twice.
   const partsRef = useRef<TurnResponsePartEvent[]>([]);
+
+  // True whenever this component is actually mounted - including through React StrictMode's
+  // development-only mount/cleanup/mount, which flips it false and back true the same way it flips
+  // streamRef/watchedTurnRef below. Every async continuation checks it immediately after its await,
+  // before touching state, storage, a stream, or the parent callback - so a response that arrives
+  // after a real unmount can never act as though this component were still here to receive it.
+  const mountedRef = useRef(false);
 
   const watchTurn = useCallback(
     (id: string) => {
@@ -9918,7 +10251,12 @@ function TurnTracer({ csrfToken, webConversationId, onTerminalOutcome, createSou
           onOutcome: (terminal) => {
             setOutcome(composeOutcome(partsRef.current, terminal));
             setProgress('idle');
-            clearInFlightTurn(webConversationId);
+            // Only if the stored record still names *this* Turn. A superseded Turn's own belated
+            // completion must never clear the newer Turn a Participant has since submitted -
+            // `handleSubmit` already closed this stream the instant that happened, so in the
+            // ordinary case this fires only for the Turn that is genuinely still current, but the
+            // check is what makes that true rather than assumed.
+            clearInFlightTurnIfMatches(webConversationId, participantId, { turnId: id });
             onTerminalOutcome();
           },
           onFailed: () => {
@@ -9933,11 +10271,11 @@ function TurnTracer({ csrfToken, webConversationId, onTerminalOutcome, createSou
         factory: createSource,
       });
     },
-    [createSource, onTerminalOutcome, webConversationId],
+    [createSource, onTerminalOutcome, participantId, webConversationId],
   );
 
   const resumeStoredTurn = useCallback(async () => {
-    const stored = readInFlightTurn(webConversationId);
+    const stored = readInFlightTurn(webConversationId, participantId);
     if (stored === null) {
       return;
     }
@@ -9960,22 +10298,33 @@ function TurnTracer({ csrfToken, webConversationId, onTerminalOutcome, createSou
         csrfToken,
       );
 
+      if (!mountedRef.current) {
+        // A real unmount, not StrictMode's simulated one - that always flips mountedRef back to
+        // true well before any awaited response could arrive. Nothing is left to act on: no state
+        // to set, no stream to open, no parent to notify.
+        return;
+      }
+
       if (result.kind === 'outcome') {
         setTurnId(result.outcome.turnId);
         setOutcome(result.outcome);
         setProgress('idle');
-        clearInFlightTurn(webConversationId);
+        clearInFlightTurnIfMatches(webConversationId, participantId, { nativeMessageId: stored.nativeMessageId });
         onTerminalOutcome();
         return;
       }
 
-      rememberTurnId(webConversationId, stored.nativeMessageId, result.acceptance.turnId);
+      rememberTurnId(webConversationId, participantId, stored.nativeMessageId, result.acceptance.turnId);
       watchTurn(result.acceptance.turnId);
     } catch (err) {
+      if (!mountedRef.current) {
+        return;
+      }
+
       setError(err instanceof Error ? err.message : String(err));
       setProgress('idle');
     }
-  }, [csrfToken, onTerminalOutcome, watchTurn, webConversationId]);
+  }, [csrfToken, onTerminalOutcome, participantId, watchTurn, webConversationId]);
 
   useEffect(() => {
     if (resumeAttemptedRef.current) {
@@ -9985,7 +10334,7 @@ function TurnTracer({ csrfToken, webConversationId, onTerminalOutcome, createSou
       // effect opened moments ago (see the close-on-unmount effect below), leaving a known Turn id
       // with nothing watching it. Recovering that is always a pure read, so it is always safe to
       // repeat: `watchTurn` itself is a no-op if a live stream for this id already exists.
-      const stored = readInFlightTurn(webConversationId);
+      const stored = readInFlightTurn(webConversationId, participantId);
       if (stored?.turnId != null) {
         watchTurn(stored.turnId);
       }
@@ -9997,19 +10346,19 @@ function TurnTracer({ csrfToken, webConversationId, onTerminalOutcome, createSou
     void (async () => {
       await resumeStoredTurn();
     })();
-  }, [resumeStoredTurn, watchTurn, webConversationId]);
+  }, [participantId, resumeStoredTurn, watchTurn, webConversationId]);
 
   useEffect(
     () =>
-      subscribeToConversationChanges(webConversationId, () => {
+      subscribeToConversationChanges(webConversationId, participantId, () => {
         // Another tab of this browser profile submitted a Turn, or started a new conversation. Both
         // are changes to the one conversation they share, so this tab follows.
-        const stored = readInFlightTurn(webConversationId);
+        const stored = readInFlightTurn(webConversationId, participantId);
         if (stored?.turnId != null) {
           watchTurn(stored.turnId);
         }
       }),
-    [watchTurn, webConversationId],
+    [participantId, watchTurn, webConversationId],
   );
 
   useEffect(
@@ -10025,8 +10374,27 @@ function TurnTracer({ csrfToken, webConversationId, onTerminalOutcome, createSou
     [],
   );
 
+  useEffect(() => {
+    mountedRef.current = true;
+
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
   async function handleSubmit(event: React.FormEvent) {
     event.preventDefault();
+
+    // A newer Turn supersedes whatever this component was watching. Closing it here - before this
+    // submission's own record is even written - guarantees the old stream can never deliver another
+    // event: openTurnStream gates every handler behind its own closed flag the instant close() is
+    // called, synchronously, before this function does anything else. Without this, a queued event
+    // from the superseded Turn - most dangerously its own terminal Outcome - could still fire after
+    // this one exists and clear or overwrite it.
+    streamRef.current?.close();
+    streamRef.current = null;
+    watchedTurnRef.current = null;
+
     setError(null);
     setOutcome(null);
     partsRef.current = [];
@@ -10037,10 +10405,16 @@ function TurnTracer({ csrfToken, webConversationId, onTerminalOutcome, createSou
 
     // Recorded BEFORE the request leaves, so a response that never arrives still leaves this browser
     // profile holding the idempotency key it submitted under.
-    rememberSubmission(webConversationId, { nativeMessageId, contentText });
+    rememberSubmission(webConversationId, participantId, { nativeMessageId, contentText });
 
     try {
       const result = await submitTurn({ nativeMessageId, contentText }, csrfToken);
+
+      if (!mountedRef.current) {
+        // A real unmount. Nothing is left to act on: no state to set, no stream to open, no parent
+        // to notify.
+        return;
+      }
 
       if (result.kind === 'outcome') {
         // This exact native message was already answered, so its recorded terminal Outcome came back
@@ -10048,14 +10422,18 @@ function TurnTracer({ csrfToken, webConversationId, onTerminalOutcome, createSou
         setTurnId(result.outcome.turnId);
         setOutcome(result.outcome);
         setProgress('idle');
-        clearInFlightTurn(webConversationId);
+        clearInFlightTurnIfMatches(webConversationId, participantId, { nativeMessageId });
         onTerminalOutcome();
         return;
       }
 
-      rememberTurnId(webConversationId, nativeMessageId, result.acceptance.turnId);
+      rememberTurnId(webConversationId, participantId, nativeMessageId, result.acceptance.turnId);
       watchTurn(result.acceptance.turnId);
     } catch (err) {
+      if (!mountedRef.current) {
+        return;
+      }
+
       setError(err instanceof Error ? err.message : String(err));
       setProgress('idle');
     }
@@ -10229,20 +10607,28 @@ Delete the now-unused `getTurnOutcome` import if the compiler reports it; the re
 - [ ] **Step 6: Run the tests to verify they pass**
 
 Run: `cd src/web && npm test`
-Expected: PASS, 12 new tests.
+Expected: PASS, 15 new tests.
 
 A quality review found one genuine bug in Steps 1-5 as first written: the mount-time resume effect had no cleanup, so React StrictMode's development-only mount → cleanup → mount cycle (`main.tsx` wraps `App` in `StrictMode`) opened a stream on the first mount, the close-on-unmount effect's cleanup then closed it, and the second mount's resume effect saw `resumeAttemptedRef.current` already `true` and skipped - leaving a resumed Turn with `watchedTurnRef` still claiming ownership of a stream that was actually dead, forever. The unknown-Turn-id (POST) path was never affected: its side effect (`watchTurn`, called from inside `resumeStoredTurn`) only runs after `await submitTurn(...)` resolves, strictly after StrictMode's synchronous mount/cleanup/mount has already finished, so there was only ever one fetch either way.
 
 The fix is symmetric ownership, not StrictMode detection or a timer: the close-on-unmount effect now also nulls `streamRef.current` and `watchedTurnRef.current`, undoing exactly what `watchTurn` set up, and the resume effect's already-attempted branch - instead of only returning - re-reads the stored record and calls `watchTurn` again if it names a Turn id. That call is always a pure `GET`, and it is a no-op whenever `watchedTurnRef.current` already matches (the ordinary case, including every ordinary parent re-render once a stream is live) - it only actually reopens a connection when the refs were just cleared, which happens only on an unmount, real or StrictMode-simulated. `resumeAttemptedRef` itself is never reset, so the unknown-Turn-id case can never resubmit a second time.
 
-Steps 1-5 above already carry this fix and the two tests that pin it down: rendering inside `<StrictMode>` with a stored Turn id and asserting a live (not merely once-opened) stream survives the mount/cleanup/mount with no POST, and combining `<StrictMode>` with an explicit parent re-render on the unknown-Turn-id path and asserting exactly one `fetch` call throughout. `TurnTracer.test.tsx` grew from 10 to 12 tests (web suite: 63 to 65 tests across 7 files).
+A second quality review found three further genuine bugs:
+
+1. **Participant scope leak on a shared browser profile.** `conversationStorage` keyed every record by `webConversationId` alone, but the long-lived `WebConversationCookie` that id comes from survives a sign-out - so a second Participant signing in on the same browser profile, before the first Participant's in-flight Turn ever resolved, could resume watching, or even resubmit with its idempotency key, a message that was never theirs. Task 17 now scopes every record by both ids (`participantId` in the key only, never in the record - see Task 17's own Step 4 for the full account), and `TurnTracer` now requires a `participantId` prop, threaded into every `conversationStorage` call exactly as `webConversationId` already was.
+
+2. **A superseded Turn A could clear, or overwrite the UI of, a newer Turn B.** Once a Turn's stream was open, submitting a second message never closed it - so if A's own terminal Outcome arrived after B had already been submitted, it still rendered (overwriting whatever B was doing), and its unconditional `clearInFlightTurn` erased B's freshly-written record, including once B's own response later arrived to find nothing left to update. Fixed two ways: `handleSubmit` now closes and releases the current stream's ownership (`streamRef`/`watchedTurnRef`) as its very first act, before B's own record is even written - `openTurnStream` gates every handler behind its own closed flag the instant `close()` runs, so a superseded stream can never deliver another event, queued or not. And every place that used to call `clearInFlightTurn` unconditionally (the streamed terminal Outcome, and both direct synchronous "already answered" replies in `watchTurn` and `resumeStoredTurn`) now calls the new `clearInFlightTurnIfMatches` instead, discriminated by the exact Turn id or native message id each call site owns - so even a path the top-of-`handleSubmit` close does not reach (a *different* superseded submission's own recovery response, resolving after something newer has overwritten storage) still cannot clear a record that is no longer its own.
+
+3. **An async continuation could act after a real unmount.** Neither `resumeStoredTurn`'s nor `handleSubmit`'s `await submitTurn(...)` continuation checked whether the component was still mounted before opening a stream, writing storage, or calling `onTerminalOutcome` - so a response arriving after a real unmount (navigating away while a submission was still in flight) opened an `EventSource` nothing would ever close and could fire a stale callback into an unmounted tree. Added `mountedRef`, set `true` in a mount effect and `false` in its cleanup - the same StrictMode-compatible shape as the stream-ownership cleanup, and just as unaffected by StrictMode's simulated mount/cleanup/mount, which always flips it back to `true` long before any awaited response could arrive. Both continuations - and both `catch` blocks - now return immediately if `mountedRef.current` is `false`, before touching state, storage, a stream, or the parent callback.
+
+Steps 1-5 above already carry all four fixes and the tests that pin each one down: two tests proving StrictMode's mount/cleanup/mount recovers a live stream without reconnecting or resubmitting a live stream a second time (unchanged from the first hardening pass); one test submitting a Turn B while Turn A is still streaming and asserting A's belated Outcome neither renders nor touches B's stored record, and that B's own response still associates correctly afterward; and two tests - one for `handleSubmit`, one for `resumeStoredTurn`'s lost-response path, since they are separate continuations - unmounting while a submission is in flight, resolving it, and asserting no `EventSource` ever opens, the parent callback never fires, and the stored record is exactly what it was at the moment of unmount. `TurnTracer.test.tsx` grew from 12 to 15 tests (web suite: 65 to 78 tests across 7 files, following Task 17's own growth from 14 to 24 tests).
 
 - [ ] **Step 7: Check types and lint**
 
 Run: `cd src/web && npx tsc -b && npm run lint`
 Expected: no output from `tsc`, and no errors from oxlint.
 
-`webConversationId` is a required prop, and `App.tsx` already renders `<TurnTracer csrfToken={session.csrfToken} onTerminalOutcome={...} />` from before this task (with nothing else in Task 21's wiring done yet). That call site now fails `tsc` with "Property 'webConversationId' is missing" until it is given one - the one piece of Task 21 that cannot wait, since otherwise `npx tsc -b` and `npm run build` do not pass at the end of this task. Fix it minimally, in place, without pulling forward any other part of Task 21: add `webConversationId={bootstrap.webConversationId}` (the session bootstrap already carries it) to that one call and nothing else - `App.tsx` keeps rendering the same tree it always has, and Task 21 still replaces this whole section with `WorkspacePanel`, the banner, and the rest of its own wiring.
+`webConversationId` is a required prop, and `App.tsx` already renders `<TurnTracer csrfToken={session.csrfToken} onTerminalOutcome={...} />` from before this task (with nothing else in Task 21's wiring done yet). That call site now fails `tsc` with "Property 'webConversationId' is missing" until it is given one - the one piece of Task 21 that cannot wait, since otherwise `npx tsc -b` and `npm run build` do not pass at the end of this task. Fix it minimally, in place, without pulling forward any other part of Task 21: add `webConversationId={bootstrap.webConversationId}` (the session bootstrap already carries it) to that one call and nothing else - `App.tsx` keeps rendering the same tree it always has, and Task 21 still replaces this whole section with `WorkspacePanel`, the banner, and the rest of its own wiring. The second quality review's Participant-scope fix makes `participantId` an equally required prop, so that same call site also needs `participantId={bootstrap.participantId}` - the session bootstrap already carries this one too.
 
 - [ ] **Step 8: Commit**
 
@@ -10498,8 +10884,11 @@ describe('App', () => {
 
     // Something this browser profile was already waiting on. If the reset left it behind, the remounted
     // conversation would immediately reconnect - or re-POST - work from the conversation just ended.
-    rememberSubmission('web-conversation-1', { nativeMessageId: 'native-old', contentText: 'list stock' });
-    rememberTurnId('web-conversation-1', 'native-old', 'turn-old');
+    rememberSubmission('web-conversation-1', '11111111-1111-1111-1111-111111111111', {
+      nativeMessageId: 'native-old',
+      contentText: 'list stock',
+    });
+    rememberTurnId('web-conversation-1', '11111111-1111-1111-1111-111111111111', 'native-old', 'turn-old');
 
     render(<App />);
     await screen.findByRole('banner');
@@ -10513,7 +10902,7 @@ describe('App', () => {
       ),
     );
 
-    expect(readInFlightTurn('web-conversation-1')).toBeNull();
+    expect(readInFlightTurn('web-conversation-1', '11111111-1111-1111-1111-111111111111')).toBeNull();
     expect(streamsFor(streams, '/api/turns/turn-old/events')).toHaveLength(0);
   });
 
@@ -10729,7 +11118,7 @@ function App() {
       // record belongs to the conversation that just ended: leaving it would make the remounted
       // TurnTracer immediately reconnect that Turn's stream - or, in the lost-response case, re-POST
       // it - dragging work from the old conversation into the new one on the very first render.
-      clearInFlightTurn(state.session.bootstrap.webConversationId);
+      clearInFlightTurn(state.session.bootstrap.webConversationId, state.session.bootstrap.participantId);
 
       // Remounts the conversation, which is what drops this tab's transcript. The Inventory the
       // Participant was working in, and every authorization they hold, are deliberately untouched -
@@ -10807,6 +11196,7 @@ function App() {
         key={conversationEpoch}
         csrfToken={session.csrfToken}
         webConversationId={bootstrap.webConversationId}
+        participantId={bootstrap.participantId}
         onTerminalOutcome={invalidateActiveInventory}
       />
     </>
@@ -10923,7 +11313,7 @@ export default App;
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `cd src/web && npm test`
-Expected: PASS. The whole web suite - roughly 75 tests across eight files (Task 19's `WorkspacePanel.test.tsx` grew from 10 to 15 tests and gained a sibling `useMediaQuery.test.ts` with 2 tests, both during that task's own quality-review hardening; Task 20's `TurnTracer.test.tsx` grew from 10 to 12 tests during its own StrictMode hardening) - is green.
+Expected: PASS. The whole web suite - roughly 88 tests across eight files (Task 19's `WorkspacePanel.test.tsx` grew from 10 to 15 tests and gained a sibling `useMediaQuery.test.ts` with 2 tests, both during that task's own quality-review hardening; Task 17's `conversationStorage.test.ts` grew from 14 to 24 tests, and Task 20's `TurnTracer.test.tsx` grew from 10 to 15 tests, both during Task 20's own two quality-review hardening passes - StrictMode recovery, then Participant scope/superseded-Turn/unmount safety) - is green.
 
 - [ ] **Step 5: Check types, lint, and build**
 
@@ -11055,8 +11445,8 @@ If Step 6 changed nothing, skip this commit rather than creating an empty one.
 | 1 | Desktop and narrow-screen layouts keep conversation primary and expose an accessible live Inventory workspace | Task 19 (`WorkspacePanel`, `useMediaQuery`, `index.css`), Task 21 (`App` shell, always-visible Active Inventory) | `WorkspacePanel.test.tsx` (landmarks, DOM order, tab semantics, arrow-key navigation, panel labelling, both panel ids always present so no tab's `aria-controls` ever dangles, conversation and workspace identity and state preserved - not remounted - across a breakpoint transition and back, media query subscription cleaned up on unmount, a focused element inside either panel stays visible and focused when narrowing even against a stale prior tab selection), `useMediaQuery.test.ts` (a stable subscription survives an unrelated rerender, a query change tears it down and starts a new one), `App.test.tsx` (conversation in `main` on desktop, conversation tab first and selected on narrow, header Active Inventory), Task 22 Step 7.1 |
 | 2 | Typed Turns return stable Turn IDs and publish finite resumable SSE progress, semantic parts, and terminal Outcomes with event IDs | Task 1 (fixed sequences), Task 2 (`processing`), Task 3 (`TurnEventReader`), Task 4 (durable progress rows), Task 5 (retention), Task 6 (`GET /api/turns/{id}/events`), Task 16 (client) | `TurnStreamEventTests`, `TurnEventReaderTests` (ordering, replay, terminal, swept log, single-line data), `TurnEventStreamHttpTests` (full order with ids, resume by query and by header, ignored bad resume point, finite terminal, framing, keep-alive heartbeat), `turnStream.test.ts`, `WebConversationContinuitySqlScenarioTests` on real SQL Server. Honest scope: progress is incremental (`accepted`, then `processing`); the semantic parts are projected from the recorded Outcome and therefore arrive with the terminal event - stated in D1 and in Known limits |
 | 3 | A separate Participant-level SSE stream invalidates Inventory projections after changes from any channel | Task 7 (version bump at the persistence seam, no foreign key), Task 8 (`InventoryInvalidationReader`, `GET /api/inventory-events`), Task 18 (client), Task 21 (`App` wiring) | `InventoryVersionBumpTests` (one bump per audited commit, none on denial, none on rollback, independent per Inventory, no foreign key, fallback insertion), `InventoryInvalidationReaderTests`, `InventoryEventStreamHttpTests` (snapshot, change via the conversational worker, change by another Participant over HTTP, revocation, non-disclosure, and a change made while nothing was connected arriving in the reconnect snapshot - the proof that no cursor is needed), `inventoryStream.test.ts`, `App.test.tsx` (version-driven refetch, and a local signal never swallowing the server's next version), `WebConversationContinuitySqlScenarioTests` (a genuinely concurrent pair of commits, asserted from a captured baseline) |
-| 4 | One browser-profile ChannelConversation resumes across refreshes, restarts, and tabs while preserving the shared FIFO queue | Shipped `WebConversationCookie` + `SqlInboxStore` FIFO, Task 17 (`conversationStorage`), Task 20 (mount-time resume, cross-tab `storage` subscription) | `SharedBrowserProfileScenario` (one ChannelConversation across tabs, one shared FIFO order, a second tab watching the first tab's Turn, identical replay on reconnect), `conversationStorage.test.ts`, `TurnTracer.test.tsx` (resume on mount and recovers a live stream after StrictMode's development-only remount, adopt another tab's Turn), Task 22 Step 7.3 |
-| 5 | Disconnect recovery retrieves recorded status and Outcome without resubmitting unknown mutation-capable work | Task 6 (the stream is a pure `GET`; disconnect cancels and undoes nothing), Task 17 (idempotency key recorded before the request leaves), Task 20 (resume reads; resubmits only the same native message id, and at most once per mount) | `TurnEventStreamHttpTests` disconnect test, `SharedBrowserProfileScenario` resubmission test (one inbox row, quantity applied exactly once), `TurnTracer.test.tsx` (reconnect issues no fetch at all; the lost-response case reuses the same `nativeMessageId`; a parent re-render during the pre-Turn-id window resubmits nothing, including together with React StrictMode's development-only mount/cleanup/mount) |
+| 4 | One browser-profile ChannelConversation resumes across refreshes, restarts, and tabs while preserving the shared FIFO queue | Shipped `WebConversationCookie` + `SqlInboxStore` FIFO, Task 17 (`conversationStorage`, scoped by both `webConversationId` and `participantId`), Task 20 (mount-time resume, cross-tab `storage` subscription) | `SharedBrowserProfileScenario` (one ChannelConversation across tabs, one shared FIFO order, a second tab watching the first tab's Turn, identical replay on reconnect), `conversationStorage.test.ts` (including two Participants sharing one web conversation id kept fully isolated, and a storage event notifying only the matching Participant scope), `TurnTracer.test.tsx` (resume on mount and recovers a live stream after StrictMode's development-only remount, adopt another tab's Turn), Task 22 Step 7.3 |
+| 5 | Disconnect recovery retrieves recorded status and Outcome without resubmitting unknown mutation-capable work | Task 6 (the stream is a pure `GET`; disconnect cancels and undoes nothing), Task 17 (idempotency key recorded before the request leaves; `clearInFlightTurnIfMatches` so a superseded Turn's own belated completion can never clear or overwrite a newer one), Task 20 (resume reads; resubmits only the same native message id, and at most once per mount; a real unmount is checked for before any post-await side effect) | `TurnEventStreamHttpTests` disconnect test, `SharedBrowserProfileScenario` resubmission test (one inbox row, quantity applied exactly once), `TurnTracer.test.tsx` (reconnect issues no fetch at all; the lost-response case reuses the same `nativeMessageId`; a parent re-render during the pre-Turn-id window resubmits nothing, including together with React StrictMode's development-only mount/cleanup/mount; a superseded Turn's streamed Outcome cannot clear or overwrite a newer Turn's record or UI; an unmount while either continuation's submission is still in flight opens no stream and touches nothing) |
 | 6 | "Use in this conversation" explicitly switches Active Inventory and records the switch; browsing never switches implicitly | Shipped `InventorySelectionService` + `POST /api/inventories/{id}/select`, Task 21 (the button is the only caller) | `SharedBrowserProfileScenario` (browsing lists, Stock, and references changes nothing; selection changes and records; a switch in one tab is every tab's switch), `App.test.tsx` (no `/select` call until the button is clicked), Task 22 Step 7.5 |
 | 7 | "New conversation" rotates Foundry history and clears pending clarification/confirmation state without removing authorized access | Task 9 (generation captured at acceptance), Task 10 (`SqlConversationRotationStore`, `ProposalStatus.ConversationReset`), Task 11 (a superseded-conversation Turn leaves nothing confirmable, decided by re-reading the binding after dispatch), Task 12 (`POST /api/conversation/new`), Task 21 (the control, its notice, and forgetting the in-flight Turn) | `SqlConversationRotationStoreTests` (new generation, settled proposal, Membership and selection untouched, other conversations untouched, two rotations advancing two generations), `ConversationRotationServiceTests`, `TurnExecutionContextFactoryTests` (superseded detection and its fallback), `ConfirmationProposalLifecycleTests` (settled before dispatch; settled after dispatch by re-reading the current generation; settled when the reset lands *after* the trusted context was assembled, which is the ordering a captured flag cannot see; and the re-read waiting for a reset that is still committing rather than answering from the generation it replaces), `FoundryConversationBindingSupersessionReadTests` and `SqlFoundryConversationBindingSupersessionReadTests` (the locking read's per-provider shape, and that it never creates a binding), `SqlSupersessionReadSerializationTests` (the U &lt; P &lt; S &lt; R window on real SQL Server with `READ_COMMITTED_SNAPSHOT` on), `TurnProcessingCoordinatorTests` (a stale mutation Turn leaves nothing pending, and a reset that commits while the Turn is parked at the model boundary still leaves nothing pending), `ConversationRotationHttpTests` (generation changes, authorizations and Active Inventory survive, the held token stops working, the Initial Import proposal survives, CSRF and authentication required, work accepted before the reset still completes, and a proposal created after the reset out of work from before it can never be confirmed), `App.test.tsx` (the in-flight Turn is forgotten and no old stream reopens), `WebConversationContinuitySqlScenarioTests` (concurrent resets with a real deadlock retry, reset racing acceptance) |
 | — | No monetary budget enforcement within this initial scope | Nothing is built | No task adds a cost check, spend ceiling, or budget policy; the Scope section forbids it outright |

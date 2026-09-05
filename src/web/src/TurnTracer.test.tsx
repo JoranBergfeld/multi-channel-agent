@@ -1,12 +1,13 @@
 import { StrictMode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { recordingEventStreamFactory } from './testing/fakeEventSource';
 import { rememberSubmission, rememberTurnId, readInFlightTurn } from './conversationStorage';
 import TurnTracer from './TurnTracer';
 
 const CONVERSATION = 'web-conversation-1';
+const PARTICIPANT = 'participant-1';
 
 function stubFetch(responder: (url: string, init?: RequestInit) => Response) {
   const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) =>
@@ -23,11 +24,22 @@ function acceptedResponse(turnId: string) {
   });
 }
 
+/** Flushes the microtask chain a pending `fetch`/`response.json()`/component continuation runs
+ * through once its response resolves, without depending on any observable side effect - which is
+ * exactly what a post-unmount continuation must not have. A macrotask tick is enough: every
+ * microtask already queued (however many `await`s deep) always drains before it fires. */
+async function flushAsyncWork() {
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+}
+
 function renderTracer(createSource: ReturnType<typeof recordingEventStreamFactory>['factory']) {
   return render(
     <TurnTracer
       csrfToken="csrf-token"
       webConversationId={CONVERSATION}
+      participantId={PARTICIPANT}
       onTerminalOutcome={() => {}}
       createSource={createSource}
     />,
@@ -136,8 +148,8 @@ describe('TurnTracer', () => {
 
   it('reconnects to a Turn it had already submitted, without submitting anything again', async () => {
     const fetchMock = stubFetch(() => acceptedResponse('turn-should-not-happen'));
-    rememberSubmission(CONVERSATION, { nativeMessageId: 'native-1', contentText: 'list stock' });
-    rememberTurnId(CONVERSATION, 'native-1', 'turn-resumed');
+    rememberSubmission(CONVERSATION, PARTICIPANT, { nativeMessageId: 'native-1', contentText: 'list stock' });
+    rememberTurnId(CONVERSATION, PARTICIPANT, 'native-1', 'turn-resumed');
 
     const { opened, factory } = recordingEventStreamFactory();
     renderTracer(factory);
@@ -151,8 +163,8 @@ describe('TurnTracer', () => {
 
   it('recovers a live stream after StrictMode\'s development-only mount/cleanup/mount', async () => {
     const fetchMock = stubFetch(() => acceptedResponse('turn-should-not-happen'));
-    rememberSubmission(CONVERSATION, { nativeMessageId: 'native-1', contentText: 'list stock' });
-    rememberTurnId(CONVERSATION, 'native-1', 'turn-resumed');
+    rememberSubmission(CONVERSATION, PARTICIPANT, { nativeMessageId: 'native-1', contentText: 'list stock' });
+    rememberTurnId(CONVERSATION, PARTICIPANT, 'native-1', 'turn-resumed');
 
     const { opened, factory } = recordingEventStreamFactory();
     render(
@@ -160,6 +172,7 @@ describe('TurnTracer', () => {
         <TurnTracer
           csrfToken="csrf-token"
           webConversationId={CONVERSATION}
+          participantId={PARTICIPANT}
           onTerminalOutcome={() => {}}
           createSource={factory}
         />
@@ -177,7 +190,7 @@ describe('TurnTracer', () => {
 
   it('resubmits the very same native message id when it never learned the Turn id', async () => {
     const fetchMock = stubFetch(() => acceptedResponse('turn-recovered'));
-    rememberSubmission(CONVERSATION, { nativeMessageId: 'native-lost', contentText: 'list stock' });
+    rememberSubmission(CONVERSATION, PARTICIPANT, { nativeMessageId: 'native-lost', contentText: 'list stock' });
 
     const { opened, factory } = recordingEventStreamFactory();
     renderTracer(factory);
@@ -205,7 +218,66 @@ describe('TurnTracer', () => {
       '1000000',
     );
 
-    await waitFor(() => expect(readInFlightTurn(CONVERSATION)).toBeNull());
+    await waitFor(() => expect(readInFlightTurn(CONVERSATION, PARTICIPANT)).toBeNull());
+  });
+
+  it('keeps a newer Turn B intact when a superseded Turn A\'s streamed Outcome arrives after B was submitted', async () => {
+    let resolveB: (response: Response) => void = () => {};
+    const pendingB = new Promise<Response>((resolve) => {
+      resolveB = resolve;
+    });
+
+    let callCount = 0;
+    const fetchMock = vi.fn(() => {
+      callCount += 1;
+      return callCount === 1 ? Promise.resolve(acceptedResponse('turn-A')) : pendingB;
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const { opened, factory } = recordingEventStreamFactory();
+    renderTracer(factory);
+
+    // A is submitted and streaming.
+    await userEvent.click(screen.getByRole('button', { name: 'Send' }));
+    await waitFor(() => expect(opened).toHaveLength(1));
+    const streamA = opened[0];
+
+    // B is submitted before A ever answers. Its POST is still pending.
+    await userEvent.click(screen.getByRole('button', { name: 'Send' }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+
+    const storedWhileBPending = readInFlightTurn(CONVERSATION, PARTICIPANT);
+    expect(storedWhileBPending?.turnId).toBeNull();
+    expect(storedWhileBPending?.nativeMessageId).toBeDefined();
+
+    // A's own stream reports its terminal Outcome only now, after B already exists. It must be
+    // ignored entirely - not rendered, and not allowed to clear or touch B's stored record.
+    streamA.emit(
+      'outcome',
+      {
+        turnId: 'turn-A',
+        status: 'completed',
+        category: 'completed',
+        code: 'a.echo',
+        summary: 'A done.',
+        deliveries: [],
+      },
+      '1000000',
+    );
+    // Flushed explicitly: `emit` is a raw synchronous call outside any React event, so a state
+    // update it triggered still needs a tick to reach the DOM before a synchronous query could see
+    // it - without this, an assertion that it never arrives would pass for the wrong reason.
+    await flushAsyncWork();
+
+    expect(screen.queryByText('a.echo')).not.toBeInTheDocument();
+    expect(readInFlightTurn(CONVERSATION, PARTICIPANT)).toEqual(storedWhileBPending);
+
+    // B's own response now arrives and associates correctly.
+    resolveB(acceptedResponse('turn-B'));
+    await waitFor(() =>
+      expect(opened.some((source) => source.url === '/api/turns/turn-B/events' && !source.closed)).toBe(true),
+    );
+    expect(readInFlightTurn(CONVERSATION, PARTICIPANT)?.turnId).toBe('turn-B');
   });
 
   it('picks up a Turn another tab of the same browser profile started', async () => {
@@ -215,10 +287,10 @@ describe('TurnTracer', () => {
     renderTracer(factory);
     expect(opened).toHaveLength(0);
 
-    rememberSubmission(CONVERSATION, { nativeMessageId: 'native-other-tab', contentText: 'list stock' });
-    rememberTurnId(CONVERSATION, 'native-other-tab', 'turn-other-tab');
+    rememberSubmission(CONVERSATION, PARTICIPANT, { nativeMessageId: 'native-other-tab', contentText: 'list stock' });
+    rememberTurnId(CONVERSATION, PARTICIPANT, 'native-other-tab', 'turn-other-tab');
     window.dispatchEvent(
-      new StorageEvent('storage', { key: `mca.conversation.${CONVERSATION}`, newValue: 'changed' }),
+      new StorageEvent('storage', { key: `mca.conversation.${CONVERSATION}.${PARTICIPANT}`, newValue: 'changed' }),
     );
 
     await waitFor(() => expect(opened).toHaveLength(1));
@@ -236,12 +308,13 @@ describe('TurnTracer', () => {
 
     // The one dangerous window: a stored submission whose response was never seen, so the component
     // is mid-resubmit and `turnId` is still null.
-    rememberSubmission(CONVERSATION, { nativeMessageId: 'native-lost', contentText: 'list stock' });
+    rememberSubmission(CONVERSATION, PARTICIPANT, { nativeMessageId: 'native-lost', contentText: 'list stock' });
 
     const { opened, factory } = recordingEventStreamFactory();
     const props = {
       csrfToken: 'csrf-token',
       webConversationId: CONVERSATION,
+      participantId: PARTICIPANT,
       onTerminalOutcome: () => {},
       createSource: factory,
     };
@@ -268,12 +341,13 @@ describe('TurnTracer', () => {
     const fetchMock = vi.fn(() => pending);
     vi.stubGlobal('fetch', fetchMock);
 
-    rememberSubmission(CONVERSATION, { nativeMessageId: 'native-lost', contentText: 'list stock' });
+    rememberSubmission(CONVERSATION, PARTICIPANT, { nativeMessageId: 'native-lost', contentText: 'list stock' });
 
     const { opened, factory } = recordingEventStreamFactory();
     const props = {
       csrfToken: 'csrf-token',
       webConversationId: CONVERSATION,
+      participantId: PARTICIPANT,
       onTerminalOutcome: () => {},
       createSource: factory,
     };
@@ -297,6 +371,84 @@ describe('TurnTracer', () => {
 
     await waitFor(() => expect(opened).toHaveLength(1));
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not act on a submit response that arrives after the component has really unmounted', async () => {
+    let resolveSubmission: (response: Response) => void = () => {};
+    const pending = new Promise<Response>((resolve) => {
+      resolveSubmission = resolve;
+    });
+
+    const fetchMock = vi.fn(() => pending);
+    vi.stubGlobal('fetch', fetchMock);
+
+    const onTerminalOutcome = vi.fn();
+    const { opened, factory } = recordingEventStreamFactory();
+    const { unmount } = render(
+      <TurnTracer
+        csrfToken="csrf-token"
+        webConversationId={CONVERSATION}
+        participantId={PARTICIPANT}
+        onTerminalOutcome={onTerminalOutcome}
+        createSource={factory}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole('button', { name: 'Send' }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+
+    const storedBeforeUnmount = readInFlightTurn(CONVERSATION, PARTICIPANT);
+    expect(storedBeforeUnmount?.turnId).toBeNull();
+
+    // A real unmount - not StrictMode's simulated one, which always flips the mounted guard back to
+    // true before any awaited response could arrive.
+    unmount();
+
+    resolveSubmission(acceptedResponse('turn-after-unmount'));
+    await flushAsyncWork();
+
+    // Nobody is left to watch a stream for a response nobody is left to receive.
+    expect(opened).toHaveLength(0);
+    expect(onTerminalOutcome).not.toHaveBeenCalled();
+    // Exactly as it was at the moment of unmount - neither cleared nor stamped with the late Turn id.
+    expect(readInFlightTurn(CONVERSATION, PARTICIPANT)).toEqual(storedBeforeUnmount);
+  });
+
+  it('does not act on a resumed (lost-response) submission\'s response that arrives after the component has really unmounted', async () => {
+    let resolveSubmission: (response: Response) => void = () => {};
+    const pending = new Promise<Response>((resolve) => {
+      resolveSubmission = resolve;
+    });
+
+    const fetchMock = vi.fn(() => pending);
+    vi.stubGlobal('fetch', fetchMock);
+
+    rememberSubmission(CONVERSATION, PARTICIPANT, { nativeMessageId: 'native-lost', contentText: 'list stock' });
+
+    const onTerminalOutcome = vi.fn();
+    const { opened, factory } = recordingEventStreamFactory();
+    const { unmount } = render(
+      <TurnTracer
+        csrfToken="csrf-token"
+        webConversationId={CONVERSATION}
+        participantId={PARTICIPANT}
+        onTerminalOutcome={onTerminalOutcome}
+        createSource={factory}
+      />,
+    );
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+
+    const storedBeforeUnmount = readInFlightTurn(CONVERSATION, PARTICIPANT);
+
+    unmount();
+
+    resolveSubmission(acceptedResponse('turn-recovered-after-unmount'));
+    await flushAsyncWork();
+
+    expect(opened).toHaveLength(0);
+    expect(onTerminalOutcome).not.toHaveBeenCalled();
+    expect(readInFlightTurn(CONVERSATION, PARTICIPANT)).toEqual(storedBeforeUnmount);
   });
 
   it('never renders a control that would change a quantity directly', async () => {

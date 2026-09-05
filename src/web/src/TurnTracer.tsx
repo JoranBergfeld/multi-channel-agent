@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  clearInFlightTurn,
+  clearInFlightTurnIfMatches,
   readInFlightTurn,
   rememberSubmission,
   rememberTurnId,
@@ -282,6 +282,8 @@ interface TurnTracerProps {
   csrfToken: string;
   /** This browser profile's stable web conversation identity, from the session bootstrap. */
   webConversationId: string;
+  /** The signed-in Participant's stable identity, from the session bootstrap. */
+  participantId: string;
   /** Called once a terminal Outcome arrives, so the workspace can refetch its authoritative projection. */
   onTerminalOutcome: () => void;
   /** Swapped in tests for a controllable double, since jsdom implements no EventSource. */
@@ -311,7 +313,7 @@ const PROGRESS_TEXT: Record<Exclude<ConversationProgress, 'idle'>, string> = {
  * Participant and ChannelConversation identity are always derived server-side; this component never
  * supplies either, and it holds no token of any kind.
  */
-function TurnTracer({ csrfToken, webConversationId, onTerminalOutcome, createSource }: TurnTracerProps) {
+function TurnTracer({ csrfToken, webConversationId, participantId, onTerminalOutcome, createSource }: TurnTracerProps) {
   const [contentText, setContentText] = useState('list stock');
   const [progress, setProgress] = useState<ConversationProgress>('idle');
   const [turnId, setTurnId] = useState<string | null>(null);
@@ -331,6 +333,13 @@ function TurnTracer({ csrfToken, webConversationId, onTerminalOutcome, createSou
   // The parts as they arrive, mirrored outside React state so the terminal handler can compose the
   // Outcome from them without reading state inside a state updater - which React may run twice.
   const partsRef = useRef<TurnResponsePartEvent[]>([]);
+
+  // True whenever this component is actually mounted - including through React StrictMode's
+  // development-only mount/cleanup/mount, which flips it false and back true the same way it flips
+  // streamRef/watchedTurnRef below. Every async continuation checks it immediately after its await,
+  // before touching state, storage, a stream, or the parent callback - so a response that arrives
+  // after a real unmount can never act as though this component were still here to receive it.
+  const mountedRef = useRef(false);
 
   const watchTurn = useCallback(
     (id: string) => {
@@ -359,7 +368,12 @@ function TurnTracer({ csrfToken, webConversationId, onTerminalOutcome, createSou
           onOutcome: (terminal) => {
             setOutcome(composeOutcome(partsRef.current, terminal));
             setProgress('idle');
-            clearInFlightTurn(webConversationId);
+            // Only if the stored record still names *this* Turn. A superseded Turn's own belated
+            // completion must never clear the newer Turn a Participant has since submitted -
+            // `handleSubmit` already closed this stream the instant that happened, so in the
+            // ordinary case this fires only for the Turn that is genuinely still current, but the
+            // check is what makes that true rather than assumed.
+            clearInFlightTurnIfMatches(webConversationId, participantId, { turnId: id });
             onTerminalOutcome();
           },
           onFailed: () => {
@@ -374,11 +388,11 @@ function TurnTracer({ csrfToken, webConversationId, onTerminalOutcome, createSou
         factory: createSource,
       });
     },
-    [createSource, onTerminalOutcome, webConversationId],
+    [createSource, onTerminalOutcome, participantId, webConversationId],
   );
 
   const resumeStoredTurn = useCallback(async () => {
-    const stored = readInFlightTurn(webConversationId);
+    const stored = readInFlightTurn(webConversationId, participantId);
     if (stored === null) {
       return;
     }
@@ -401,22 +415,33 @@ function TurnTracer({ csrfToken, webConversationId, onTerminalOutcome, createSou
         csrfToken,
       );
 
+      if (!mountedRef.current) {
+        // A real unmount, not StrictMode's simulated one - that always flips mountedRef back to
+        // true well before any awaited response could arrive. Nothing is left to act on: no state
+        // to set, no stream to open, no parent to notify.
+        return;
+      }
+
       if (result.kind === 'outcome') {
         setTurnId(result.outcome.turnId);
         setOutcome(result.outcome);
         setProgress('idle');
-        clearInFlightTurn(webConversationId);
+        clearInFlightTurnIfMatches(webConversationId, participantId, { nativeMessageId: stored.nativeMessageId });
         onTerminalOutcome();
         return;
       }
 
-      rememberTurnId(webConversationId, stored.nativeMessageId, result.acceptance.turnId);
+      rememberTurnId(webConversationId, participantId, stored.nativeMessageId, result.acceptance.turnId);
       watchTurn(result.acceptance.turnId);
     } catch (err) {
+      if (!mountedRef.current) {
+        return;
+      }
+
       setError(err instanceof Error ? err.message : String(err));
       setProgress('idle');
     }
-  }, [csrfToken, onTerminalOutcome, watchTurn, webConversationId]);
+  }, [csrfToken, onTerminalOutcome, participantId, watchTurn, webConversationId]);
 
   useEffect(() => {
     if (resumeAttemptedRef.current) {
@@ -426,7 +451,7 @@ function TurnTracer({ csrfToken, webConversationId, onTerminalOutcome, createSou
       // effect opened moments ago (see the close-on-unmount effect below), leaving a known Turn id
       // with nothing watching it. Recovering that is always a pure read, so it is always safe to
       // repeat: `watchTurn` itself is a no-op if a live stream for this id already exists.
-      const stored = readInFlightTurn(webConversationId);
+      const stored = readInFlightTurn(webConversationId, participantId);
       if (stored?.turnId != null) {
         watchTurn(stored.turnId);
       }
@@ -438,19 +463,19 @@ function TurnTracer({ csrfToken, webConversationId, onTerminalOutcome, createSou
     void (async () => {
       await resumeStoredTurn();
     })();
-  }, [resumeStoredTurn, watchTurn, webConversationId]);
+  }, [participantId, resumeStoredTurn, watchTurn, webConversationId]);
 
   useEffect(
     () =>
-      subscribeToConversationChanges(webConversationId, () => {
+      subscribeToConversationChanges(webConversationId, participantId, () => {
         // Another tab of this browser profile submitted a Turn, or started a new conversation. Both
         // are changes to the one conversation they share, so this tab follows.
-        const stored = readInFlightTurn(webConversationId);
+        const stored = readInFlightTurn(webConversationId, participantId);
         if (stored?.turnId != null) {
           watchTurn(stored.turnId);
         }
       }),
-    [watchTurn, webConversationId],
+    [participantId, watchTurn, webConversationId],
   );
 
   useEffect(
@@ -466,8 +491,27 @@ function TurnTracer({ csrfToken, webConversationId, onTerminalOutcome, createSou
     [],
   );
 
+  useEffect(() => {
+    mountedRef.current = true;
+
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
   async function handleSubmit(event: React.FormEvent) {
     event.preventDefault();
+
+    // A newer Turn supersedes whatever this component was watching. Closing it here - before this
+    // submission's own record is even written - guarantees the old stream can never deliver another
+    // event: openTurnStream gates every handler behind its own closed flag the instant close() is
+    // called, synchronously, before this function does anything else. Without this, a queued event
+    // from the superseded Turn - most dangerously its own terminal Outcome - could still fire after
+    // this one exists and clear or overwrite it.
+    streamRef.current?.close();
+    streamRef.current = null;
+    watchedTurnRef.current = null;
+
     setError(null);
     setOutcome(null);
     partsRef.current = [];
@@ -478,10 +522,16 @@ function TurnTracer({ csrfToken, webConversationId, onTerminalOutcome, createSou
 
     // Recorded BEFORE the request leaves, so a response that never arrives still leaves this browser
     // profile holding the idempotency key it submitted under.
-    rememberSubmission(webConversationId, { nativeMessageId, contentText });
+    rememberSubmission(webConversationId, participantId, { nativeMessageId, contentText });
 
     try {
       const result = await submitTurn({ nativeMessageId, contentText }, csrfToken);
+
+      if (!mountedRef.current) {
+        // A real unmount. Nothing is left to act on: no state to set, no stream to open, no parent
+        // to notify.
+        return;
+      }
 
       if (result.kind === 'outcome') {
         // This exact native message was already answered, so its recorded terminal Outcome came back
@@ -489,14 +539,18 @@ function TurnTracer({ csrfToken, webConversationId, onTerminalOutcome, createSou
         setTurnId(result.outcome.turnId);
         setOutcome(result.outcome);
         setProgress('idle');
-        clearInFlightTurn(webConversationId);
+        clearInFlightTurnIfMatches(webConversationId, participantId, { nativeMessageId });
         onTerminalOutcome();
         return;
       }
 
-      rememberTurnId(webConversationId, nativeMessageId, result.acceptance.turnId);
+      rememberTurnId(webConversationId, participantId, nativeMessageId, result.acceptance.turnId);
       watchTurn(result.acceptance.turnId);
     } catch (err) {
+      if (!mountedRef.current) {
+        return;
+      }
+
       setError(err instanceof Error ? err.message : String(err));
       setProgress('idle');
     }

@@ -209,6 +209,7 @@ function App() {
       <TurnTracer
         csrfToken={session.csrfToken}
         webConversationId={bootstrap.webConversationId}
+        participantId={bootstrap.participantId}
         onTerminalOutcome={() => setStockRefetchToken((token) => token + 1)}
       />
 
