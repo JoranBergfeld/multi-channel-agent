@@ -5077,11 +5077,21 @@ git commit -m "feat: rotate a conversation's Foundry generation and pending conf
 
 **Files:**
 - Modify: `src/MultiChannelAgent.Application/Turns/TurnExecutionContext.cs`
+- Modify: `src/MultiChannelAgent.Application/Turns/IFoundryConversationBindingStore.cs`
 - Modify: `src/MultiChannelAgent.Application/Inventories/ConfirmationProposalLifecycle.cs`
 - Modify: `src/MultiChannelAgent.Application/Turns/TurnProcessingCoordinator.cs`
+- Add: `src/MultiChannelAgent.Infrastructure/Persistence/FoundryConversationBindingSupersessionRead.cs`
+- Modify: `src/MultiChannelAgent.Infrastructure/Turns/SqlFoundryConversationBindingStore.cs`
 - Test: `tests/MultiChannelAgent.Application.Tests/TurnExecutionContextFactoryTests.cs`
 - Test: `tests/MultiChannelAgent.Application.Tests/Inventories/ConfirmationProposalLifecycleTests.cs`
 - Test: `tests/MultiChannelAgent.Application.Tests/TurnProcessingCoordinatorTests.cs`
+- Test: `tests/MultiChannelAgent.Application.Tests/TestDoubles/InMemoryFoundryConversationBindingStore.cs`
+- Test: `tests/MultiChannelAgent.Application.Tests/TestDoubles/Inventories/InMemoryConfirmationProposalStore.cs`
+- Test: `tests/MultiChannelAgent.IntegrationTests/FoundryConversationBindingSupersessionReadTests.cs`
+- Test: `tests/MultiChannelAgent.IntegrationTests/SqlFoundryConversationBindingSupersessionReadTests.cs`
+- Test: `tests/MultiChannelAgent.IntegrationTests/SqlSupersessionReadSerializationTests.cs`
+- Test: `tests/MultiChannelAgent.IntegrationTests/SqlUserDatabase.cs`
+- Test: `tests/MultiChannelAgent.IntegrationTests/SqlIntegrationTestBase.cs`
 
 This is D10. Task 10 settles what is pending **at the moment** a conversation is reset. This settles what a Turn accepted *before* that reset would otherwise leave pending **after** it - the one interleaving that would let a Participant confirm, in their new conversation, work they walked away from. Nothing here is persisted: the generation a Turn was accepted under is already durable on its inbox row from Task 9, and the proposal already names the Turn that proposed it, so this needs no column, no migration, and no backfill.
 
@@ -5092,7 +5102,11 @@ This is D10. Task 10 settles what is pending **at the moment** a conversation is
 - **Rotation before the Turn is claimed.** The factory computes `AcceptedInSupersededConversation: true`, and the pre-dispatch `ReconcileAsync` settles anything already pending before the model is asked anything.
 - **Rotation while the Turn is being processed** - after the trusted context was assembled, and before or during the dispatch that stores a proposal. Here the flag is `false`, because it was true-at-the-time when it was computed. A settle that short-circuits on it does nothing, and the Turn leaves a confirmable proposal in the conversation the Participant just started.
 
-So `SettleSupersededConversationAsync` **must not** gate on `context.AcceptedInSupersededConversation`. It re-reads the conversation's current binding through `IFoundryConversationBindingStore` at settlement time and compares it with `context.FoundryConversationGeneration` - the generation the Turn was accepted under, which came off the Turn's own inbox row and therefore cannot go stale. `ConfirmationProposalLifecycle` gains that store as a constructor dependency; it is already registered (`services.AddScoped<IFoundryConversationBindingStore, SqlFoundryConversationBindingStore>()`), and `ConfirmationProposalLifecycle` is itself already `AddScoped`, so **no production registration changes**. `ConfirmationProposalLifecycle.cs` already has `using MultiChannelAgent.Application.Turns;`, so no new using either.
+So `SettleSupersededConversationAsync` **must not** gate on `context.AcceptedInSupersededConversation`. It re-reads the conversation's binding at settlement time and compares it with `context.FoundryConversationGeneration` - the generation the Turn was accepted under, which came off the Turn's own inbox row and therefore cannot go stale.
+
+**And that re-read must be a locking read, not an ordinary one.** This is the third race, and it is invisible on any database without `READ_COMMITTED_SNAPSHOT` - which every Azure SQL database is created with, and which the container the SQL tests share does not have. `SqlConversationRotationStore.RotateAsync` bumps the generation and settles pending proposals inside one transaction; while it sits between its settle statement and its commit, an ordinary read is served from row versions and answers with the generation that rotation is *replacing*. Order that as **U < P < S < R** - the rotation's settle, then the Turn's proposal, then the re-read, then the commit - and neither mechanism fires: the rotation settled nothing because the proposal did not exist yet, and the re-read reported the conversation as current. So the re-read goes through its own seam, `IFoundryConversationBindingStore.ReadCurrentForSupersessionAsync`, whose contract is to serialize against an in-flight rotation of that binding row. `GetOrCreateAsync` keeps its cheap snapshot semantics: every other caller wants the current answer, not a queue behind a reset.
+
+`ConfirmationProposalLifecycle` gains the binding store as a constructor dependency; it is already registered (`services.AddScoped<IFoundryConversationBindingStore, SqlFoundryConversationBindingStore>()`), and `ConfirmationProposalLifecycle` is itself already `AddScoped`, so **no production registration changes**. `ConfirmationProposalLifecycle.cs` already has `using MultiChannelAgent.Application.Turns;`, so no new using either.
 
 The flag stays, and stays used, for the pre-dispatch `ReconcileAsync` only - there it is fresh, computed moments earlier in the same pass.
 
@@ -5102,7 +5116,7 @@ Append to `tests/MultiChannelAgent.Application.Tests/TurnExecutionContextFactory
 
 ```csharp
     [Fact]
-    public async Task A_turn_accepted_before_a_reset_is_recognized_as_belonging_to_the_superseded_conversation()
+    public async Task A_turn_whose_conversation_has_since_been_reset_says_so()
     {
         var (factory, _, _, inbox, bindings) = CreateFactory();
         var turn = Turn("conversation-1");
@@ -5124,7 +5138,7 @@ Append to `tests/MultiChannelAgent.Application.Tests/TurnExecutionContextFactory
     }
 
     [Fact]
-    public async Task A_turn_accepted_in_the_conversations_current_generation_is_not_superseded()
+    public async Task A_turn_whose_conversation_is_still_the_current_one_is_not_marked_superseded()
     {
         var (factory, _, _, inbox, bindings) = CreateFactory();
         var turn = Turn("conversation-1");
@@ -5138,21 +5152,32 @@ Append to `tests/MultiChannelAgent.Application.Tests/TurnExecutionContextFactory
         Assert.False(context.AcceptedInSupersededConversation);
     }
 
+    // A reset in one ChannelConversation is not a reset in another: the binding is per pair, and a
+    // Turn must never be treated as stale because some other conversation moved on.
     [Fact]
-    public async Task A_turn_accepted_before_bindings_were_captured_is_not_superseded_when_its_context_is_assembled()
+    public async Task A_reset_in_another_channel_conversation_never_marks_this_turn_superseded()
     {
-        var (factory, _, _, _, _) = CreateFactory();
+        var (factory, _, _, inbox, bindings) = CreateFactory();
+        var turn = Turn("conversation-1");
+        var acceptedUnder = await bindings.GetOrCreateAsync(
+            SomeParticipant, turn.ChannelConversationId, Now, CancellationToken.None);
+        await inbox.AcceptAsync(turn, acceptedUnder, CancellationToken.None);
+        bindings.Rotate(SomeParticipant, new ChannelConversationId("conversation-2"), Now.AddMinutes(1));
 
-        // Never accepted through the inbox, so nothing was captured - exactly the residue Task 9's
-        // migration backfills. The fallback uses the current binding, which by definition matches it.
-        // This is only a statement about context-creation time: the post-dispatch settle in Step 7
-        // compares generations rather than asking where the context's generation came from, so a
-        // reset landing later still settles what such a Turn stores.
-        var context = await factory.CreateAsync(Turn("conversation-1"), Now, CancellationToken.None);
+        var context = await factory.CreateAsync(turn, Now.AddMinutes(2), CancellationToken.None);
 
         Assert.False(context.AcceptedInSupersededConversation);
     }
 ```
+
+and extend Task 9's existing `A_turn_accepted_before_bindings_were_captured_falls_back_to_the_current_one` with one more assertion rather than adding a near-duplicate test:
+
+```csharp
+        // Falling back to the current binding means it is current, so nothing about it is superseded.
+        Assert.False(context.AcceptedInSupersededConversation);
+```
+
+That is only a statement about context-creation time: the post-dispatch settle in Step 7 compares generations rather than asking where the context's generation came from, so a reset landing later still settles what such a Turn stores.
 
 - [ ] **Step 2: Run the test to verify it fails**
 
@@ -5190,19 +5215,19 @@ Then replace `TurnExecutionContextFactory.CreateAsync` in the same file with:
 ```csharp
     public async Task<TurnExecutionContext> CreateAsync(InboundTurn turn, DateTimeOffset now, CancellationToken cancellationToken)
     {
-        ArgumentNullException.ThrowIfNull(turn);
-
         // Two reads of the binding, answering two different questions. The CAPTURED one decides which
         // conversation this Turn belongs to - decided when it was accepted, so a reset since then
         // leaves it exactly where it was. The CURRENT one is read only to notice that a reset has
-        // happened in between. The fallback covers Turns accepted before capture existed; those
-        // predate any reset by definition, so the current binding is the right one for them and they
-        // are never superseded.
+        // happened in between, and it is the ordinary get-or-create: this answer is a hint the
+        // post-dispatch settle never relies on, so it has no reason to queue behind a reset. The
+        // fallback covers Turns accepted before capture existed; those predate any reset by
+        // definition, so the current binding is the right one for them and they are never superseded.
+        var captured = await inboxStore.FindCapturedBindingAsync(turn.TurnId, cancellationToken);
+
         var current = await bindingStore.GetOrCreateAsync(
             turn.ParticipantId, turn.ChannelConversationId, now, cancellationToken);
 
-        var captured = await inboxStore.FindCapturedBindingAsync(turn.TurnId, cancellationToken)
-            ?? new CapturedConversationBinding(current.FoundryConversationId, current.Generation);
+        var accepted = captured ?? new CapturedConversationBinding(current.FoundryConversationId, current.Generation);
 
         var activeInventoryId = await selectionService.GetActiveInventoryIdAsync(
             turn.ParticipantId, turn.ChannelConversationId.Value, now, cancellationToken);
@@ -5211,8 +5236,11 @@ Then replace `TurnExecutionContextFactory.CreateAsync` in the same file with:
             turn.TurnId,
             turn.ParticipantId,
             turn.ChannelConversationId,
-            captured.FoundryConversationId,
-            captured.Generation,
+
+            // The captured conversation, deliberately: this Turn continues the history it was accepted
+            // into, whatever the ChannelConversation has moved on to since.
+            accepted.FoundryConversationId,
+            accepted.Generation,
             activeInventoryId,
             turn.TraceId,
 
@@ -5220,7 +5248,10 @@ Then replace `TurnExecutionContextFactory.CreateAsync` in the same file with:
             // so no proposal the model makes can ever be the reason a mutation was approved.
             DirectConfirmationEvidenceReader.Read(turn),
             turn.WasInterrupted,
-            AcceptedInSupersededConversation: captured.Generation != current.Generation);
+
+            // True as of this instant only. A reset can still land while this Turn is being processed,
+            // which is why nothing that must hold at the END of the Turn may rely on this alone.
+            accepted.Generation < current.Generation);
     }
 ```
 
@@ -5229,7 +5260,7 @@ and delete the now-unused `CurrentBindingAsync` helper Task 9 added.
 - [ ] **Step 4: Run the factory tests to verify they pass**
 
 Run: `dotnet test tests/MultiChannelAgent.Application.Tests --filter FullyQualifiedName~TurnExecutionContextFactoryTests`
-Expected: PASS, including the three new tests.
+Expected: PASS, including the three new tests and the widened fallback test.
 
 - [ ] **Step 5: Write the failing lifecycle tests**
 
@@ -5237,25 +5268,131 @@ First give the file one construction helper, because `ConfirmationProposalLifecy
 
 ```csharp
     /// <summary>
-    /// The lifecycle under test. The binding store is a real dependency now: the post-dispatch settle
-    /// re-reads the conversation's CURRENT Foundry generation rather than trusting a flag decided
-    /// before the Turn ran. Tests that are about something else get a fresh, empty one, whose
-    /// first-generation answer matches the generation <see cref="Context"/> stamps.
+    /// The lifecycle under test, over a binding store whose conversation is on whatever generation
+    /// the test put it on. Tests that are not about conversation resets get a fresh store, which
+    /// establishes generation 1 on first read - exactly the generation their contexts carry.
     /// </summary>
     private static ConfirmationProposalLifecycle Lifecycle(
-        IConfirmationProposalStore store, InMemoryFoundryConversationBindingStore? bindings = null) =>
+        InMemoryConfirmationProposalStore store, InMemoryFoundryConversationBindingStore? bindings = null) =>
         new(store, bindings ?? new InMemoryFoundryConversationBindingStore());
 ```
 
 and add `using MultiChannelAgent.Application.Tests.TestDoubles;` to the file's usings (the binding double lives there, not under `TestDoubles.Inventories`).
 
-Then replace all five existing `new ConfirmationProposalLifecycle(store)` expressions in the file with `Lifecycle(store)`. They are on the lines that read `var settled = await new ConfirmationProposalLifecycle(store).ReconcileAsync(` (four of them) and `await new ConfirmationProposalLifecycle(store).ReconcileAsync(` (one). Nothing else about those tests changes: `ReconcileAsync` never reads the binding store at all - only the post-dispatch settle does - so a fresh empty one changes none of their behaviour.
+Then replace all five existing `new ConfirmationProposalLifecycle(store)` expressions in the file with `Lifecycle(store)`. Nothing else about those tests changes: `ReconcileAsync` never reads the binding store at all - only the post-dispatch settle does - so a fresh empty one changes none of their behaviour.
 
-Now append these five tests to the same class:
+Widen the file's existing `Context` helper with two more optional parameters, keeping every existing call unchanged:
+
+```csharp
+    private static TurnExecutionContext Context(
+        InventoryId? activeInventoryId,
+        bool wasInterrupted = false,
+        string? conversation = null,
+        int generation = 1,
+        bool acceptedInSupersededConversation = false) => new(
+        TurnId.NewId(),
+        Participant,
+        new ChannelConversationId(conversation ?? Conversation),
+        new FoundryConversationId(Guid.NewGuid()),
+        generation,
+        activeInventoryId,
+        TraceId: null,
+        DirectConfirmationEvidence.None,
+        wasInterrupted,
+        acceptedInSupersededConversation);
+```
+
+`generation` is now load-bearing rather than incidental: it is the accepted generation `SettleSupersededConversationAsync` compares the re-read binding against.
+
+**The Application-layer double has to be able to express an uncommitted rotation**, or no test here can tell a locking read from an ordinary one. Extend `tests/MultiChannelAgent.Application.Tests/TestDoubles/InMemoryFoundryConversationBindingStore.cs` with an in-flight rotation the test controls, a read that parks behind it, and a way to observe that parking:
+
+```csharp
+    private static readonly TimeSpan ParkTimeout = TimeSpan.FromSeconds(30);
+
+    private readonly TaskCompletionSource _parked = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    private TaskCompletionSource? _rotationInFlight;
+    private FoundryConversationBinding? _uncommittedRotation;
+
+    /// <summary>How many times the supersession seam - and not an ordinary read - was asked.</summary>
+    public int SupersessionReadCount { get; private set; }
+
+    /// <summary>
+    /// Completes once a supersession read has parked behind the in-flight rotation, bounded so a
+    /// caller that reads the committed generation instead fails the test rather than hanging the run.
+    /// </summary>
+    public Task SupersessionReadParkedAsync() => _parked.Task.WaitAsync(ParkTimeout);
+
+    /// <summary>
+    /// Answers only once no rotation is mid-flight for this pair, exactly as a read that takes the
+    /// binding row's lock does: while a reset holds the row uncommitted this parks, and it resumes
+    /// with whatever that reset left committed. An ordinary <see cref="GetOrCreateAsync"/> answers
+    /// straight from the committed value throughout, which is how a test can tell the two apart.
+    /// </summary>
+    public async Task<FoundryConversationBinding?> ReadCurrentForSupersessionAsync(
+        ParticipantId participantId, ChannelConversationId channelConversationId, CancellationToken cancellationToken)
+    {
+        Task? inFlight;
+        lock (_gate)
+        {
+            SupersessionReadCount++;
+            inFlight = _rotationInFlight?.Task;
+        }
+
+        if (inFlight is not null)
+        {
+            _parked.TrySetResult();
+            await inFlight;
+        }
+
+        lock (_gate)
+        {
+            return _bindings.TryGetValue((participantId, channelConversationId), out var binding) ? binding : null;
+        }
+    }
+
+    /// <summary>
+    /// Starts a rotation that has written this pair's binding but has not committed - the state a
+    /// real rotation transaction is in between its generation bump and its commit. Every ordinary
+    /// read still sees the old generation until <see cref="CommitRotation"/>.
+    /// </summary>
+    public void BeginRotation(ParticipantId participantId, ChannelConversationId channelConversationId, DateTimeOffset now)
+    {
+        lock (_gate)
+        {
+            _uncommittedRotation = Rotated(participantId, channelConversationId, now);
+            _rotationInFlight = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        }
+    }
+
+    /// <summary>Commits the in-flight rotation, publishing its generation and releasing anything parked behind it.</summary>
+    public void CommitRotation()
+    {
+        TaskCompletionSource? inFlight;
+        lock (_gate)
+        {
+            if (_uncommittedRotation is not { } rotated || _rotationInFlight is null)
+            {
+                throw new InvalidOperationException("No rotation is in flight to commit.");
+            }
+
+            _bindings[(rotated.ParticipantId, rotated.ChannelConversationId)] = rotated;
+            inFlight = _rotationInFlight;
+            _rotationInFlight = null;
+            _uncommittedRotation = null;
+        }
+
+        inFlight.TrySetResult();
+    }
+```
+
+Factor the existing `Rotate` helper's body into a private `Rotated(participantId, channelConversationId, now)` that computes the next binding without storing it, so `Rotate` (commits immediately) and `BeginRotation` (does not) share one definition of what a rotation produces.
+
+Now append these tests to `ConfirmationProposalLifecycleTests`:
 
 ```csharp
     [Fact]
-    public async Task A_turn_from_a_conversation_the_participant_has_since_reset_invalidates_what_was_pending()
+    public async Task A_Turn_accepted_in_a_conversation_that_has_since_been_reset_invalidates_the_pending_proposal()
     {
         var (store, proposal) = await PendingAsync();
 
@@ -5266,167 +5403,363 @@ Now append these five tests to the same class:
         Assert.Equal(ProposalStatus.ConversationReset, await store.FindStatusAsync(proposal.Id, CancellationToken.None));
     }
 
-    [Fact]
-    public async Task A_superseded_turn_settles_whatever_it_left_pending_itself()
-    {
-        var store = new InMemoryConfirmationProposalStore();
-        var bindings = await RotatedBindingsAsync();
-        var lifecycle = Lifecycle(store, bindings);
-
-        // The order production runs in: the Turn is reconciled (nothing pending yet), then it does its
-        // work and stores a proposal, then this settles what it just stored.
-        Assert.Null(await lifecycle.ReconcileAsync(
-            Context(SomeInventory, acceptedInSupersededConversation: true), Now, CancellationToken.None));
-
-        var proposal = Proposal();
-        await store.StoreAsync(proposal, Now, CancellationToken.None);
-
-        var settled = await lifecycle.SettleSupersededConversationAsync(
-            Context(SomeInventory, acceptedInSupersededConversation: true), Now, CancellationToken.None);
-
-        Assert.Equal(ProposalStatus.ConversationReset, settled);
-        Assert.Equal(ProposalStatus.ConversationReset, await store.FindStatusAsync(proposal.Id, CancellationToken.None));
-        Assert.Null(await store.FindPendingAsync(Participant, Conversation, CancellationToken.None));
-    }
-
-    [Fact]
-    public async Task A_reset_that_lands_after_the_context_was_assembled_still_settles_what_the_turn_stored()
-    {
-        var store = new InMemoryConfirmationProposalStore();
-        var bindings = new InMemoryFoundryConversationBindingStore();
-        await bindings.GetOrCreateAsync(
-            Participant, new ChannelConversationId(Conversation), Now, CancellationToken.None);
-        var lifecycle = Lifecycle(store, bindings);
-
-        // The trusted context was assembled BEFORE the reset, so it says this Turn is in the current
-        // conversation. That answer was true when it was computed and is the only answer a flag
-        // captured at context-creation time can ever give.
-        var context = Context(SomeInventory, acceptedInSupersededConversation: false);
-
-        // The Turn does its work and stores a proposal.
-        var proposal = Proposal();
-        await store.StoreAsync(proposal, Now, CancellationToken.None);
-
-        // "New conversation" commits while the Turn is still being processed. It settles nothing,
-        // because it ran before the proposal existed - which is exactly why this settle has to look
-        // again instead of believing the context.
-        bindings.Rotate(Participant, new ChannelConversationId(Conversation), Now.AddMinutes(1));
-
-        var settled = await lifecycle.SettleSupersededConversationAsync(
-            context, Now.AddMinutes(2), CancellationToken.None);
-
-        Assert.Equal(ProposalStatus.ConversationReset, settled);
-        Assert.Equal(ProposalStatus.ConversationReset, await store.FindStatusAsync(proposal.Id, CancellationToken.None));
-    }
-
-    [Fact]
-    public async Task A_turn_in_the_current_conversation_leaves_its_own_proposal_pending()
-    {
-        var store = new InMemoryConfirmationProposalStore();
-        var bindings = new InMemoryFoundryConversationBindingStore();
-        await bindings.GetOrCreateAsync(
-            Participant, new ChannelConversationId(Conversation), Now, CancellationToken.None);
-        var lifecycle = Lifecycle(store, bindings);
-        var proposal = Proposal();
-        await store.StoreAsync(proposal, Now, CancellationToken.None);
-
-        Assert.Null(await lifecycle.SettleSupersededConversationAsync(
-            Context(SomeInventory), Now, CancellationToken.None));
-
-        Assert.NotNull(await store.FindPendingAsync(Participant, Conversation, CancellationToken.None));
-    }
-
-    [Fact]
-    public async Task Settling_a_superseded_conversation_that_has_nothing_pending_reports_nothing()
-    {
-        var store = new InMemoryConfirmationProposalStore();
-        var lifecycle = Lifecycle(store, await RotatedBindingsAsync());
-
-        // A superseded READ Turn - "list stock" - leaves no proposal, so there is nothing to settle
-        // and nothing to report. It still completed normally; this seam never touches its Outcome.
-        Assert.Null(await lifecycle.SettleSupersededConversationAsync(
-            Context(SomeInventory, acceptedInSupersededConversation: true), Now, CancellationToken.None));
-    }
-```
-
-and add the one shared setup helper those tests use, next to `PendingAsync`:
-
-```csharp
     /// <summary>
-    /// A binding store whose conversation has already moved to generation 2, so it is one generation
-    /// past the generation <see cref="Context"/> stamps. This is what "the Participant started a new
-    /// conversation" looks like to the seam that re-reads the binding.
+    /// Puts one pending proposal in a conversation whose binding has since rotated to a new
+    /// generation, exactly as a deliberate "New conversation" leaves it - except that here nothing
+    /// settled the proposal, which is the very hole the post-dispatch pass exists to close.
     /// </summary>
-    private static async Task<InMemoryFoundryConversationBindingStore> RotatedBindingsAsync()
+    private static async Task<(InMemoryConfirmationProposalStore Proposals, InMemoryFoundryConversationBindingStore Bindings, ConfirmationProposal Proposal)>
+        RotatedSinceAcceptanceAsync()
     {
+        var (proposals, proposal) = await PendingAsync();
         var bindings = new InMemoryFoundryConversationBindingStore();
-        await bindings.GetOrCreateAsync(
-            Participant, new ChannelConversationId(Conversation), Now, CancellationToken.None);
-        bindings.Rotate(Participant, new ChannelConversationId(Conversation), Now.AddMinutes(1));
+        await bindings.GetOrCreateAsync(Participant, new ChannelConversationId(Conversation), Now, CancellationToken.None);
+        bindings.Rotate(Participant, new ChannelConversationId(Conversation), Now);
 
-        return bindings;
+        return (proposals, bindings, proposal);
+    }
+
+    // The single property the whole post-dispatch settlement exists for. The context was assembled
+    // BEFORE the reset, so the flag it captured truthfully said "current" at the time - and by the
+    // time the Turn's proposal was written, it no longer was.
+    [Fact]
+    public async Task A_conversation_rotated_after_the_context_was_assembled_still_settles_what_the_Turn_just_proposed()
+    {
+        var (proposals, bindings, proposal) = await RotatedSinceAcceptanceAsync();
+
+        var settlement = await Lifecycle(proposals, bindings).SettleSupersededConversationAsync(
+            Context(SomeInventory, acceptedInSupersededConversation: false), Now, CancellationToken.None);
+
+        Assert.True(settlement.ConversationWasSuperseded);
+        Assert.Equal(ProposalStatus.ConversationReset, settlement.Settled);
+        Assert.Equal(ProposalStatus.ConversationReset, await proposals.FindStatusAsync(proposal.Id, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task A_conversation_still_on_the_generation_the_Turn_was_accepted_under_leaves_its_proposal_confirmable()
+    {
+        var (proposals, proposal) = await PendingAsync();
+        var bindings = new InMemoryFoundryConversationBindingStore();
+        await bindings.GetOrCreateAsync(Participant, new ChannelConversationId(Conversation), Now, CancellationToken.None);
+
+        var settlement = await Lifecycle(proposals, bindings).SettleSupersededConversationAsync(
+            Context(SomeInventory), Now, CancellationToken.None);
+
+        Assert.False(settlement.ConversationWasSuperseded);
+        Assert.Null(settlement.Settled);
+        Assert.Equal(ProposalStatus.Pending, await proposals.FindStatusAsync(proposal.Id, CancellationToken.None));
+    }
+
+    // A Turn that proposes nothing leaves nothing to settle - but the conversation it ran in has
+    // still been left behind, and only the caller can decide what that means for its own answer.
+    [Fact]
+    public async Task A_reset_conversation_with_nothing_pending_still_reports_the_conversation_as_left_behind()
+    {
+        var proposals = new InMemoryConfirmationProposalStore();
+        var bindings = new InMemoryFoundryConversationBindingStore();
+        await bindings.GetOrCreateAsync(Participant, new ChannelConversationId(Conversation), Now, CancellationToken.None);
+        bindings.Rotate(Participant, new ChannelConversationId(Conversation), Now);
+
+        var settlement = await Lifecycle(proposals, bindings).SettleSupersededConversationAsync(
+            Context(SomeInventory), Now, CancellationToken.None);
+
+        Assert.True(settlement.ConversationWasSuperseded);
+        Assert.Null(settlement.Settled);
+    }
+
+    [Fact]
+    public async Task Settling_a_superseded_conversation_leaves_another_conversations_proposal_alone()
+    {
+        var (proposals, bindings, mine) = await RotatedSinceAcceptanceAsync();
+        var other = Proposal("conversation-2");
+        await proposals.StoreAsync(other, Now, CancellationToken.None);
+
+        await Lifecycle(proposals, bindings).SettleSupersededConversationAsync(
+            Context(SomeInventory), Now, CancellationToken.None);
+
+        Assert.Equal(ProposalStatus.ConversationReset, await proposals.FindStatusAsync(mine.Id, CancellationToken.None));
+        Assert.Equal(ProposalStatus.Pending, await proposals.FindStatusAsync(other.Id, CancellationToken.None));
+    }
+
+    // The settlement asks a different question from every other reader of this binding - "is a reset
+    // committing right now?" - and it has to be asked through the seam that can answer it. Reading
+    // through the ordinary get-or-create would create a binding no one asked for, which is how this
+    // test tells the two apart without needing a database.
+    [Fact]
+    public async Task Settling_never_creates_a_binding_for_a_conversation_that_has_none()
+    {
+        var proposals = new InMemoryConfirmationProposalStore();
+        var bindings = new InMemoryFoundryConversationBindingStore();
+
+        var settlement = await Lifecycle(proposals, bindings).SettleSupersededConversationAsync(
+            Context(SomeInventory), Now, CancellationToken.None);
+
+        Assert.False(settlement.ConversationWasSuperseded);
+        Assert.Empty(bindings.Bindings);
+        Assert.Equal(1, bindings.SupersessionReadCount);
+    }
+
+    // The whole reason the seam exists. While a reset holds the binding row uncommitted, the
+    // generation every ordinary read still sees is the one being replaced; answering from it would
+    // report the conversation as current and leave this Turn's proposal confirmable in a conversation
+    // that is about to be gone.
+    [Fact]
+    public async Task Settling_waits_for_a_reset_that_is_still_committing_rather_than_reading_the_generation_it_replaces()
+    {
+        var (proposals, proposal) = await PendingAsync();
+        var bindings = new InMemoryFoundryConversationBindingStore();
+        await bindings.GetOrCreateAsync(Participant, new ChannelConversationId(Conversation), Now, CancellationToken.None);
+        bindings.BeginRotation(Participant, new ChannelConversationId(Conversation), Now);
+
+        // The stale answer this must not give: an ordinary read is served the committed generation
+        // throughout, and the Turn was accepted under exactly that.
+        var stale = await bindings.GetOrCreateAsync(
+            Participant, new ChannelConversationId(Conversation), Now, CancellationToken.None);
+        Assert.Equal(1, stale.Generation);
+
+        var settling = Lifecycle(proposals, bindings).SettleSupersededConversationAsync(
+            Context(SomeInventory), Now, CancellationToken.None);
+
+        await bindings.SupersessionReadParkedAsync();
+        bindings.CommitRotation();
+
+        var settlement = await settling;
+        Assert.True(settlement.ConversationWasSuperseded);
+        Assert.Equal(ProposalStatus.ConversationReset, settlement.Settled);
+        Assert.Equal(ProposalStatus.ConversationReset, await proposals.FindStatusAsync(proposal.Id, CancellationToken.None));
+    }
+
+    /// <summary>
+    /// A binding store whose read fails, so a test can prove the settlement reports the fault rather
+    /// than quietly treating a conversation it could not read as still current.
+    /// </summary>
+    private sealed class FailingBindingStore(Exception failure) : IFoundryConversationBindingStore
+    {
+        public Task<FoundryConversationBinding> GetOrCreateAsync(
+            ParticipantId participantId,
+            ChannelConversationId channelConversationId,
+            DateTimeOffset now,
+            CancellationToken cancellationToken) =>
+            Task.FromException<FoundryConversationBinding>(failure);
+
+        public Task<FoundryConversationBinding?> ReadCurrentForSupersessionAsync(
+            ParticipantId participantId,
+            ChannelConversationId channelConversationId,
+            CancellationToken cancellationToken) =>
+            Task.FromException<FoundryConversationBinding?>(failure);
+    }
+
+    [Fact]
+    public async Task Settling_a_superseded_conversation_propagates_cancellation()
+    {
+        var (proposals, _) = await PendingAsync();
+        var lifecycle = new ConfirmationProposalLifecycle(
+            proposals, new FailingBindingStore(new OperationCanceledException()));
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => lifecycle.SettleSupersededConversationAsync(Context(SomeInventory), Now, CancellationToken.None));
+    }
+
+    // Failing to read the binding is not evidence that the conversation is still current. Swallowing
+    // it would answer "nothing to settle" and leave a confirmable proposal behind; letting it out
+    // leaves the whole Turn to be retried, which is the only safe reading of "we do not know".
+    [Fact]
+    public async Task A_binding_read_that_fails_is_never_swallowed_into_leaving_the_proposal_confirmable()
+    {
+        var (proposals, proposal) = await PendingAsync();
+        var lifecycle = new ConfirmationProposalLifecycle(
+            proposals, new FailingBindingStore(new InvalidOperationException("binding read failed")));
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => lifecycle.SettleSupersededConversationAsync(Context(SomeInventory), Now, CancellationToken.None));
+
+        Assert.Equal(ProposalStatus.Pending, await proposals.FindStatusAsync(proposal.Id, CancellationToken.None));
     }
 ```
 
 `InMemoryFoundryConversationBindingStore.Rotate` is the helper Task 9 Step 1 added; it is already in place by the time this task runs.
 
-Widen the file's existing `Context` helper with one more optional parameter, keeping every existing call unchanged:
-
-```csharp
-    private static TurnExecutionContext Context(
-        InventoryId? activeInventoryId,
-        bool wasInterrupted = false,
-        string? conversation = null,
-        bool acceptedInSupersededConversation = false) => new(
-        TurnId.NewId(),
-        Participant,
-        new ChannelConversationId(conversation ?? Conversation),
-        new FoundryConversationId(Guid.NewGuid()),
-        1,
-        activeInventoryId,
-        TraceId: null,
-        DirectConfirmationEvidence.None,
-        wasInterrupted,
-        acceptedInSupersededConversation);
-```
-
-The `1` on the fifth line is `FoundryConversationGeneration`, and it is now load-bearing rather than incidental: it is the accepted generation `SettleSupersededConversationAsync` compares the re-read binding against.
-
 - [ ] **Step 6: Run the lifecycle tests to verify they fail**
 
 Run: `dotnet test tests/MultiChannelAgent.Application.Tests --filter FullyQualifiedName~ConfirmationProposalLifecycleTests`
-Expected: FAIL to compile with `CS1729: 'ConfirmationProposalLifecycle' does not contain a constructor that takes 2 arguments` and `CS1061: 'ConfirmationProposalLifecycle' does not contain a definition for 'SettleSupersededConversationAsync'`.
+Expected: FAIL to compile with `CS1729: 'ConfirmationProposalLifecycle' does not contain a constructor that takes 2 arguments`, `CS1061: 'ConfirmationProposalLifecycle' does not contain a definition for 'SettleSupersededConversationAsync'`, and `CS0535: 'FailingBindingStore' does not implement interface member 'IFoundryConversationBindingStore.ReadCurrentForSupersessionAsync'`.
 
-- [ ] **Step 7: Teach the lifecycle about superseded conversations**
+- [ ] **Step 7: Give the settlement a seam that serializes, and teach the lifecycle to use it**
 
-In `src/MultiChannelAgent.Application/Inventories/ConfirmationProposalLifecycle.cs`, take the binding store as a second dependency:
+**7a. Widen the binding store contract.** In `src/MultiChannelAgent.Application/Turns/IFoundryConversationBindingStore.cs`, add a second read beside `GetOrCreateAsync`. It is a separate method rather than a change to the existing one on purpose: every other caller wants the cheapest current answer, and none of them should start queueing behind a reset.
+
+```csharp
+    /// <summary>
+    /// Reads the binding this pair currently holds for the one question
+    /// <see cref="Inventories.ConfirmationProposalLifecycle.SettleSupersededConversationAsync"/> asks:
+    /// has this conversation moved past the generation a Turn was accepted under? That question is
+    /// decided against a reset that may be committing right now, so this read carries a stronger
+    /// contract than <see cref="GetOrCreateAsync"/> and exists separately rather than changing it.
+    ///
+    /// <b>It must serialize against an in-flight rotation of this pair's binding.</b> A caller that
+    /// returns while a rotation holds the row uncommitted has answered from a generation that is
+    /// already being replaced; an implementation must instead wait for that writer to finish and
+    /// answer from what it left behind. Ordinary reads have no such obligation, and must not grow one
+    /// - every other caller wants the cheapest current answer, not a queue behind a reset.
+    ///
+    /// <b>It must never create a binding.</b> Returning null means this pair has none at all, which
+    /// means no rotation has ever run for it and nothing can have been superseded. A caller treats
+    /// that exactly as "still current" - it is the same answer a first-generation binding would give,
+    /// without writing a row that only a read asked for.
+    /// </summary>
+    Task<FoundryConversationBinding?> ReadCurrentForSupersessionAsync(
+        ParticipantId participantId, ChannelConversationId channelConversationId, CancellationToken cancellationToken);
+```
+
+**7b. Write the statement once per provider.** Add `src/MultiChannelAgent.Infrastructure/Persistence/FoundryConversationBindingSupersessionRead.cs`, following `InventoryVersionPublication` exactly - one constant per provider, identities as parameters, chosen by `database.IsSqlServer()`:
+
+```csharp
+    /// <summary>
+    /// <c>UPDLOCK</c> makes this read take an update lock on the binding row instead of reading a
+    /// version of it, and update locks are held to the end of the transaction. That is exactly the
+    /// mutual exclusion the check needs: this read and
+    /// <c>SqlConversationRotationStore</c>'s generation bump both want conflicting locks on the same
+    /// row, so they are strictly ordered rather than passing through each other. Whichever goes
+    /// second sees what the first did.
+    ///
+    /// <c>HOLDLOCK</c> is deliberately not added. It would additionally range-lock the key when no row
+    /// is there, and no caller needs that: the binding for a (Participant, ChannelConversation) is
+    /// created when a Turn is accepted, long before that Turn can be processed, so this read never
+    /// decides about a row that is still to appear.
+    /// </summary>
+    private const string SqlServerRead =
+        """
+        SELECT ParticipantId, ChannelConversationId, FoundryConversationId, Generation, CreatedAt
+        FROM FoundryConversationBindings WITH (UPDLOCK)
+        WHERE ParticipantId = {0} AND ChannelConversationId = {1}
+        """;
+
+    /// <summary>
+    /// SQLite has no table hints and needs none: it admits one writer at a time, so a reader inside a
+    /// transaction cannot pass through a rotation that is still writing. This is the provider the
+    /// fast, Docker-free tests run on; SQL Server is the production one.
+    /// </summary>
+    private const string SqliteRead =
+        """
+        SELECT ParticipantId, ChannelConversationId, FoundryConversationId, Generation, CreatedAt
+        FROM FoundryConversationBindings
+        WHERE ParticipantId = {0} AND ChannelConversationId = {1}
+        """;
+
+    public static FormattableString Statement(
+        DatabaseFacade database, Guid participantId, string channelConversationId)
+    {
+        ArgumentNullException.ThrowIfNull(database);
+
+        return FormattableStringFactory.Create(
+            database.IsSqlServer() ? SqlServerRead : SqliteRead, participantId, channelConversationId);
+    }
+```
+
+Neither statement ends in a semicolon, so EF may compose over it without the text becoming invalid.
+
+**7c. Implement it in the SQL store.** In `src/MultiChannelAgent.Infrastructure/Turns/SqlFoundryConversationBindingStore.cs`, add the locking read in its own short transaction, joining the caller's when there is one, and abandoning safely on any fault:
+
+```csharp
+    public async Task<FoundryConversationBinding?> ReadCurrentForSupersessionAsync(
+        ParticipantId participantId, ChannelConversationId channelConversationId, CancellationToken cancellationToken)
+    {
+        if (db.Database.CurrentTransaction is not null)
+        {
+            return await LockingReadAsync(participantId, channelConversationId, cancellationToken);
+        }
+
+        await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+        try
+        {
+            var binding = await LockingReadAsync(participantId, channelConversationId, cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+
+            return binding;
+        }
+        catch
+        {
+            await db.AbandonAsync(transaction);
+            throw;
+        }
+    }
+
+    private async Task<FoundryConversationBinding?> LockingReadAsync(
+        ParticipantId participantId, ChannelConversationId channelConversationId, CancellationToken cancellationToken)
+    {
+        // No tracking: this is a read that decides something, never the start of a write, and a
+        // tracked copy would linger in a scope shared by a whole batch of Turns.
+        var rows = await db.FoundryConversationBindings
+            .FromSql(FoundryConversationBindingSupersessionRead.Statement(
+                db.Database, participantId.Value, channelConversationId.Value))
+            .AsNoTracking()
+            .ToListAsync(cancellationToken);
+
+        return rows.Count == 0 ? null : Project(rows[0]);
+    }
+```
+
+Factor the existing `FindAsync` projection into a private `static FoundryConversationBinding Project(FoundryConversationBindingEntity entity)` so both reads map the row one way, and add `using MultiChannelAgent.Infrastructure.Persistence.Entities;`.
+
+**7d. Take the store as a dependency and add the settlement.** In `src/MultiChannelAgent.Application/Inventories/ConfirmationProposalLifecycle.cs`:
 
 ```csharp
 public sealed class ConfirmationProposalLifecycle(
     IConfirmationProposalStore proposalStore, IFoundryConversationBindingStore bindingStore)
 ```
 
-and extend the class summary with:
+Add the answer shape the settlement reports, above the class - two facts, not one, because a reset that committed before the Turn's proposal was stored settles that proposal itself and leaves this pass nothing to settle:
 
+```csharp
+/// <summary>
+/// What the post-dispatch pass found: whether the conversation this Turn belongs to had been left
+/// behind by the time its work was done, and the status of anything it settled there. They are
+/// separate answers on purpose. A reset that committed before this Turn's proposal was stored settles
+/// it in its own transaction, so this pass finds nothing left to settle - and the Turn must still not
+/// answer with a confirmation, because the proposal it would offer has already stopped being one.
+/// </summary>
+public sealed record SupersededConversationSettlement(bool ConversationWasSuperseded, ProposalStatus? Settled)
+{
+    public static readonly SupersededConversationSettlement StillCurrent = new(false, null);
+}
 ```
-/// It runs a second time after tool dispatch, through
-/// <see cref="SettleSupersededConversationAsync"/>, which is the only moment a proposal the Turn
-/// itself just stored exists to be settled. That pass re-reads the conversation's current Foundry
-/// generation instead of reusing the answer the trusted context was built with, because a reset can
-/// commit while a Turn is being processed and the context cannot know about one that had not happened
-/// when it was assembled.
+
+Add the answer such a Turn records, and the code it carries, as members of the lifecycle - it is the one place that owns "this stopped being confirmable because the conversation was reset":
+
+```csharp
+    /// <summary>The machine code an answer carries when a reset is why nothing is confirmable any more.</summary>
+    public const string ConversationResetCode = "conversation_reset";
+
+    private const string ConversationResetSummary =
+        "That was proposed in a conversation you have since left, so there is nothing to confirm here.";
+
+    /// <summary>
+    /// What a Turn is answered with when the work it proposed stopped being confirmable before it
+    /// could ever be offered. It deliberately carries no proposal payload and therefore no
+    /// confirmation token: handing back a token that can never be redeemed would be worse than saying
+    /// nothing. The category is a conflict with current state, not a failure - the Turn was processed
+    /// exactly as asked, and the conversation it was asked in simply moved on.
+    /// </summary>
+    public static readonly ModelDecision ConversationResetAnswer = new()
+    {
+        Category = OutcomeCategory.Conflict,
+        Code = ConversationResetCode,
+        Summary = ConversationResetSummary,
+        Deliveries = [new RequestedDelivery(StockToolDispatcher.ResponseChannel, ConversationResetSummary)],
+    };
 ```
+
+(this needs `using MultiChannelAgent.Domain.Turns;` for `OutcomeCategory`).
 
 Add the new case as the **first** arm of the existing `switch` in `ReconcileAsync`, so it is evaluated before the interruption and access checks:
 
 ```csharp
         var status = context switch
         {
-            // The Participant started a new conversation after this Turn was accepted. Whatever is
-            // waiting here belongs to the conversation they ended, so it stops being confirmable -
-            // exactly as if it had still been pending when the reset itself ran. The flag is trusted
-            // HERE and only here: this runs immediately after the context was assembled, so it is as
-            // fresh as a read can be.
+            // The strongest statement of the four: this Turn belongs to a conversation the Participant
+            // has already left, so nothing waiting in it is still an open question. The flag is
+            // trusted HERE and only here: this runs immediately after the context was assembled, so it
+            // is as fresh as a read can be.
             { AcceptedInSupersededConversation: true } => ProposalStatus.ConversationReset,
 
             // A cut-off utterance is not a statement of intent, and a conversation that has just been
@@ -5438,46 +5771,56 @@ Add the new case as the **first** arm of the existing `switch` in `ReconcileAsyn
 
 ```csharp
     /// <summary>
-    /// Settles a proposal a Turn accepted in a superseded conversation has just created, and returns
-    /// the status it was settled with (or null when there was nothing to settle).
+    /// Run after this Turn's work is done and before its Outcome is recorded: re-reads the binding and
+    /// settles whatever is pending in this conversation when the generation the Turn was accepted
+    /// under has been left behind. It deliberately ignores
+    /// <see cref="TurnExecutionContext.AcceptedInSupersededConversation"/> - that flag answered the
+    /// question at context assembly, and the whole point of this second pass is the window that opens
+    /// after it.
     ///
-    /// <see cref="ReconcileAsync"/> runs before the Turn does anything and therefore cannot see what
-    /// the Turn itself will store. This runs after, which is the only moment at which that proposal
-    /// exists and the only moment at which it can be stopped from becoming confirmable in the
-    /// conversation the Participant just started.
+    /// Why this closes that window. Write P for the instant this Turn's proposal became durable, S
+    /// for the binding read below, and U and R for the rotation's own settle statement and its
+    /// commit, with U before R. P always precedes S, because the proposal is stored during dispatch
+    /// and this runs after dispatch.
     ///
-    /// It deliberately does <b>not</b> read
-    /// <see cref="TurnExecutionContext.AcceptedInSupersededConversation"/>. That flag was decided when
-    /// the context was assembled, and a reset is free to commit after that and before this - while the
-    /// model is being asked, or while the tool that stores the proposal is running. In that ordering
-    /// the flag says "current", and a settle gated on it would leave exactly the confirmable proposal
-    /// this exists to prevent. So the conversation's binding is re-read here, now, and compared with
-    /// <see cref="TurnExecutionContext.FoundryConversationGeneration"/> - the generation this Turn was
-    /// accepted under, which came off the Turn's own durable inbox row and cannot go stale.
+    /// The read below serializes against an in-flight rotation of this conversation's binding
+    /// (<see cref="IFoundryConversationBindingStore.ReadCurrentForSupersessionAsync"/>), so it and the
+    /// rotation's own generation bump are strictly ordered - which leaves exactly two cases.
     ///
-    /// Settling is safe precisely because per-ChannelConversation FIFO drains every Turn accepted
-    /// before a reset before any Turn accepted after it: there cannot yet be a legitimate newer
-    /// proposal for this to destroy. The remaining ordering - a reset that commits after this read -
-    /// is settled by the rotation's own transaction, which invalidates whatever is pending at the
-    /// instant it runs, and by then this Turn's proposal is durable and pending.
+    /// <list type="bullet">
+    /// <item><b>The read goes first.</b> It answers with the generation the Turn was accepted under,
+    /// this pass settles nothing - and the rotation, whose bump and whose settle both run after that
+    /// read has finished, therefore runs its settle after P. It finds the proposal durable and
+    /// Pending and settles it inside its own transaction.</item>
+    /// <item><b>The rotation goes first.</b> The read waits for it and answers with the newer
+    /// generation, so this pass settles whatever the Turn left pending.</item>
+    /// </list>
+    ///
+    /// There is no third case, and that is the whole point of reading through that seam rather than
+    /// the ordinary one: an unserialized read can answer from a generation a rotation is in the middle
+    /// of replacing, and then neither side settles anything - the rotation's settle ran before P, and
+    /// this pass believed the conversation was current.
     /// </summary>
-    public async Task<ProposalStatus?> SettleSupersededConversationAsync(
+    public async Task<SupersededConversationSettlement> SettleSupersededConversationAsync(
         TurnExecutionContext context, DateTimeOffset now, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(context);
 
-        // GetOrCreateAsync, not a bespoke read: by this point the binding certainly exists - the
-        // trusted context was built from it - so this is a read, and adding a second read method to
-        // IFoundryConversationBindingStore for a case that cannot arise would be an abstraction with
-        // no caller.
-        var current = await bindingStore.GetOrCreateAsync(
-            context.ParticipantId, context.ChannelConversationId, now, cancellationToken);
+        // A read that fails is not evidence the conversation is still current, so it is left to
+        // propagate: the Turn records no Outcome and is retried, rather than completing on a guess.
+        var current = await bindingStore.ReadCurrentForSupersessionAsync(
+            context.ParticipantId, context.ChannelConversationId, cancellationToken);
 
-        if (current.Generation == context.FoundryConversationGeneration)
+        // No binding at all means no rotation has ever run for this conversation, so nothing this Turn
+        // did can be stranded in one. Creating a binding to say so is not this reader's business.
+        if (current is null || context.FoundryConversationGeneration >= current.Generation)
         {
-            return null;
+            return SupersededConversationSettlement.StillCurrent;
         }
 
+        // One set-based settle rather than a read followed by a write: nothing here needs to know
+        // which proposal it is, and anything Pending in a conversation that has been left behind is
+        // by definition no longer confirmable.
         var settled = await proposalStore.InvalidatePendingAsync(
             context.ParticipantId,
             context.ChannelConversationId.Value,
@@ -5485,11 +5828,12 @@ Add the new case as the **first** arm of the existing `switch` in `ReconcileAsyn
             now,
             cancellationToken);
 
-        // Zero rows is the ordinary case, not a fault: most Turns leave nothing pending, and the
-        // rotation itself may already have settled this one.
-        return settled > 0 ? ProposalStatus.ConversationReset : null;
+        return new SupersededConversationSettlement(
+            ConversationWasSuperseded: true, settled > 0 ? ProposalStatus.ConversationReset : null);
     }
 ```
+
+The comparison is `>=`, not `==`: anything at or below the current generation is not superseded, and a Turn can never legitimately carry a generation *above* it.
 
 - [ ] **Step 8: Run the lifecycle tests to verify they pass**
 
@@ -5498,90 +5842,97 @@ Expected: PASS, including the five new tests.
 
 - [ ] **Step 9: Fix the coordinator harness so a mutation-capable Turn can actually reach a proposal**
 
-Two things in `tests/MultiChannelAgent.Application.Tests/TurnProcessingCoordinatorTests.cs` make the behaviour this task adds untestable, and both are fixed here:
+`TurnProcessingCoordinatorTests`' existing `CreateCoordinator` builds the dispatch services over stores it then throws away, and hands `ConfirmationProposalLifecycle` a **second, separate** `InMemoryConfirmationProposalStore` from the one the dispatcher writes to. Nothing noticed, because no test here ever reached tool dispatch. Every test in this step does, so the harness has to expose the stores it builds and share one proposal store.
 
-1. `CreateCoordinator` builds its tool dispatcher on one `InMemoryConfirmationProposalStore`, its `ConfirmationProposalLifecycle` on a **second**, and its `InventorySelectionService` on a **third**, so none of them has ever been able to see another's rows.
-2. Its Inventory doubles are empty. A Turn saying `forget stock Steel Bolts` therefore never reaches the change-set path at all: `StockToolDispatcher.DispatchAsync` returns `no_active_inventory` on the first line, because `TurnExecutionContext.ActiveInventoryId` is null. Even with a selection it would then be refused for want of an Editor Membership, and then for want of the Stock Entry, and then - if that entry held any quantity - with `forget_requires_zero_quantity`, because Forget can never stand in for Remove. **All four have to be seeded or the test is green for the wrong reason before the implementation exists.**
+In `tests/MultiChannelAgent.Application.Tests/TurnProcessingCoordinatorTests.cs`, introduce a fixture record and a builder beside the existing `CreateCoordinator`, and reduce `CreateCoordinator` to a thin wrapper over it so the twelve tests that destructure its tuple are untouched:
 
-Add these constants next to the existing `Now` and `SomeParticipant` at the top of the class:
+```csharp
+    /// <summary>
+    /// Everything one coordinator is wired over, so a test that is about what processing does to
+    /// Inventory state can seed and read the very stores the dispatch runs against.
+    /// </summary>
+    private sealed record CoordinatorHarness(
+        TurnProcessingCoordinator Coordinator,
+        InMemoryInboxStore Inbox,
+        InMemoryOutcomeStore Outcomes,
+        InMemoryDeliveryStore Deliveries,
+        InMemoryTurnResultStore ResultStore,
+        InMemoryFoundryConversationBindingStore Bindings,
+        InMemoryConfirmationProposalStore Proposals,
+        InMemoryInventoryStore Inventories,
+        InMemoryActiveInventorySelectionStore Selections,
+        InMemoryStockStore Stock,
+        InMemoryInventoryReferenceStore References);
+```
+
+Move `CreateCoordinator`'s body into `CreateHarness(...)` with the same parameters, returning that record; inside it, declare `proposalStore` **once** and pass the same instance to `InventorySelectionService`, `InMemoryStockChangeSetStore`, `StockChangeSetService`, `InventoryConfirmationService` and `new ConfirmationProposalLifecycle(proposalStore, bindingStore)`. `CreateCoordinator` then becomes:
+
+```csharp
+    {
+        var harness = CreateHarness(timeProvider, modelBoundary, progressStore, progressEventStore);
+
+        return (harness.Coordinator, harness.Inbox, harness.Outcomes, harness.Deliveries, harness.ResultStore, harness.Bindings);
+    }
+```
+
+That also deletes the helper's old comment beginning *"These tests never exercise the tool-dispatch path"*, which stops being true here.
+
+**Seed exactly what a real confirmation needs**, or every assertion below is vacuous - a Turn with no Active Inventory answers `no_active_inventory`, one with no Membership answers `forbidden`, one with no matching row answers `not_found`, and a non-empty row answers `forget_requires_zero_quantity`. None of those leave a proposal, so "nothing is pending" would pass without confirmation ever having been possible:
 
 ```csharp
     private static readonly InventoryId SomeInventory = new(Guid.Parse("33333333-3333-3333-3333-333333333333"));
     private static readonly UnitId EachUnit = new(Guid.Parse("44444444-4444-4444-4444-444444444444"));
-    private static readonly ChannelConversationId SomeConversation = new("conversation-1");
-```
+    private const string MutationConversation = "conversation-1";
 
-Add the fixture and its two builders as private members of the same class:
-
-```csharp
-    /// <summary>
-    /// The Inventory-side doubles one coordinator is built over. They are grouped because a
-    /// mutation-capable Turn needs all four to agree with each other - the Membership that permits
-    /// the change, the selection that makes an Inventory active, the Unit its Stock is denominated
-    /// in, and the Stock itself - and because a test that only ever says "hello" needs none of them.
-    /// </summary>
-    private sealed record InventoryFixture(
-        InMemoryInventoryStore Inventories,
-        InMemoryActiveInventorySelectionStore Selections,
-        InMemoryStockStore Stock,
-        InMemoryInventoryReferenceStore References)
+    private static async Task SeedForgettableStockAsync(CoordinatorHarness harness)
     {
-        /// <summary>No Membership, no selection, no Stock - what every test that never reaches a tool wants.</summary>
-        public static InventoryFixture Empty() => new(
-            new InMemoryInventoryStore(_ => "Owner Name"),
-            new InMemoryActiveInventorySelectionStore(),
-            new InMemoryStockStore(),
-            new InMemoryInventoryReferenceStore());
-    }
-
-    /// <summary>
-    /// Everything <c>forget stock Steel Bolts</c> needs before it can get as far as asking for
-    /// confirmation, and nothing else. Each piece is load-bearing, and leaving any of them out makes
-    /// the Turn fail earlier with a different code - which would let a test claiming "no confirmable
-    /// proposal was left" pass without a proposal ever having been possible.
-    /// </summary>
-    private static async Task<InventoryFixture> SeedForgettableStockAsync()
-    {
-        var fixture = InventoryFixture.Empty();
-
-        // Editor, because StockChangeSetService.ProposeAsync authorizes with MembershipRole.Editor.
-        fixture.Inventories.GrantMembership(SomeInventory, SomeParticipant, MembershipRole.Editor, Now);
-
-        // The Active Inventory for this conversation, without which the dispatcher answers
-        // no_active_inventory before it looks at the tool name at all.
-        await fixture.Selections.UpsertAsync(
-            new ActiveInventorySelection(SomeParticipant, SomeConversation.Value, SomeInventory, Now),
+        harness.Inventories.GrantMembership(SomeInventory, SomeParticipant, MembershipRole.Editor, Now);
+        harness.References.AddUnit(SomeInventory, EachUnit, "each");
+        harness.Stock.CreateRow(SomeInventory, "Steel Bolts", EachUnit, "each", null, null, null, Quantity.Zero);
+        await harness.Selections.UpsertAsync(
+            new ActiveInventorySelection(SomeParticipant, MutationConversation, SomeInventory, Now),
             CancellationToken.None);
-
-        fixture.References.AddUnit(SomeInventory, EachUnit, "each", "piece", "pieces", "pc", "pcs");
-
-        // Quantity ZERO. Forget refuses stock still on hand with forget_requires_zero_quantity and
-        // proposes nothing, so a non-empty entry here would make this test unable to fail.
-        fixture.Stock.CreateRow(
-            SomeInventory, "Steel Bolts", EachUnit, "each", locationId: null, locationName: null, note: null, Quantity.Zero);
-
-        return fixture;
     }
+
+    private static InboundTurn ForgetTurn(string nativeMessageId, DateTimeOffset receivedAt) =>
+        TestTurns.Text(nativeMessageId, SomeParticipant, MutationConversation, "forget stock Steel Bolts", null, receivedAt, null);
+
+    /// <summary>
+    /// Starts a new conversation the way the durable rotation does it: the generation advances and
+    /// whatever was pending in the conversation being left behind stops being confirmable, as one
+    /// step. <see cref="IConversationRotationStore"/> owns that atomicity in production; this states
+    /// the same two effects so a coordinator test can reset a conversation without a database.
+    /// </summary>
+    private static async Task ResetConversationAsync(CoordinatorHarness harness, DateTimeOffset now)
+    {
+        harness.Bindings.Rotate(SomeParticipant, new ChannelConversationId(MutationConversation), now);
+        await harness.Proposals.InvalidatePendingAsync(
+            SomeParticipant, MutationConversation, ProposalStatus.ConversationReset, now, CancellationToken.None);
+    }
+
+    private static async Task<ConfirmationProposal?> PendingProposalAsync(CoordinatorHarness harness) =>
+        await harness.Proposals.FindPendingAsync(SomeParticipant, MutationConversation, CancellationToken.None);
 ```
 
 Add the gate the race test needs, next to the existing `CountingModelBoundary` and `CapturingModelBoundary`:
 
 ```csharp
     /// <summary>
-    /// Blocks inside the exact window the generation/reset race lives in: after the trusted
-    /// <see cref="TurnExecutionContext"/> has been assembled - and therefore after supersession was
-    /// first evaluated - and before the tool dispatch that stores a confirmation proposal. A test
-    /// releases it once it has rotated the conversation, which reproduces "the Participant pressed
-    /// New conversation while this Turn was being worked on" deterministically, with no sleeps and no
-    /// dependence on scheduling.
+    /// Parks inside the model call - after the trusted context is assembled and before anything is
+    /// dispatched - so a test can drive the exact window in which a conversation rotates while the
+    /// Turn holds no proposal yet. The handoffs are completed sources rather than sleeps, so the race
+    /// is deterministic; <see cref="ReachedAsync"/> bounds the wait only so a regression that never
+    /// reaches the model call fails the test instead of hanging the run.
     /// </summary>
     private sealed class GatedModelBoundary(IModelBoundary inner) : IModelBoundary
     {
+        private static readonly TimeSpan ReachTimeout = TimeSpan.FromSeconds(30);
+
         private readonly TaskCompletionSource _reached = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly TaskCompletionSource _released = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        /// <summary>Completes once processing has reached the model call and is waiting to be let through.</summary>
-        public Task Reached => _reached.Task;
+        /// <summary>Completes once the Turn is parked inside the model call.</summary>
+        public Task ReachedAsync() => _reached.Task.WaitAsync(ReachTimeout);
 
         public void Release() => _released.TrySetResult();
 
@@ -5589,159 +5940,169 @@ Add the gate the race test needs, next to the existing `CountingModelBoundary` a
             InboundTurn turn, ModelInvocationContext context, CancellationToken cancellationToken)
         {
             _reached.TrySetResult();
-            await _released.Task.WaitAsync(cancellationToken);
+            await _released.Task;
 
             return await inner.ProposeAsync(turn, context, cancellationToken);
         }
     }
 ```
 
-Now replace the whole `CreateCoordinator` helper - signature and body - with this. It keeps the same six-element tuple, so **none of the nine existing destructuring call sites changes**:
+**One test needs a proposal to become durable and a reset to land in the same instant**, which no gate on the model boundary can express. Give `InMemoryConfirmationProposalStore` a hook that runs once a proposal is stored, and a way to see every proposal it has ever held:
 
 ```csharp
-    private static (TurnProcessingCoordinator Coordinator, InMemoryInboxStore Inbox, InMemoryOutcomeStore Outcomes, InMemoryDeliveryStore Deliveries, InMemoryTurnResultStore ResultStore, InMemoryFoundryConversationBindingStore Bindings)
-        CreateCoordinator(
-            TimeProvider timeProvider,
-            IModelBoundary? modelBoundary = null,
-            InMemoryTurnProgressEventStore? progressEvents = null,
-            InMemoryConfirmationProposalStore? proposals = null,
-            InventoryFixture? inventory = null)
-    {
-        var inbox = new InMemoryInboxStore();
-        var outcomes = new InMemoryOutcomeStore();
-        var deliveries = new InMemoryDeliveryStore();
-        var resultStore = new InMemoryTurnResultStore(inbox, outcomes, deliveries);
-        var leases = new InMemoryLeaseCoordinator(timeProvider);
-        var progressEventStore = progressEvents ?? new InMemoryTurnProgressEventStore();
+    /// <summary>
+    /// Every proposal this store has held, settled or not. Test-only: it lets a test prove a proposal
+    /// really was created and say where it ended up, which "nothing is pending" alone cannot.
+    /// </summary>
+    public IReadOnlyCollection<ConfirmationProposal> Proposals => _rows.Values.Select(row => row.Proposal).ToList();
 
-        // ONE proposal store for the whole coordinator. The dispatcher that stores a proposal, the
-        // lifecycle that settles one, and the selection service that invalidates one on an explicit
-        // switch all have to be looking at the same rows - otherwise nothing about confirmation state
-        // is observable here, and a test asserting "nothing is pending" passes trivially.
-        var proposalStore = proposals ?? new InMemoryConfirmationProposalStore();
-
-        // Empty unless a test asks otherwise: most tests here send "hello" or the scripted failure
-        // marker, both Direct decisions that never reach a tool.
-        var fixture = inventory ?? InventoryFixture.Empty();
-
-        var auditStore = new InMemoryInventoryAuthorizationAuditStore(fixture.Selections);
-        var authorizationService = new InventoryAuthorizationService(fixture.Inventories, auditStore);
-        var selectionService = new InventorySelectionService(authorizationService, fixture.Selections, proposalStore);
-        var bindingStore = new InMemoryFoundryConversationBindingStore();
-        var executionContextFactory = new TurnExecutionContextFactory(inbox, bindingStore, selectionService);
-        var changeSetStore = new InMemoryStockChangeSetStore(fixture.Stock, proposalStore);
-        var toolDispatcher = new StockToolDispatcher(
-            new StockListingService(fixture.Stock, fixture.References, authorizationService),
-            new StockFindingService(fixture.Stock, fixture.References, authorizationService),
-            new StockMutationService(
-                fixture.Stock, new InMemoryStockMutationStore(fixture.Stock), fixture.References, authorizationService),
-            new StockChangeSetService(
-                new StockChangeResolver(fixture.Stock, fixture.References), changeSetStore, proposalStore, authorizationService),
-            new InventoryConfirmationService(
-                proposalStore, changeSetStore, new InMemoryReferenceAdministrationStore(proposalStore), authorizationService));
-
-        var coordinator = new TurnProcessingCoordinator(
-            inbox,
-            resultStore,
-            progressEventStore,
-            leases,
-            modelBoundary ?? new ScriptedModelBoundary(),
-            executionContextFactory,
-            new ConfirmationProposalLifecycle(proposalStore, bindingStore),
-            toolDispatcher,
-            timeProvider,
-            NullLogger<TurnProcessingCoordinator>.Instance);
-
-        return (coordinator, inbox, outcomes, deliveries, resultStore, bindingStore);
-    }
+    /// <summary>
+    /// Runs once a proposal is durable, before <see cref="StoreAsync"/> returns. Test-only: it places
+    /// another durable event - a conversation reset, say - at the exact instant between a proposal
+    /// becoming confirmable and whatever its Turn goes on to do, without threads or timing.
+    /// </summary>
+    public Func<Task>? AfterStore { get; set; }
 ```
 
-That deletes the helper's old comment beginning *"These tests never exercise the tool-dispatch path"*, which stops being true here.
+`StoreAsync` becomes `async`, and awaits `AfterStore` after `_rows[proposal.Id] = new Row(proposal, ProposalStatus.Pending, null);` and before it returns.
 
-Then append these two tests to the same class:
+Then append these four tests to `TurnProcessingCoordinatorTests`:
 
 ```csharp
+    // The property the whole post-dispatch settlement exists for: a mutation-capable Turn accepted
+    // under one Foundry conversation generation must never leave a confirmable proposal behind once
+    // the Participant has started a new conversation.
     [Fact]
-    public async Task A_turn_accepted_before_a_reset_never_leaves_a_confirmable_proposal_in_the_new_conversation()
+    public async Task A_mutation_accepted_before_a_reset_leaves_nothing_confirmable_in_the_new_conversation()
     {
         var timeProvider = new FakeTimeProvider(Now);
-        var proposals = new InMemoryConfirmationProposalStore();
-        var (coordinator, inbox, outcomes, _, _, bindings) = CreateCoordinator(
-            timeProvider,
-            modelBoundary: null,
-            progressEvents: null,
-            proposals: proposals,
-            inventory: await SeedForgettableStockAsync());
+        var harness = CreateHarness(timeProvider);
+        await SeedForgettableStockAsync(harness);
 
-        var acceptedUnder = await bindings.GetOrCreateAsync(
-            SomeParticipant, SomeConversation, Now, CancellationToken.None);
+        // First, prove the path is genuinely reachable: an identical Turn with no reset anywhere near
+        // it really does reach confirmation and really does leave something confirmable behind.
+        var beforeAnyReset = ForgetTurn("native-1", Now);
+        await AcceptAsync(harness.Inbox, harness.Bindings, beforeAnyReset);
+        await harness.Coordinator.ProcessPendingAsync(CancellationToken.None);
 
-        // Accepted under the old generation, and mutation-capable: this is the Turn whose answer asks
-        // for confirmation, and therefore the Turn that stores a proposal.
-        var turn = TestTurns.Text(
-            "native-superseded-1", SomeParticipant, SomeConversation.Value, "forget stock Steel Bolts", null, Now, null);
-        await inbox.AcceptAsync(turn, acceptedUnder, CancellationToken.None);
+        var control = await harness.Outcomes.FindAsync(beforeAnyReset.TurnId, CancellationToken.None);
+        Assert.Equal(OutcomeCategory.ConfirmationRequired, control!.Category);
+        Assert.NotNull(await PendingProposalAsync(harness));
 
-        // The Participant starts a new conversation while that Turn is still queued.
-        bindings.Rotate(SomeParticipant, SomeConversation, Now.AddMinutes(1));
+        // A second Turn is accepted into the same conversation - still the generation it was queued
+        // under - and only then does the Participant start a new conversation.
+        var acceptedBeforeTheReset = ForgetTurn("native-2", Now.AddSeconds(1));
+        await AcceptAsync(harness.Inbox, harness.Bindings, acceptedBeforeTheReset);
+        await ResetConversationAsync(harness, Now.AddSeconds(2));
+        Assert.Null(await PendingProposalAsync(harness));
 
-        Assert.Equal(1, await coordinator.ProcessPendingAsync(CancellationToken.None));
+        await harness.Coordinator.ProcessPendingAsync(CancellationToken.None);
 
-        // It really did ask for confirmation - otherwise the assertion below would be vacuous.
-        var outcome = await outcomes.FindAsync(turn.TurnId, CancellationToken.None);
-        Assert.NotNull(outcome);
-        Assert.Equal(OutcomeCategory.ConfirmationRequired, outcome!.Category);
-
-        // And nothing is left that a "confirm" in the new conversation could execute.
-        Assert.Null(await proposals.FindPendingAsync(SomeParticipant, SomeConversation.Value, CancellationToken.None));
+        Assert.Null(await PendingProposalAsync(harness));
+        var outcome = await harness.Outcomes.FindAsync(acceptedBeforeTheReset.TurnId, CancellationToken.None);
+        Assert.NotEqual(OutcomeCategory.ConfirmationRequired, outcome!.Category);
+        Assert.Equal(ConfirmationProposalLifecycle.ConversationResetCode, outcome.Code);
     }
 
+    // The window the captured flag alone cannot close: at context assembly the conversation really
+    // was current, and the reset lands while the Turn is inside the model call - before it has any
+    // proposal for the rotation to settle. Only re-reading the binding after dispatch catches it.
     [Fact]
-    public async Task A_reset_that_commits_while_a_turn_is_being_processed_still_leaves_nothing_confirmable()
+    public async Task A_reset_that_lands_while_a_turn_is_being_processed_still_settles_what_it_goes_on_to_propose()
     {
         var timeProvider = new FakeTimeProvider(Now);
-        var proposals = new InMemoryConfirmationProposalStore();
         var gate = new GatedModelBoundary(new ScriptedModelBoundary());
-        var (coordinator, inbox, outcomes, _, _, bindings) = CreateCoordinator(
-            timeProvider,
-            modelBoundary: gate,
-            progressEvents: null,
-            proposals: proposals,
-            inventory: await SeedForgettableStockAsync());
+        var harness = CreateHarness(timeProvider, gate);
+        await SeedForgettableStockAsync(harness);
+        var turn = ForgetTurn("native-1", Now);
+        await AcceptAsync(harness.Inbox, harness.Bindings, turn);
 
-        var acceptedUnder = await bindings.GetOrCreateAsync(
-            SomeParticipant, SomeConversation, Now, CancellationToken.None);
-        var turn = TestTurns.Text(
-            "native-superseded-2", SomeParticipant, SomeConversation.Value, "forget stock Steel Bolts", null, Now, null);
-        await inbox.AcceptAsync(turn, acceptedUnder, CancellationToken.None);
+        var processing = harness.Coordinator.ProcessPendingAsync(CancellationToken.None);
+        try
+        {
+            await gate.ReachedAsync();
 
-        var processing = coordinator.ProcessPendingAsync(CancellationToken.None);
+            // The hole itself: the trusted context has already been assembled and found the
+            // conversation current, and there is nothing for a reset to settle yet.
+            Assert.Null(await PendingProposalAsync(harness));
+            await ResetConversationAsync(harness, Now.AddSeconds(1));
+        }
+        finally
+        {
+            gate.Release();
+        }
 
-        // Processing is now parked between "trusted context assembled" and "tool dispatched". The
-        // context was built BEFORE the rotation below, so every answer it carries - including whether
-        // this Turn's conversation was superseded - says the conversation is current. Rotating here is
-        // therefore the one interleaving a flag captured at context-creation time cannot see.
-        await gate.Reached.WaitAsync(TimeSpan.FromSeconds(30));
-        bindings.Rotate(SomeParticipant, SomeConversation, Now.AddMinutes(1));
-
-        // The rotation settles nothing, faithfully: at this instant nothing is pending, because the
-        // proposal this Turn is about to store does not exist yet. That is exactly the hole.
-        Assert.Null(await proposals.FindPendingAsync(SomeParticipant, SomeConversation.Value, CancellationToken.None));
-
-        gate.Release();
         Assert.Equal(1, await processing);
 
-        var outcome = await outcomes.FindAsync(turn.TurnId, CancellationToken.None);
-        Assert.NotNull(outcome);
-        Assert.Equal(OutcomeCategory.ConfirmationRequired, outcome!.Category);
+        var created = Assert.Single(harness.Proposals.Proposals);
+        Assert.Equal(turn.TurnId, created.ProposedInTurnId);
+        Assert.Equal(
+            ProposalStatus.ConversationReset,
+            await harness.Proposals.FindStatusAsync(created.Id, CancellationToken.None));
+        Assert.Null(await PendingProposalAsync(harness));
+        var outcome = await harness.Outcomes.FindAsync(turn.TurnId, CancellationToken.None);
+        Assert.NotEqual(OutcomeCategory.ConfirmationRequired, outcome!.Category);
+    }
 
-        // The proposal it stored after the reset must already be settled: the post-dispatch settle
-        // re-read the binding and found a generation this Turn was never accepted under.
-        Assert.Null(await proposals.FindPendingAsync(SomeParticipant, SomeConversation.Value, CancellationToken.None));
+    // A reset accepted before this Turn had proposed anything is only one of the two orders. In the
+    // other, this Turn's proposal is already durable when the reset runs, so the reset settles it -
+    // and there is nothing left for the post-dispatch pass to settle. The answer must still not offer
+    // a confirmation: a token that has already stopped working is worse than no token at all.
+    [Fact]
+    public async Task A_reset_that_settles_the_proposal_itself_still_never_answers_with_a_confirmation()
+    {
+        var timeProvider = new FakeTimeProvider(Now);
+        var harness = CreateHarness(timeProvider);
+        await SeedForgettableStockAsync(harness);
+        var turn = ForgetTurn("native-1", Now);
+        await AcceptAsync(harness.Inbox, harness.Bindings, turn);
+
+        harness.Proposals.AfterStore = () => ResetConversationAsync(harness, Now.AddSeconds(1));
+
+        Assert.Equal(1, await harness.Coordinator.ProcessPendingAsync(CancellationToken.None));
+
+        var created = Assert.Single(harness.Proposals.Proposals);
+        Assert.Equal(
+            ProposalStatus.ConversationReset,
+            await harness.Proposals.FindStatusAsync(created.Id, CancellationToken.None));
+        Assert.Null(await PendingProposalAsync(harness));
+
+        var outcome = await harness.Outcomes.FindAsync(turn.TurnId, CancellationToken.None);
+        Assert.NotEqual(OutcomeCategory.ConfirmationRequired, outcome!.Category);
+        Assert.Equal(ConfirmationProposalLifecycle.ConversationResetCode, outcome.Code);
+        Assert.Null(outcome.Payload);
+        Assert.All(
+            harness.Deliveries.Deliveries,
+            delivery => Assert.DoesNotContain("token", delivery.Payload, StringComparison.OrdinalIgnoreCase));
+    }
+
+    // A reset ends what can still be confirmed, not what has already been asked. A read accepted
+    // before it proposes nothing, so it simply answers - from the conversation it was accepted under.
+    [Fact]
+    public async Task A_read_accepted_before_a_reset_still_answers_from_the_conversation_it_was_accepted_under()
+    {
+        var timeProvider = new FakeTimeProvider(Now);
+        var capturing = new CapturingModelBoundary(new ScriptedModelBoundary());
+        var harness = CreateHarness(timeProvider, capturing);
+        await SeedForgettableStockAsync(harness);
+        var turn = TestTurns.Text("native-1", SomeParticipant, MutationConversation, "list stock including zero", null, Now, null);
+        var acceptedUnder = await harness.Bindings.GetOrCreateAsync(
+            SomeParticipant, turn.ChannelConversationId, Now, CancellationToken.None);
+        await harness.Inbox.AcceptAsync(turn, acceptedUnder, CancellationToken.None);
+
+        await ResetConversationAsync(harness, Now.AddSeconds(1));
+        Assert.Equal(1, await harness.Coordinator.ProcessPendingAsync(CancellationToken.None));
+
+        var outcome = await harness.Outcomes.FindAsync(turn.TurnId, CancellationToken.None);
+        Assert.Equal(OutcomeStatus.Completed, outcome!.Status);
+        Assert.Equal(OutcomeCategory.Completed, outcome.Category);
+        Assert.Contains("Steel Bolts", outcome.Payload);
+        Assert.Equal(acceptedUnder.FoundryConversationId, Assert.Single(capturing.Invocations).Foundry);
+        Assert.Empty(harness.Proposals.Proposals);
     }
 ```
 
-No new `using` directives are needed: the file already imports `MultiChannelAgent.Application.Inventories` (the services and `StockToolDispatcher`), `MultiChannelAgent.Application.Tests.TestDoubles` and `...TestDoubles.Inventories` (every double used above), `MultiChannelAgent.Domain.Inventories` (`InventoryId`, `UnitId`, `MembershipRole`, `ActiveInventorySelection`, `Quantity`), and `MultiChannelAgent.Domain.Turns` (`ChannelConversationId`, `OutcomeCategory`).
+No new `using` directives are needed: the file already imports `MultiChannelAgent.Application.Inventories` (the services, `StockToolDispatcher` and `ConfirmationProposalLifecycle`), `MultiChannelAgent.Application.Tests.TestDoubles` and `...TestDoubles.Inventories` (every double used above), `MultiChannelAgent.Domain.Inventories` (`InventoryId`, `UnitId`, `MembershipRole`, `ActiveInventorySelection`, `Quantity`, `ProposalStatus`), and `MultiChannelAgent.Domain.Turns` (`ChannelConversationId`, `OutcomeCategory`, `OutcomeStatus`).
 
 - [ ] **Step 10: Run the coordinator tests to verify they fail**
 
@@ -5760,29 +6121,38 @@ Expected: FAIL. Both new tests reach their last line and fail there with `Assert
 
 Fix the fixture until both tests fail on the `Assert.Null` line, and only then implement.
 
-- [ ] **Step 11: Settle it in the coordinator**
+- [ ] **Step 11: Settle it in the coordinator, and answer truthfully**
 
 In `src/MultiChannelAgent.Application/Turns/TurnProcessingCoordinator.cs`, inside `ProcessOneAsync`, insert immediately after the `var decision = ...` assignment and before `var outcome = Outcome.Record(...)`:
 
 ```csharp
-        // A Turn accepted before the Participant started a new conversation may still have stored a
-        // proposal just now. It belongs to the conversation they ended, so it is settled here - in the
-        // same pass that created it, before the answer is recorded - and can never be confirmed in the
-        // conversation they started. This seam re-reads the conversation's current generation rather
-        // than reusing what the trusted context decided, because the reset may have committed while
-        // this very Turn was being processed. The answer itself is untouched: it is recorded exactly
-        // as decided, and saying "confirm" against it is simply answered as "there is nothing to
-        // confirm".
-        await proposalLifecycle.SettleSupersededConversationAsync(executionContext, now, cancellationToken);
+        // The reconcile above ran before this Turn had proposed anything, so it could not settle a
+        // proposal that did not exist yet. A reset that landed while this Turn was in the model call
+        // or in dispatch would therefore find nothing, and this Turn would go on to leave a
+        // confirmable proposal in a conversation the Participant has already left. Re-reading the
+        // binding here - never trusting the flag the context captured earlier - is what closes that
+        // window, and it happens before the Outcome is recorded so the answer never offers a token
+        // that has already stopped working. Whether this pass or the reset itself settled the
+        // proposal makes no difference to the answer: what decides it is that the conversation moved
+        // on at all.
+        var settlement = await proposalLifecycle.SettleSupersededConversationAsync(
+            executionContext, now, cancellationToken);
+
+        if (settlement.ConversationWasSuperseded && decision.Category == OutcomeCategory.ConfirmationRequired)
+        {
+            decision = ConfirmationProposalLifecycle.ConversationResetAnswer;
+        }
 ```
+
+`decision` therefore has to be declared with `var` and reassigned, which it already is. The condition has two halves and both are load-bearing: gating on `settlement.Settled` instead of `ConversationWasSuperseded` would hand back a live-looking token whenever the reset settled the proposal itself, and dropping the category check would let this reshape a read's perfectly good answer.
 
 Extend the class summary's last paragraph with:
 
 ```
-/// The same seam runs once more after dispatch, re-reading the conversation's current Foundry
-/// generation, so a Turn accepted in a conversation the Participant has since reset cannot leave a
-/// confirmable proposal behind in the one they started - including when the reset commits while the
-/// Turn is being processed.
+/// It also reconciles pending confirmation state against the freshly assembled trusted context before
+/// the Turn is interpreted, so an interrupted Turn, a switched Active Inventory, or lost access can
+/// never leave a confirmable proposal behind - and once more after dispatch, so neither can a
+/// conversation reset that landed while this Turn was being processed.
 ```
 
 No constructor change: `ConfirmationProposalLifecycle` is already injected, and it is the lifecycle - not the coordinator - that gained the binding-store dependency.
@@ -5790,18 +6160,53 @@ No constructor change: `ConfirmationProposalLifecycle` is already injected, and 
 - [ ] **Step 12: Run the coordinator tests, then the whole Application suite**
 
 Run: `dotnet test tests/MultiChannelAgent.Application.Tests --filter FullyQualifiedName~TurnProcessingCoordinatorTests`
-Expected: PASS, including both new tests.
+Expected: PASS, including the new tests.
 
 Run: `dotnet test tests/MultiChannelAgent.Application.Tests`
 Expected: PASS. The harness now shares one proposal store, which is what the pre-existing tests always assumed.
 
-- [ ] **Step 13: Commit**
+- [ ] **Step 13: Prove the locking read against real databases**
+
+Three tests, in `tests/MultiChannelAgent.IntegrationTests`, each covering something the layer above it cannot.
+
+**13a. The statement's shape, per provider, with no database at all.** Add `FoundryConversationBindingSupersessionReadTests.cs`. Build one `MultiChannelAgentDbContext` on `UseSqlServer` and one on `UseSqlite` (neither ever connects), then assert `FoundryConversationBindingSupersessionRead.Statement(db.Database, ...)`:
+
+- on SQL Server its `Format` contains `WITH (UPDLOCK)`;
+- on SQLite its `Format` contains no `UPDLOCK`;
+- on both, `Format` contains neither identity as text, and `GetArguments()` is exactly `[participantId, channelConversationId]`.
+
+This is where a regression to an ordinary read shows up in a second, without Docker.
+
+**13b. What the read answers, on SQLite.** Add `SqlFoundryConversationBindingSupersessionReadTests.cs`, following `SqlConversationRotationStoreTests`' shared-cache in-memory SQLite fixture. Seed a `ParticipantEntity` first - the binding row has a foreign key to it. Assert it reads back the current generation; reads back generation 2 after a real `SqlConversationRotationStore.RotateAsync`; returns null **and writes no row** for a conversation that has none; reads only the pair it was asked about; leaves `db.Database.CurrentTransaction` null behind it; and works inside a transaction the caller already holds.
+
+**13c. The U < P < S < R window, on real SQL Server with RCSI.** Add `SqlSupersessionReadSerializationTests.cs`, deriving `SqlIntegrationTestBase`, as a `[SkippableFact]` guarded by `Skip.IfNot(DockerAvailable, ...)`.
+
+It cannot use the container's shared database: `MsSqlBuilder`'s connection string names `master`, and `READ_COMMITTED_SNAPSHOT` cannot be set there at all. So add `SqlUserDatabase.cs` - an `IAsyncDisposable` that creates a uniquely named database from `master`, exposes its connection string, enables and reports the setting, and drops it again after clearing the pool - and expose the container's own string from the base class as `protected string? ServerConnectionString`. Nothing else changes: every other SQL scenario keeps sharing `master`, which is what makes them fast.
+
+The scenario then:
+
+1. creates its database, enables `READ_COMMITTED_SNAPSHOT` **before anything connects**, and asserts it is on - a run without it would prove nothing;
+2. applies migrations to it, seeds a Participant/Inventory/Membership/reserved Unit, and establishes generation 1;
+3. starts the real `SqlConversationRotationStore.RotateAsync` on a context carrying a `DbCommandInterceptor` that pauses in `NonQueryExecutedAsync` on `[ConfirmationProposals]` - after the generation bump and the settle, before the commit. That is **U**;
+4. stores a proposal from a second context. That is **P**, and it is the reason the reset settled nothing;
+5. asserts, as the control, that an ordinary `GetOrCreateAsync` still reads generation 1 - the stale answer the defect believed;
+6. starts `SettleSupersededConversationAsync` on a third context, asserts it does not complete within a short window, and asserts a request on that database is genuinely lock-blocked (`sys.dm_exec_requests`), so a check that had merely not started yet cannot pass this;
+7. releases the gate in a `finally`, then asserts the rotation reached generation 2 with `ClearedPendingConfirmation` false - the hole, stated - and that the settlement reports `ConversationWasSuperseded` with `Settled` of `ConversationReset`, and that the stored proposal's status is `ConversationReset` with nothing pending.
+
+Run: `dotnet test tests/MultiChannelAgent.IntegrationTests --filter FullyQualifiedName~SupersessionRead`
+Expected: PASS. 13c skips wherever Docker is unavailable; CI sets `REQUIRE_DOCKER_TESTS=true`, which removes its ability to skip.
+
+- [ ] **Step 14: Commit**
 
 ```bash
 git add src/MultiChannelAgent.Application/Turns/TurnExecutionContext.cs \
+        src/MultiChannelAgent.Application/Turns/IFoundryConversationBindingStore.cs \
         src/MultiChannelAgent.Application/Turns/TurnProcessingCoordinator.cs \
         src/MultiChannelAgent.Application/Inventories/ConfirmationProposalLifecycle.cs \
-        tests/MultiChannelAgent.Application.Tests
+        src/MultiChannelAgent.Infrastructure/Persistence/FoundryConversationBindingSupersessionRead.cs \
+        src/MultiChannelAgent.Infrastructure/Turns/SqlFoundryConversationBindingStore.cs \
+        tests/MultiChannelAgent.Application.Tests \
+        tests/MultiChannelAgent.IntegrationTests
 git commit -m "fix: stop a Turn from a reset conversation leaving a confirmable proposal"
 ```
 
