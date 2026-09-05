@@ -9394,7 +9394,7 @@ Expected: no output from `tsc`, and zero warnings or errors from oxlint - includ
 - [ ] **Step 8: Commit**
 
 ```bash
-git add src/web/src/useMediaQuery.ts src/web/src/WorkspacePanel.tsx src/web/src/WorkspacePanel.test.tsx src/web/src/index.css
+git add src/web/src/useMediaQuery.ts src/web/src/useMediaQuery.test.ts src/web/src/WorkspacePanel.tsx src/web/src/WorkspacePanel.test.tsx src/web/src/index.css
 git commit -m "feat: make the web layout responsive with an accessible workspace panel"
 ```
 
