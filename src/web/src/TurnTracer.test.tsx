@@ -28,6 +28,24 @@ function acceptedResponse(turnId: string) {
   });
 }
 
+function alreadyAnsweredResponse(turnId: string) {
+  return new Response(
+    JSON.stringify({
+      turnId,
+      status: 'completed',
+      category: 'completed',
+      code: 'stock.listed',
+      summary: 'The recorded answer.',
+      payload: null,
+      deliveries: [],
+    }),
+    {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    },
+  );
+}
+
 /** Flushes the microtask chain a pending `fetch`/`response.json()`/component continuation runs
  * through once its response resolves, without depending on any observable side effect - which is
  * exactly what a post-unmount continuation must not have. A macrotask tick is enough: every
@@ -206,6 +224,56 @@ describe('TurnTracer', () => {
     // rather than doing the work twice.
     expect(body.nativeMessageId).toBe('native-lost');
     await waitFor(() => expect(opened[0].url).toBe('/api/turns/turn-recovered/events'));
+  });
+
+  it('renders and settles an already-recorded Outcome returned by a fresh submission', async () => {
+    const fetchMock = stubFetch(() => alreadyAnsweredResponse('turn-recorded'));
+    const onTerminalOutcome = vi.fn();
+    const { opened, factory } = recordingEventStreamFactory();
+    render(
+      <TurnTracer
+        csrfToken="csrf-token"
+        webConversationId={CONVERSATION}
+        participantId={PARTICIPANT}
+        onTerminalOutcome={onTerminalOutcome}
+        createSource={factory}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole('button', { name: 'Send' }));
+
+    expect(await screen.findByText('The recorded answer.')).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(opened).toHaveLength(0);
+    expect(readInFlightTurn(CONVERSATION, PARTICIPANT)).toBeNull();
+    expect(onTerminalOutcome).toHaveBeenCalledTimes(1);
+  });
+
+  it('renders and settles an already-recorded Outcome returned while resuming a lost response', async () => {
+    const fetchMock = stubFetch(() => alreadyAnsweredResponse('turn-recorded'));
+    rememberSubmission(CONVERSATION, PARTICIPANT, {
+      nativeMessageId: 'native-lost',
+      contentText: 'list stock',
+    });
+
+    const onTerminalOutcome = vi.fn();
+    const { opened, factory } = recordingEventStreamFactory();
+    render(
+      <TurnTracer
+        csrfToken="csrf-token"
+        webConversationId={CONVERSATION}
+        participantId={PARTICIPANT}
+        onTerminalOutcome={onTerminalOutcome}
+        createSource={factory}
+      />,
+    );
+
+    expect(await screen.findByText('The recorded answer.')).toBeInTheDocument();
+    const body = JSON.parse(String(fetchMock.mock.calls[0][1]?.body));
+    expect(body.nativeMessageId).toBe('native-lost');
+    expect(opened).toHaveLength(0);
+    expect(readInFlightTurn(CONVERSATION, PARTICIPANT)).toBeNull();
+    expect(onTerminalOutcome).toHaveBeenCalledTimes(1);
   });
 
   it('does not resubmit a confirmation whose token was never persisted, and says so plainly', async () => {

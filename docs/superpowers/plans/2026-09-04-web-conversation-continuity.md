@@ -279,6 +279,7 @@ No migration, no new column, and no change to `IConfirmationProposalStore`, whos
 | `src/web/src/WorkspacePanel.test.tsx` (create) | Desktop `<aside>` landmark, narrow tab semantics and keyboard navigation. |
 | `src/web/src/useMediaQuery.test.ts` (create) | Subscription stability across an unrelated rerender, and correct resubscription when the query changes. |
 | `src/web/src/TurnTracer.test.tsx` (create) | Streamed progress and outcome, mount-time resume with no resubmission, live region. |
+| `src/web/src/turnsApi.test.ts` (create) | Definitive-rejection classification, including authentication, timeout, rate-limit, and server-error carve-outs. |
 | `src/web/src/App.test.tsx` (create) | Conversation-primary DOM order, explicit-only selection, version-driven refetch, New conversation. |
 
 ---
@@ -9840,6 +9841,7 @@ git commit -m "feat: make the web layout responsive with an accessible workspace
 - Create: `src/web/src/conversationApi.ts`
 - Modify: `src/web/src/TurnTracer.tsx`
 - Test: `src/web/src/TurnTracer.test.tsx`
+- Test: `src/web/src/turnsApi.test.ts`
 - Modify: `src/web/src/App.tsx` (one prop line each hardening pass - see Step 7)
 
 - [ ] **Step 1: Write the failing test**
@@ -9875,6 +9877,24 @@ function acceptedResponse(turnId: string) {
     status: 202,
     headers: { 'Content-Type': 'application/json' },
   });
+}
+
+function alreadyAnsweredResponse(turnId: string) {
+  return new Response(
+    JSON.stringify({
+      turnId,
+      status: 'completed',
+      category: 'completed',
+      code: 'stock.listed',
+      summary: 'The recorded answer.',
+      payload: null,
+      deliveries: [],
+    }),
+    {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    },
+  );
 }
 
 /** Flushes the microtask chain a pending `fetch`/`response.json()`/component continuation runs
@@ -10055,6 +10075,56 @@ describe('TurnTracer', () => {
     // rather than doing the work twice.
     expect(body.nativeMessageId).toBe('native-lost');
     await waitFor(() => expect(opened[0].url).toBe('/api/turns/turn-recovered/events'));
+  });
+
+  it('renders and settles an already-recorded Outcome returned by a fresh submission', async () => {
+    const fetchMock = stubFetch(() => alreadyAnsweredResponse('turn-recorded'));
+    const onTerminalOutcome = vi.fn();
+    const { opened, factory } = recordingEventStreamFactory();
+    render(
+      <TurnTracer
+        csrfToken="csrf-token"
+        webConversationId={CONVERSATION}
+        participantId={PARTICIPANT}
+        onTerminalOutcome={onTerminalOutcome}
+        createSource={factory}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole('button', { name: 'Send' }));
+
+    expect(await screen.findByText('The recorded answer.')).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(opened).toHaveLength(0);
+    expect(readInFlightTurn(CONVERSATION, PARTICIPANT)).toBeNull();
+    expect(onTerminalOutcome).toHaveBeenCalledTimes(1);
+  });
+
+  it('renders and settles an already-recorded Outcome returned while resuming a lost response', async () => {
+    const fetchMock = stubFetch(() => alreadyAnsweredResponse('turn-recorded'));
+    rememberSubmission(CONVERSATION, PARTICIPANT, {
+      nativeMessageId: 'native-lost',
+      contentText: 'list stock',
+    });
+
+    const onTerminalOutcome = vi.fn();
+    const { opened, factory } = recordingEventStreamFactory();
+    render(
+      <TurnTracer
+        csrfToken="csrf-token"
+        webConversationId={CONVERSATION}
+        participantId={PARTICIPANT}
+        onTerminalOutcome={onTerminalOutcome}
+        createSource={factory}
+      />,
+    );
+
+    expect(await screen.findByText('The recorded answer.')).toBeInTheDocument();
+    const body = JSON.parse(String(fetchMock.mock.calls[0][1]?.body));
+    expect(body.nativeMessageId).toBe('native-lost');
+    expect(opened).toHaveLength(0);
+    expect(readInFlightTurn(CONVERSATION, PARTICIPANT)).toBeNull();
+    expect(onTerminalOutcome).toHaveBeenCalledTimes(1);
   });
 
   it('does not resubmit a confirmation whose token was never persisted, and says so plainly', async () => {
@@ -10514,6 +10584,25 @@ describe('TurnTracer', () => {
 
     expect(screen.queryByRole('spinbutton')).not.toBeInTheDocument();
     await waitFor(() => expect(screen.getAllByRole('button').map((b) => b.textContent)).toEqual(['Send']));
+  });
+});
+```
+
+Create `src/web/src/turnsApi.test.ts`:
+
+```ts
+import { describe, expect, it } from 'vitest';
+import { isDefinitiveRejection } from './turnsApi';
+
+describe('isDefinitiveRejection', () => {
+  it('clears only permanent client rejections, preserving every retryable or ambiguous status', () => {
+    for (const status of [400, 403, 404, 409]) {
+      expect(isDefinitiveRejection(status), `${status} should be definitive`).toBe(true);
+    }
+
+    for (const status of [401, 408, 429, 500, 503]) {
+      expect(isDefinitiveRejection(status), `${status} should remain retryable or ambiguous`).toBe(false);
+    }
   });
 });
 ```
@@ -11129,7 +11218,7 @@ Delete the now-unused `getTurnOutcome` import if the compiler reports it; the re
 - [ ] **Step 6: Run the tests to verify they pass**
 
 Run: `cd src/web && npm test`
-Expected: PASS, 23 new tests.
+Expected: PASS, 26 new tests across two files.
 
 A quality review found one genuine bug in Steps 1-5 as first written: the mount-time resume effect had no cleanup, so React StrictMode's development-only mount → cleanup → mount cycle (`main.tsx` wraps `App` in `StrictMode`) opened a stream on the first mount, the close-on-unmount effect's cleanup then closed it, and the second mount's resume effect saw `resumeAttemptedRef.current` already `true` and skipped - leaving a resumed Turn with `watchedTurnRef` still claiming ownership of a stream that was actually dead, forever. The unknown-Turn-id (POST) path was never affected: its side effect (`watchTurn`, called from inside `resumeStoredTurn`) only runs after `await submitTurn(...)` resolves, strictly after StrictMode's synchronous mount/cleanup/mount has already finished, so there was only ever one fetch either way.
 
@@ -11158,6 +11247,8 @@ A fourth quality review, treating `conversationStorage` and its callers here as 
 2. **Nothing in this component tolerated `localStorage` itself failing.** A `SecurityError` (storage disabled or blocked) or `QuotaExceededError` (storage full) thrown by `setItem` would have propagated straight out of `rememberSubmission` into `handleSubmit`, crashing the submit rather than degrading safely - and worse, a caller that swallowed it and sent the Turn anyway would have sent mutation-capable work with nothing anywhere to recover or de-duplicate it by if the response were then lost. Task 17's own Step 4 covers the storage side; this is the other half. `rememberSubmission` now returns `boolean`, and `handleSubmit` checks it before ever calling `submitTurn`: a `false` shows a plain alert that browser storage is unavailable and the message was not sent because safe recovery cannot be guaranteed, and sends nothing at all. The guard runs before replacing an existing current Turn, so a failed write also leaves that Turn's stream, progress, and rendered answer intact. Every *later* `rememberTurnId`/`clearInFlightTurnIfMatches` failure in this component stays best-effort and unchecked, deliberately: by the time those run, the accepted Turn id or the idempotency key already exists somewhere durable (the server, or the record `rememberSubmission` already wrote), so a record this component could not update or remove is stale, never unsafe - nothing here blanks the app over it.
 
 Steps 1-5 above already carry both fixes and their six tests: one submitting normally against a 400 and asserting the record is cleared; one for a stored lost-response submission whose resubmission gets the same 400, asserting the record is cleared and - remounted fresh afterward, as a later refresh or reopened tab would be - that it is not resubmitted a second time; one for a network failure (`fetch` itself rejecting) asserting the record survives; one for a retryable status (429) asserting the same; one that makes `localStorage.setItem` throw before any Turn exists and asserts no `fetch` call ever happens, the Participant sees a clear alert, and the Send button stays enabled; and one that makes the same write fail while a prior Turn is streaming and proves its stream remains open and its Outcome still arrives. `TurnTracer.test.tsx` grew from 15 to 17 tests during the third hardening pass, then to 23 during this one (web suite: 83 to 96 tests across 7 files, following Task 17's own growth from 27 to 34 tests).
+
+A fifth quality review found two unguarded safety branches even though their implementation was already correct: the HTTP 200 "already answered" result at both `submitTurn` call sites, and the full definitive-rejection boundary rather than only its 400/429 examples. Task 20 now includes two `TurnTracer` tests proving both a fresh submission and a lost-response resubmission render the recorded Outcome, clear the matching breadcrumb, notify the workspace, and open no stream. A direct `turnsApi.test.ts` test pins permanent client failures as definitive while preserving 401, 408, 429, and 5xx statuses as retryable or ambiguous. Task 20 therefore finishes with 25 `TurnTracer` tests plus one `turnsApi` classification test; the whole pre-Task-21 web suite is 99 tests across eight files.
 
 - [ ] **Step 7: Check types and lint**
 
@@ -11849,7 +11940,7 @@ export default App;
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `cd src/web && npm test`
-Expected: PASS. The whole web suite - roughly 106 tests across eight files (Task 19's `WorkspacePanel.test.tsx` grew from 10 to 15 tests and gained a sibling `useMediaQuery.test.ts` with 2 tests, both during that task's own quality-review hardening; Task 17's `conversationStorage.test.ts` grew from 14 to 24 to 27 to 34 tests, and Task 20's `TurnTracer.test.tsx` grew from 10 to 12 to 15 to 17 to 23 tests, across Task 20's own four quality-review hardening passes - StrictMode recovery, then Participant scope/superseded-Turn/unmount safety, then keeping a confirmation's token out of storage by shape and proving the stream-close cleanup is actually tested, then drawing the definitive-vs-retryable rejection line and tolerating `localStorage` itself failing without abandoning an already-streaming Turn) - is green.
+Expected: PASS. The whole web suite - roughly 109 tests across nine files (Task 19's `WorkspacePanel.test.tsx` grew from 10 to 15 tests and gained a sibling `useMediaQuery.test.ts` with 2 tests, both during that task's own quality-review hardening; Task 17's `conversationStorage.test.ts` grew from 14 to 24 to 27 to 34 tests; and Task 20's `TurnTracer.test.tsx` grew from 10 to 12 to 15 to 17 to 23 to 25 tests, then gained one direct `turnsApi.test.ts` classification test, across Task 20's own five quality-review hardening passes - StrictMode recovery, then Participant scope/superseded-Turn/unmount safety, then keeping a confirmation's token out of storage by shape and proving the stream-close cleanup is actually tested, then drawing the definitive-vs-retryable rejection line and tolerating `localStorage` itself failing without abandoning an already-streaming Turn, then pinning both HTTP 200 replay callers and every rejection carve-out) - is green.
 
 - [ ] **Step 5: Check types, lint, and build**
 
