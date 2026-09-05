@@ -47,6 +47,8 @@ public static class ServiceCollectionExtensions
         services.AddScoped<TurnOutcomeReader>();
         services.AddScoped<TurnEventReader>();
         services.AddScoped<IFoundryConversationBindingStore, SqlFoundryConversationBindingStore>();
+        services.AddScoped<IConversationRotationStore, SqlConversationRotationStore>();
+        services.AddScoped<ConversationRotationService>();
         services.AddScoped<TurnExecutionContextFactory>();
 
         services.AddScoped<IParticipantStore, SqlParticipantStore>();
