@@ -6239,6 +6239,7 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using MultiChannelAgent.Application.Inventories;
 using MultiChannelAgent.Application.Turns;
 using MultiChannelAgent.Domain.Inventories;
 using MultiChannelAgent.Infrastructure.Persistence;
@@ -6453,21 +6454,24 @@ public sealed class ConversationRotationHttpTests : IAsyncLifetime
         Assert.Equal(HttpStatusCode.OK, (await participant.StartNewConversationAsync()).StatusCode);
         await ProcessUntilQuietAsync();
 
-        var proposalOutcome = await participant.GetOutcomeAsync(stale);
-        Assert.Equal("confirmation_required", proposalOutcome!.Value.GetProperty("category").GetString());
-        var token = proposalOutcome.Value.GetProperty("payload").GetProperty("token").GetString()!;
-
-        var confirmation = await participant.SubmitAcceptedTurnAsync("native-reset-9", $"confirm {token}");
-        await ProcessUntilQuietAsync();
-
-        Assert.NotEqual(
-            "completed", (await participant.GetOutcomeAsync(confirmation))!.Value.GetProperty("category").GetString());
+        // The Turn did reach the confirmation path - the proposal below exists precisely because it
+        // did - but it is never offered as one: a confirmation decided in a conversation the
+        // Participant has already left is answered as the conflict it now is, carrying no token,
+        // because handing back a bearer secret that is already settled would only render a prompt
+        // that can never succeed. There is therefore no token to try, and trying an invented one
+        // would prove nothing about this Turn.
+        var staleOutcome = await participant.GetOutcomeAsync(stale);
+        Assert.Equal("conflict", staleOutcome!.Value.GetProperty("category").GetString());
+        Assert.Equal(ConfirmationProposalLifecycle.ConversationResetCode, staleOutcome.Value.GetProperty("code").GetString());
+        Assert.Equal(JsonValueKind.Null, staleOutcome.Value.GetProperty("payload").ValueKind);
 
         using var scope = _factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<MultiChannelAgentDbContext>();
 
-        // Nothing was changed and nothing was created, and the proposal is settled as what it is:
-        // work belonging to a conversation the Participant ended.
+        // Nothing was changed and nothing was left confirmable, and the proposal is settled as what it
+        // is: work belonging to a conversation the Participant ended. That a proposal exists at all is
+        // what makes this test non-vacuous - the batch really did produce something confirmable, and
+        // the reset really is what stopped it.
         Assert.Equal(
             nameof(ProposalStatus.ConversationReset),
             (await db.ConfirmationProposals.AsNoTracking().SingleAsync()).Status);
@@ -6505,12 +6509,12 @@ public sealed class ConversationRotationHttpTests : IAsyncLifetime
 }
 ```
 
-Add `using System.Net.Http.Json;`, `using System.Net.Http.Headers;`, and `using System.Text;` to the file header. If `ImportProposalEntity.Status` is stored as something other than the `ImportProposalStatus` name, or the validate response names its proposal differently, use whatever `ImportEndpointsHttpTests` already asserts - do not invent a second vocabulary for the same rows.
+Add `using System.Net.Http.Json;`, `using System.Net.Http.Headers;`, and `using System.Text;` to the file header, and `using MultiChannelAgent.Application.Inventories;` for the `conversation_reset` code the last test names. If `ImportProposalEntity.Status` is stored as something other than the `ImportProposalStatus` name, or the validate response names its proposal differently, use whatever `ImportEndpointsHttpTests` already asserts - do not invent a second vocabulary for the same rows.
 
 - [ ] **Step 2: Run the test to verify it fails**
 
 Run: `dotnet test tests/MultiChannelAgent.IntegrationTests --filter FullyQualifiedName~ConversationRotationHttpTests`
-Expected: FAIL with `Assert.Equal() Failure: Expected: OK, Actual: NotFound` - `/api/conversation/new` is not mapped yet.
+Expected: FAIL, all 8 - `/api/conversation/new` is not mapped yet, so the SPA fallback route answers instead: `Assert.Equal() Failure: Expected: OK, Actual: MethodNotAllowed` (the fallback matches the path for GET and HEAD only), and the tests that read the reset's body fail parsing `index.html` as JSON.
 
 - [ ] **Step 3: Write the endpoint**
 
