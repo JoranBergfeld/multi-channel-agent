@@ -9973,7 +9973,7 @@ describe('App', () => {
     await waitFor(() => expect(streams.filter((s) => s.url === '/api/inventory-events')).toHaveLength(1));
   });
 
-  it('shows a clear resync message if the Inventory stream fails permanently', async () => {
+  it('shows a clear resync message if the Inventory stream fails permanently, and no unrelated action clears it', async () => {
     setViewportWidth(DESKTOP_WIDTH);
     const { streams } = stubApi();
 
@@ -9986,9 +9986,19 @@ describe('App', () => {
     // again until the Participant does something about it themselves.
     inventoryStreamIn(streams)!.failFatally();
 
-    expect(await screen.findByRole('alert')).toHaveTextContent(
-      'Lost the connection to Inventory updates and cannot resync automatically. Refresh the page to try again.',
-    );
+    const fatalMessage =
+      'Lost the connection to Inventory updates and cannot resync automatically. Refresh the page to try again.';
+    expect(await screen.findByRole('alert')).toHaveTextContent(fatalMessage);
+
+    // This warning is not an ordinary operation error - the stream is permanently dead until the page
+    // is refreshed, no matter what else the Participant does in the meantime. Selecting an Inventory
+    // is one of several handlers that clears the ordinary `error` state the instant it starts its own
+    // attempt; it must not also erase this dedicated one, or the warning would vanish while the stream
+    // stayed just as dead.
+    await userEvent.click(await screen.findByRole('button', { name: 'Use in this conversation' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Use in this conversation' })).toBeInTheDocument());
+
+    expect(screen.getByRole('alert')).toHaveTextContent(fatalMessage);
   });
 
   it('refetches the workspace when the stream says the Inventory version changed', async () => {
@@ -10158,6 +10168,13 @@ type SessionState =
 function App() {
   const [state, setState] = useState<SessionState>({ phase: 'loading' });
   const [error, setError] = useState<string | null>(null);
+
+  // Deliberately separate from `error`. A permanently failed Inventory stream is not an ordinary
+  // operation error: the stream stays dead until the page is refreshed, no matter what the
+  // Participant does next. `error` is cleared at the start of every unrelated handler (create,
+  // select, new conversation) the instant it begins its own attempt; if the stream's warning lived
+  // there too, any of those actions would silently erase it while the stream stayed just as dead.
+  const [inventoryStreamError, setInventoryStreamError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [newInventoryName, setNewInventoryName] = useState('');
   const [creating, setCreating] = useState(false);
@@ -10213,8 +10230,12 @@ function App() {
 
     const stream = openInventoryStream({
       onVersions: setInventoryVersions,
+      // Into the dedicated, persistent state - never into `error` - so that no unrelated handler's
+      // `setError(null)` can make this warning disappear while the stream is still just as dead.
       onFailed: () =>
-        setError('Lost the connection to Inventory updates and cannot resync automatically. Refresh the page to try again.'),
+        setInventoryStreamError(
+          'Lost the connection to Inventory updates and cannot resync automatically. Refresh the page to try again.',
+        ),
     });
     return () => stream.close();
   }, [isReady]);
@@ -10338,6 +10359,12 @@ function App() {
   // component's load already depends on the Inventory id it was given.
   const workspaceRefetchToken = activeInventoryVersion + localRefetchNonce;
 
+  // One `role="alert"` node, not two: a screen reader announcing two competing alerts on the same
+  // failure is not clearer, and a test asking for "the" alert should never have to disambiguate.
+  // The permanent stream warning is listed first because, once it appears, it outlives whatever
+  // ordinary operation error came before or after it.
+  const alertMessage = [inventoryStreamError, error].filter(Boolean).join(' ');
+
   const conversation = (
     <>
       {/*
@@ -10448,7 +10475,7 @@ function App() {
         <button type="button" onClick={() => void handleNewConversation()} disabled={resetting}>
           {resetting ? 'Starting…' : 'New conversation'}
         </button>
-        {error && <p role="alert">{error}</p>}
+        {alertMessage && <p role="alert">{alertMessage}</p>}
         <p role="status" aria-live="polite">
           {notice ?? ''}
         </p>
