@@ -250,11 +250,14 @@ public sealed class SqlStockMutationStoreTests : IDisposable
         var entryId = SeedStock("Steel Bolts", 10m);
         var command = UpdateCommand(entryId, expected: 10m, resulting: 15m);
 
-        using var db = CreateContext();
+        // The competitor runs at the same point the create path uses: right after this context's
+        // ledger lookup has found nothing, and before its save opens a transaction. The branch under
+        // test is unchanged - the save still loses on the concurrency stamp and still has to converge -
+        // and a second connection is never asked to write while this one holds the database.
+        using var db = CreateContext(new ApplyOnceAfterTheLedgerLookupInterceptor(() => ApplyFromACompetingWriter(command)));
 
         // Loaded before the competitor commits, so this context holds the now-stale concurrency stamp.
         _ = await db.StockEntries.FirstAsync(e => e.Id == entryId);
-        ApplyOnceFromACompetingWriterDuring(db, command);
 
         var result = await new SqlStockMutationStore(db).ApplyAsync(command, CancellationToken.None);
 
@@ -268,28 +271,6 @@ public sealed class SqlStockMutationStoreTests : IDisposable
         Assert.Single(reader.InventoryAudits.AsNoTracking().Where(a => a.EventType == "StockAdded"));
     }
 
-    /// <summary>
-    /// Applies <paramref name="command"/> from a separate connection at the exact moment
-    /// <paramref name="db"/> is about to save - after its own ledger lookup has already found nothing.
-    /// That is the only window in which a competing replica running the same operation can be missed,
-    /// and it is deterministic here rather than a race a test would have to hope for.
-    /// </summary>
-    private void ApplyOnceFromACompetingWriterDuring(MultiChannelAgentDbContext db, StockMutationCommand command)
-    {
-        var applied = false;
-
-        db.SavingChanges += (_, _) =>
-        {
-            if (applied)
-            {
-                return;
-            }
-
-            applied = true;
-            ApplyFromACompetingWriter(command);
-        };
-    }
-
     /// <summary>Applies <paramref name="command"/> from its own connection, as another replica would.</summary>
     private void ApplyFromACompetingWriter(StockMutationCommand command)
     {
@@ -298,9 +279,15 @@ public sealed class SqlStockMutationStoreTests : IDisposable
     }
 
     /// <summary>
-    /// Fires once, immediately after the first query this context runs - which is the store's own
-    /// ledger lookup - and therefore before it opens any transaction. That is precisely the window a
-    /// competing replica has to slip through, and it is deterministic rather than hoped for.
+    /// Fires once, immediately after this context's operation-ledger lookup has run and found
+    /// nothing. That is precisely the window a competing replica running the same operation has to
+    /// slip through, and it is deterministic here rather than a race a test would have to hope for.
+    ///
+    /// It is also the last moment a second connection can write at all: the save that follows opens a
+    /// transaction (<see cref="MultiChannelAgentDbContext"/> owns one whenever the caller has none, so
+    /// its Inventory version bump commits with the change it announces), and a shared-cache SQLite
+    /// database refuses a second writer outright while one connection holds it rather than letting
+    /// the two race.
     /// </summary>
     private sealed class ApplyOnceAfterTheLedgerLookupInterceptor(Action apply) : DbCommandInterceptor
     {
@@ -309,7 +296,7 @@ public sealed class SqlStockMutationStoreTests : IDisposable
         public override DbDataReader ReaderExecuted(
             DbCommand command, CommandExecutedEventData eventData, DbDataReader result)
         {
-            Fire();
+            Fire(command);
             return base.ReaderExecuted(command, eventData, result);
         }
 
@@ -319,13 +306,13 @@ public sealed class SqlStockMutationStoreTests : IDisposable
             DbDataReader result,
             CancellationToken cancellationToken = default)
         {
-            Fire();
+            Fire(command);
             return base.ReaderExecutedAsync(command, eventData, result, cancellationToken);
         }
 
-        private void Fire()
+        private void Fire(DbCommand command)
         {
-            if (_fired)
+            if (_fired || !command.CommandText.Contains("StockOperations", StringComparison.Ordinal))
             {
                 return;
             }

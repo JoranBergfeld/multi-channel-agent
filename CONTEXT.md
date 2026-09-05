@@ -111,3 +111,31 @@ _Avoid_: Search, lookup
 **Initial Import**:
 A confirmed, atomic creation of exact starting Stock Entries in an Inventory that has no Stock Entries. Equivalent Stock within the import is merged before creation.
 _Avoid_: Seed, migration, bulk adjustment
+
+**Channel Conversation**:
+The continuing conversational context shared by one Participant across the tabs and restarts of one channel identity. It carries one Active Inventory and an ordered sequence of Turns.
+_Avoid_: Chat session, browser tab conversation
+
+**Turn**:
+One Participant message and the agent work accepted in response to it within a Channel Conversation. A Turn has one stable identity even when delivery or recovery is retried.
+_Avoid_: Request, prompt
+
+**In-flight Turn**:
+A Turn that has been submitted but has not yet yielded its terminal Outcome. At most one is tracked for browser-profile recovery within a Channel Conversation.
+_Avoid_: Pending request, unfinished message
+
+**Outcome**:
+The terminal, recorded result of a Turn, including its status and participant-facing response. Repeating the same Turn returns the same Outcome rather than performing the work again.
+_Avoid_: Response, result payload
+
+**Conversation Generation**:
+One bounded span of conversational history within a stable Channel Conversation. Starting a New Conversation advances the generation without changing the Participant's Inventory access or Active Inventory.
+_Avoid_: Foundry conversation, chat instance
+
+**New Conversation**:
+The Participant's deliberate end of the current Conversation Generation, including any clarification or confirmation still waiting there. It begins a fresh generation while preserving authorized access and Active Inventory.
+_Avoid_: Sign out, clear Inventory, reset account
+
+**Inventory Version**:
+A monotonically increasing revision of an Inventory's authoritative projections. A changed version means a previously read projection may be stale.
+_Avoid_: Cache version, local refresh count

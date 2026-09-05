@@ -413,6 +413,12 @@ namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
                     b.Property<DateTimeOffset>("CreatedAt")
                         .HasColumnType("datetimeoffset");
 
+                    b.Property<int?>("FoundryConversationGeneration")
+                        .HasColumnType("int");
+
+                    b.Property<Guid?>("FoundryConversationId")
+                        .HasColumnType("uniqueidentifier");
+
                     b.Property<string>("Locale")
                         .HasMaxLength(32)
                         .HasColumnType("nvarchar(32)");
@@ -557,6 +563,19 @@ namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
                         .IsUnique();
 
                     b.ToTable("Inventories", (string)null);
+                });
+
+            modelBuilder.Entity("MultiChannelAgent.Infrastructure.Persistence.Entities.InventoryVersionEntity", b =>
+                {
+                    b.Property<Guid>("InventoryId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<long>("Version")
+                        .HasColumnType("bigint");
+
+                    b.HasKey("InventoryId");
+
+                    b.ToTable("InventoryVersions", (string)null);
                 });
 
             modelBuilder.Entity("MultiChannelAgent.Infrastructure.Persistence.Entities.LeaseEntity", b =>
@@ -1050,6 +1069,32 @@ namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
                     b.ToTable("StockOperations", (string)null);
                 });
 
+            modelBuilder.Entity("MultiChannelAgent.Infrastructure.Persistence.Entities.TurnProgressEventEntity", b =>
+                {
+                    b.Property<Guid>("TurnId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<long>("Sequence")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("ExpiresAtTicks")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("Kind")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("nvarchar(32)");
+
+                    b.Property<DateTimeOffset>("OccurredAt")
+                        .HasColumnType("datetimeoffset");
+
+                    b.HasKey("TurnId", "Sequence");
+
+                    b.HasIndex("ExpiresAtTicks");
+
+                    b.ToTable("TurnProgressEvents", (string)null);
+                });
+
             modelBuilder.Entity("MultiChannelAgent.Infrastructure.Persistence.Entities.UnitEntity", b =>
                 {
                     b.Property<Guid>("Id")
@@ -1333,6 +1378,15 @@ namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
                     b.HasOne("MultiChannelAgent.Infrastructure.Persistence.Entities.InventoryEntity", null)
                         .WithMany()
                         .HasForeignKey("InventoryId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("MultiChannelAgent.Infrastructure.Persistence.Entities.TurnProgressEventEntity", b =>
+                {
+                    b.HasOne("MultiChannelAgent.Infrastructure.Persistence.Entities.InboxEntryEntity", null)
+                        .WithMany()
+                        .HasForeignKey("TurnId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
                 });

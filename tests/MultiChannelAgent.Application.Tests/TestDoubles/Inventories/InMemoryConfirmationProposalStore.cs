@@ -14,11 +14,24 @@ public sealed class InMemoryConfirmationProposalStore : IConfirmationProposalSto
 
     private readonly Dictionary<ProposalId, Row> _rows = [];
 
+    /// <summary>
+    /// Every proposal this store has held, settled or not. Test-only: it lets a test prove a proposal
+    /// really was created and say where it ended up, which "nothing is pending" alone cannot.
+    /// </summary>
+    public IReadOnlyCollection<ConfirmationProposal> Proposals => _rows.Values.Select(row => row.Proposal).ToList();
+
+    /// <summary>
+    /// Runs once a proposal is durable, before <see cref="StoreAsync"/> returns. Test-only: it places
+    /// another durable event - a conversation reset, say - at the exact instant between a proposal
+    /// becoming confirmable and whatever its Turn goes on to do, without threads or timing.
+    /// </summary>
+    public Func<Task>? AfterStore { get; set; }
+
     public Task<ConfirmationProposal?> FindPendingAsync(
         ParticipantId participantId, string channelConversationId, CancellationToken cancellationToken) =>
         Task.FromResult(FindPendingRow(participantId, channelConversationId)?.Proposal);
 
-    public Task<StoredProposalReplacement> StoreAsync(
+    public async Task<StoredProposalReplacement> StoreAsync(
         ConfirmationProposal proposal, DateTimeOffset now, CancellationToken cancellationToken)
     {
         var existing = FindPendingRow(proposal.ParticipantId, proposal.ChannelConversationId);
@@ -29,7 +42,12 @@ public sealed class InMemoryConfirmationProposalStore : IConfirmationProposalSto
 
         _rows[proposal.Id] = new Row(proposal, ProposalStatus.Pending, null);
 
-        return Task.FromResult(new StoredProposalReplacement(existing is not null));
+        if (AfterStore is { } afterStore)
+        {
+            await afterStore();
+        }
+
+        return new StoredProposalReplacement(existing is not null);
     }
 
     public Task<bool> SettleAsync(

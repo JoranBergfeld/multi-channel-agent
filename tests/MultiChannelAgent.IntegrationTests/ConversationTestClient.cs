@@ -15,9 +15,13 @@ namespace MultiChannelAgent.IntegrationTests;
 public sealed class ConversationTestClient
 {
     private readonly HttpClient _client;
-    private readonly CookieJar _jar = new();
+    private readonly CookieJar _jar;
 
-    private ConversationTestClient(HttpClient client) => _client = client;
+    private ConversationTestClient(HttpClient client, CookieJar jar)
+    {
+        _client = client;
+        _jar = jar;
+    }
 
     public string CsrfToken { get; private set; } = string.Empty;
 
@@ -32,9 +36,12 @@ public sealed class ConversationTestClient
         });
 
     /// <summary>Signs a fresh Participant in and bootstraps their session, yielding a ready client.</summary>
-    public static async Task<ConversationTestClient> SignInAsync(HttpClient client, string displayName)
+    public static async Task<ConversationTestClient> SignInAsync(
+        HttpClient client,
+        string displayName,
+        Action<HttpResponseMessage>? inspectBootstrapResponse = null)
     {
-        var participant = new ConversationTestClient(client);
+        var participant = new ConversationTestClient(client, new CookieJar());
 
         participant.ParticipantIdentifier = Guid.NewGuid().ToString();
 
@@ -49,7 +56,10 @@ public sealed class ConversationTestClient
         });
         Assert.Equal(HttpStatusCode.OK, signInResponse.StatusCode);
 
-        var bootstrapResponse = await participant.SendAsync(new HttpRequestMessage(HttpMethod.Get, "/api/session/bootstrap"));
+        var bootstrapResponse = await participant.SendAsync(
+            new HttpRequestMessage(HttpMethod.Get, "/api/session/bootstrap"),
+            withCsrf: false,
+            beforeCookieCapture: inspectBootstrapResponse);
         Assert.Equal(HttpStatusCode.OK, bootstrapResponse.StatusCode);
 
         var body = await bootstrapResponse.Content.ReadFromJsonAsync<JsonElement>();
@@ -58,7 +68,55 @@ public sealed class ConversationTestClient
         return participant;
     }
 
-    public async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, bool withCsrf = false)
+    /// <summary>
+    /// A second browser tab of the same browser profile: the same cookie jar (therefore the same
+    /// authenticated session AND the same web ChannelConversation cookie), the same CSRF token, and
+    /// the same Participant. This is what makes "one browser-profile conversation shared across tabs"
+    /// testable rather than assumed.
+    /// </summary>
+    public ConversationTestClient OpenAnotherTab() => new ConversationTestClient(_client, _jar).WithIdentityOf(this);
+
+    private ConversationTestClient WithIdentityOf(ConversationTestClient other)
+    {
+        CsrfToken = other.CsrfToken;
+        ParticipantIdentifier = other.ParticipantIdentifier;
+        return this;
+    }
+
+    /// <summary>Opens this Turn's event stream, optionally resuming after an event this client already has.</summary>
+    public async Task<HttpResponseMessage> OpenTurnStreamAsync(
+        Guid turnId, long? lastEventId = null, CancellationToken cancellationToken = default)
+    {
+        var url = lastEventId is { } resumeFrom
+            ? $"/api/turns/{turnId}/events?lastEventId={resumeFrom}"
+            : $"/api/turns/{turnId}/events";
+
+        var request = new HttpRequestMessage(HttpMethod.Get, url);
+        _jar.Apply(request);
+
+        return await _client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+    }
+
+    /// <summary>Opens this Participant's Inventory invalidation stream.</summary>
+    public async Task<HttpResponseMessage> OpenInventoryStreamAsync(CancellationToken cancellationToken = default)
+    {
+        var request = new HttpRequestMessage(HttpMethod.Get, "/api/inventory-events");
+        _jar.Apply(request);
+
+        return await _client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+    }
+
+    /// <summary>Rotates this conversation's Foundry history and clears its pending confirmation state.</summary>
+    public async Task<HttpResponseMessage> StartNewConversationAsync() =>
+        await SendAsync(new HttpRequestMessage(HttpMethod.Post, "/api/conversation/new"), withCsrf: true);
+
+    public Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, bool withCsrf = false) =>
+        SendAsync(request, withCsrf, beforeCookieCapture: null);
+
+    private async Task<HttpResponseMessage> SendAsync(
+        HttpRequestMessage request,
+        bool withCsrf,
+        Action<HttpResponseMessage>? beforeCookieCapture)
     {
         _jar.Apply(request);
         if (withCsrf)
@@ -67,6 +125,7 @@ public sealed class ConversationTestClient
         }
 
         var response = await _client.SendAsync(request);
+        beforeCookieCapture?.Invoke(response);
         _jar.Capture(response);
         return response;
     }

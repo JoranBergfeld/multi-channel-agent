@@ -16,8 +16,16 @@ public sealed class InMemoryTurnResultStore(
 {
     public HashSet<Guid> FailForTurnIds { get; } = [];
 
+    public bool FailNextRecord { get; set; }
+
     public async Task RecordAsync(Outcome outcome, IReadOnlyList<Delivery> deliveries, CancellationToken cancellationToken)
     {
+        if (FailNextRecord)
+        {
+            FailNextRecord = false;
+            throw new InvalidOperationException($"Simulated one-time atomic-write failure for Turn {outcome.TurnId}.");
+        }
+
         if (FailForTurnIds.Contains(outcome.TurnId.Value))
         {
             throw new InvalidOperationException($"Simulated atomic-write failure for Turn {outcome.TurnId}.");

@@ -56,8 +56,8 @@ public sealed class SqlInboxStoreConcurrencyTests : IDisposable
         var storeA = new SqlInboxStore(dbA);
         var storeB = new SqlInboxStore(dbB);
 
-        var taskA = storeA.AcceptAsync(turnA, CancellationToken.None);
-        var taskB = storeB.AcceptAsync(turnB, CancellationToken.None);
+        var taskA = storeA.AcceptAsync(turnA, Binding(turnA), CancellationToken.None);
+        var taskB = storeB.AcceptAsync(turnB, Binding(turnB), CancellationToken.None);
 
         var results = await Task.WhenAll(taskA, taskB);
 
@@ -80,7 +80,7 @@ public sealed class SqlInboxStoreConcurrencyTests : IDisposable
 
         using (var seedDb = CreateContext())
         {
-            await new SqlInboxStore(seedDb).AcceptAsync(seededTurn, CancellationToken.None);
+            await new SqlInboxStore(seedDb).AcceptAsync(seededTurn, Binding(seededTurn), CancellationToken.None);
         }
 
         // Collides on the PRIMARY KEY (TurnId) but has a completely different NativeMessageId: a
@@ -92,7 +92,7 @@ public sealed class SqlInboxStoreConcurrencyTests : IDisposable
         using var db = CreateContext();
         var store = new SqlInboxStore(db);
 
-        await Assert.ThrowsAsync<DbUpdateException>(() => store.AcceptAsync(conflictingTurn, CancellationToken.None));
+        await Assert.ThrowsAsync<DbUpdateException>(() => store.AcceptAsync(conflictingTurn, Binding(conflictingTurn), CancellationToken.None));
     }
 
     // Deduplication is scoped to (Participant, ChannelConversation, native message id): the database
@@ -109,11 +109,17 @@ public sealed class SqlInboxStoreConcurrencyTests : IDisposable
         var store = new SqlInboxStore(db);
 
         var mine = await store.AcceptAsync(
-            TestTurns.Text(nativeMessageId, SomeParticipant, "conversation-scope-a", "hello", null, now, null), CancellationToken.None);
+            TestTurns.Text(nativeMessageId, SomeParticipant, "conversation-scope-a", "hello", null, now, null),
+            Binding(TestTurns.Text(nativeMessageId, SomeParticipant, "conversation-scope-a", "hello", null, now, null)),
+            CancellationToken.None);
         var otherConversation = await store.AcceptAsync(
-            TestTurns.Text(nativeMessageId, SomeParticipant, "conversation-scope-b", "hello", null, now, null), CancellationToken.None);
+            TestTurns.Text(nativeMessageId, SomeParticipant, "conversation-scope-b", "hello", null, now, null),
+            Binding(TestTurns.Text(nativeMessageId, SomeParticipant, "conversation-scope-b", "hello", null, now, null)),
+            CancellationToken.None);
         var otherParticipantTurn = await store.AcceptAsync(
-            TestTurns.Text(nativeMessageId, otherParticipant, "conversation-scope-a", "hello", null, now, null), CancellationToken.None);
+            TestTurns.Text(nativeMessageId, otherParticipant, "conversation-scope-a", "hello", null, now, null),
+            Binding(TestTurns.Text(nativeMessageId, otherParticipant, "conversation-scope-a", "hello", null, now, null)),
+            CancellationToken.None);
 
         Assert.False(otherConversation.WasAlreadyAccepted);
         Assert.False(otherParticipantTurn.WasAlreadyAccepted);
@@ -136,7 +142,9 @@ public sealed class SqlInboxStoreConcurrencyTests : IDisposable
         var store = new SqlInboxStore(db);
 
         var mine = await store.AcceptAsync(
-            TestTurns.Text(nativeMessageId, SomeParticipant, "conversation-scope-a", "hello", null, now, null), CancellationToken.None);
+            TestTurns.Text(nativeMessageId, SomeParticipant, "conversation-scope-a", "hello", null, now, null),
+            Binding(TestTurns.Text(nativeMessageId, SomeParticipant, "conversation-scope-a", "hello", null, now, null)),
+            CancellationToken.None);
 
         var mineAgain = await store.FindByNativeMessageIdAsync(
             new NativeMessageKey(SomeParticipant, new ChannelConversationId("conversation-scope-a"), nativeMessageId), CancellationToken.None);
@@ -149,6 +157,51 @@ public sealed class SqlInboxStoreConcurrencyTests : IDisposable
         Assert.Null(strangersLookup);
         Assert.Null(otherConversationLookup);
     }
+
+    // The loser of a duplicate delivery arrives with its own separately resolved binding, and the
+    // winner's Turn must keep the conversation it was actually accepted under. Letting the loser
+    // write over it would reintroduce exactly what capturing prevents: a Turn silently relocated
+    // into a conversation generation it was never accepted into.
+    [Fact]
+    public async Task A_duplicate_delivery_never_overwrites_the_captured_conversation_of_the_turn_that_won()
+    {
+        const string nativeMessageId = "native-race-binding";
+        var now = DateTimeOffset.UtcNow;
+        var turn = TestTurns.Text(nativeMessageId, SomeParticipant, "conversation-race-binding", "hello", null, now, null);
+        var acceptedUnder = Binding(turn);
+        var rotated = acceptedUnder with
+        {
+            FoundryConversationId = new FoundryConversationId(Guid.NewGuid()),
+            Generation = acceptedUnder.Generation + 1,
+        };
+
+        using var winnerDb = CreateContext();
+        using var duplicateDb = CreateContext();
+
+        var winner = await new SqlInboxStore(winnerDb).AcceptAsync(turn, acceptedUnder, CancellationToken.None);
+        var duplicate = await new SqlInboxStore(duplicateDb).AcceptAsync(
+            TestTurns.Text(nativeMessageId, SomeParticipant, "conversation-race-binding", "hello again", null, now, null),
+            rotated,
+            CancellationToken.None);
+
+        Assert.True(duplicate.WasAlreadyAccepted);
+        Assert.Equal(winner.Turn.TurnId, duplicate.Turn.TurnId);
+
+        using var verifyDb = CreateContext();
+        var captured = await new SqlInboxStore(verifyDb).FindCapturedBindingAsync(winner.Turn.TurnId, CancellationToken.None);
+
+        Assert.NotNull(captured);
+        Assert.Equal(acceptedUnder.FoundryConversationId, captured.FoundryConversationId);
+        Assert.Equal(acceptedUnder.Generation, captured.Generation);
+    }
+
+    /// <summary>
+    /// The first-generation Foundry conversation binding a Turn is accepted under. These tests are
+    /// about acceptance races and dedupe scope, not about which generation a Turn landed in, so the
+    /// binding is derived from the Turn itself and stated once.
+    /// </summary>
+    private static FoundryConversationBinding Binding(InboundTurn turn) =>
+        FoundryConversationBinding.CreateFirstGeneration(turn.ParticipantId, turn.ChannelConversationId, turn.ReceivedAt);
 
     private MultiChannelAgentDbContext CreateContext()
     {

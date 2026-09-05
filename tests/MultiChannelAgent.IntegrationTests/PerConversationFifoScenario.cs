@@ -64,6 +64,7 @@ internal static class PerConversationFifoScenario
             var coordinator = new TurnProcessingCoordinator(
                 services.GetRequiredService<IInboxStore>(),
                 services.GetRequiredService<ITurnResultStore>(),
+                services.GetRequiredService<ITurnProgressEventStore>(),
                 services.GetRequiredService<ILeaseCoordinator>(),
                 new RecordingModelBoundary(services.GetRequiredService<IModelBoundary>(), planned, () => faultInjected),
                 services.GetRequiredService<TurnExecutionContextFactory>(),

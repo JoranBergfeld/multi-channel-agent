@@ -156,12 +156,19 @@ public sealed class SqlDeliveryStoreClaimTests : IDisposable
         Assert.Equal(4, all.Count);
     }
 
+    /// <summary>
+    /// The first-generation Foundry conversation binding a Turn is accepted under. What these tests
+    /// prove has nothing to do with which generation a Turn landed in, so the binding is derived from
+    /// the Turn itself and stated once.
+    /// </summary>
+    private static FoundryConversationBinding Binding(InboundTurn turn) =>
+        FoundryConversationBinding.CreateFirstGeneration(turn.ParticipantId, turn.ChannelConversationId, turn.ReceivedAt);
+
     private static async Task<TurnId> AcceptAsync(
         SqlInboxStore inbox, string nativeMessageId, string conversationId, DateTimeOffset receivedAt)
     {
-        var accepted = await inbox.AcceptAsync(
-            TestTurns.Text(nativeMessageId, SomeParticipant, conversationId, "list stock", null, receivedAt, null),
-            CancellationToken.None);
+        var turn = TestTurns.Text(nativeMessageId, SomeParticipant, conversationId, "list stock", null, receivedAt, null);
+        var accepted = await inbox.AcceptAsync(turn, Binding(turn), CancellationToken.None);
 
         return accepted.Turn.TurnId;
     }

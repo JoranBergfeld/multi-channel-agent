@@ -114,9 +114,15 @@ public sealed class SqlInboxStoreFifoTests : IDisposable
         var storeB = new SqlInboxStore(dbB);
 
         var taskA = storeA.AcceptAsync(
-            TestTurns.Text("native-race-a", SomeParticipant, "conversation-race", "a", null, SameInstant, null), CancellationToken.None);
+            TestTurns.Text("native-race-a", SomeParticipant, "conversation-race", "a", null, SameInstant, null),
+            FoundryConversationBinding.CreateFirstGeneration(
+                SomeParticipant, new ChannelConversationId("conversation-race"), SameInstant),
+            CancellationToken.None);
         var taskB = storeB.AcceptAsync(
-            TestTurns.Text("native-race-b", SomeParticipant, "conversation-race", "b", null, SameInstant, null), CancellationToken.None);
+            TestTurns.Text("native-race-b", SomeParticipant, "conversation-race", "b", null, SameInstant, null),
+            FoundryConversationBinding.CreateFirstGeneration(
+                SomeParticipant, new ChannelConversationId("conversation-race"), SameInstant),
+            CancellationToken.None);
 
         await Task.WhenAll(taskA, taskB);
 
@@ -130,10 +136,18 @@ public sealed class SqlInboxStoreFifoTests : IDisposable
         Assert.Equal(2, sequences.Distinct().Count());
     }
 
-    private static async Task<TurnId> AcceptAsync(SqlInboxStore store, string nativeMessageId, string conversationId, DateTimeOffset receivedAt)
+    private static async Task<TurnId> AcceptAsync(
+        SqlInboxStore store,
+        string nativeMessageId,
+        string conversationId,
+        DateTimeOffset receivedAt,
+        FoundryConversationBinding? binding = null)
     {
         var result = await store.AcceptAsync(
-            TestTurns.Text(nativeMessageId, SomeParticipant, conversationId, "hello", null, receivedAt, null), CancellationToken.None);
+            TestTurns.Text(nativeMessageId, SomeParticipant, conversationId, "hello", null, receivedAt, null),
+            binding ?? FoundryConversationBinding.CreateFirstGeneration(
+                SomeParticipant, new ChannelConversationId(conversationId), receivedAt),
+            CancellationToken.None);
         return result.Turn.TurnId;
     }
 
@@ -207,5 +221,25 @@ public sealed class SqlInboxStoreFifoTests : IDisposable
         Assert.Equal(first.Select(t => t.TurnId), second.Select(t => t.TurnId));
         Assert.Equal(first.Select(t => t.TurnId), third.Take(2).Select(t => t.TurnId));
         Assert.Equal(4, third.Count);
+    }
+
+    // The conversation a Turn was accepted under has to survive the acceptance itself, not just be
+    // resolvable again later: reading it back from the durable row is what lets processing continue
+    // the conversation the Turn actually belongs to after a reset has moved the current one on.
+    [Fact]
+    public async Task An_accepted_turn_reads_back_the_foundry_conversation_it_was_accepted_under()
+    {
+        using var db = CreateContext();
+        var store = new SqlInboxStore(db);
+        var binding = FoundryConversationBinding.CreateFirstGeneration(
+            SomeParticipant, new ChannelConversationId("conversation-capture"), SameInstant);
+
+        var turnId = await AcceptAsync(store, "native-capture", "conversation-capture", SameInstant, binding);
+
+        var captured = await store.FindCapturedBindingAsync(turnId, CancellationToken.None);
+
+        Assert.NotNull(captured);
+        Assert.Equal(binding.FoundryConversationId, captured.FoundryConversationId);
+        Assert.Equal(1, captured.Generation);
     }
 }

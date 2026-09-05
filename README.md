@@ -44,8 +44,9 @@ src/
                                       Inventory, and Stock projection endpoints, and the published
                                       React/Vite client (wwwroot). Depends on all of the above.
   web/                               React + TypeScript + Vite client: signed-in onboarding, Inventory
-                                      create/list/select, the conversation Turn tracer (rendering typed
-                                      List/Find results), and the Stock workspace projection.
+                                      create/list/select, a resumable streaming conversation (rendering
+                                      typed List/Find results), conversation rotation, and a responsive
+                                      live Inventory workspace.
 tests/
   MultiChannelAgent.Domain.Tests/         Pure unit tests for domain types.
   MultiChannelAgent.Application.Tests/    Application-layer tests against in-memory fakes and the
@@ -175,6 +176,10 @@ Then:
 - `POST /api/inventories/{inventoryId}/select` — explicitly switch the Active Inventory for the
   current web conversation. `404` (never a distinct signal) when the Inventory does not exist or is
   not authorized for the caller; selecting never itself grants access.
+- `GET /api/inventory-events` — a Participant-level server-sent event stream that begins with a
+  complete snapshot of every authorized Inventory's current version, then reports changed versions
+  and revoked access. Reconnecting starts another complete snapshot, so the web workspace
+  resynchronizes without replaying a retained change history.
 - `GET /api/inventories/{inventoryId}/stock` — the authoritative Stock projection the Inventory
   workspace refetches. It is the same authorized read the conversational `list_stock` tool call
   performs, with the same bounds: `includeZero`, `nameFilter`, `unit` (an opaque Unit id, exact
@@ -190,8 +195,16 @@ Then:
   same Participant and conversation - the scope a native id is actually unique in) never duplicates
   acceptance or reprocesses: it returns `202` while the Turn is still being processed, and `200` with
   that Turn's recorded terminal Outcome once it has one.
+- `GET /api/turns/{turnId}/events` — a finite server-sent event stream for one authorized Turn,
+  publishing stable event IDs for accepted, processing, typed semantic parts, and the terminal
+  Outcome. `Last-Event-ID` resumes strictly after an issued ID; the stream closes after the terminal
+  event. A missing Turn and another Participant's Turn both return the same `404`.
 - `GET /api/turns/{turnId}/outcome` — the recorded terminal Outcome and its Deliveries once hosted
   processing completes (`404` until then).
+- `POST /api/conversation/new` — advance this browser profile's Channel Conversation to a fresh
+  Conversation Generation and settle pending clarification or confirmation from the prior
+  generation. Authorized Inventories and the Active Inventory are preserved. Requires the session's
+  CSRF token.
 
 An Outcome reports both `status` - whether processing produced an answer at all - and `category`, the
 semantic shape of that answer (`completed`, `ambiguous`, `not_found`, `forbidden`, `conflict`,

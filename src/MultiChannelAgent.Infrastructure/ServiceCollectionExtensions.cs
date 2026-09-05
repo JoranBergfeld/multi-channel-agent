@@ -28,6 +28,7 @@ public static class ServiceCollectionExtensions
         services.AddScoped<IOutcomeStore, SqlOutcomeStore>();
         services.AddScoped<IDeliveryStore, SqlDeliveryStore>();
         services.AddScoped<ITurnResultStore, SqlTurnResultStore>();
+        services.AddScoped<ITurnProgressEventStore, SqlTurnProgressEventStore>();
         services.AddScoped<ILeaseCoordinator, SqlLeaseCoordinator>();
         services.AddScoped<IDeliverySender, LoggingDeliverySender>();
         services.AddSingleton(TimeProvider.System);
@@ -42,8 +43,12 @@ public static class ServiceCollectionExtensions
         services.AddScoped<TurnProcessingCoordinator>();
         services.AddScoped<DeliveryDispatchCoordinator>();
         services.AddScoped<OutcomePayloadCleanupCoordinator>();
+        services.AddScoped<TurnProgressEventCleanupCoordinator>();
         services.AddScoped<TurnOutcomeReader>();
+        services.AddScoped<TurnEventReader>();
         services.AddScoped<IFoundryConversationBindingStore, SqlFoundryConversationBindingStore>();
+        services.AddScoped<IConversationRotationStore, SqlConversationRotationStore>();
+        services.AddScoped<ConversationRotationService>();
         services.AddScoped<TurnExecutionContextFactory>();
 
         services.AddScoped<IParticipantStore, SqlParticipantStore>();
@@ -64,6 +69,7 @@ public static class ServiceCollectionExtensions
         services.AddScoped<IImportExecutionStore, SqlImportExecutionStore>();
         services.AddScoped<IStockEmptyStateReader, SqlStockEmptyStateReader>();
         services.AddScoped<IInventoryAuditRetentionStore, SqlInventoryAuditRetentionStore>();
+        services.AddScoped<IInventoryVersionStore, SqlInventoryVersionStore>();
         services.AddScoped<ReferenceChangeResolver>();
         services.AddScoped<ReferenceAdministrationService>();
         services.AddScoped<ReferenceListingService>();
@@ -83,6 +89,7 @@ public static class ServiceCollectionExtensions
         services.AddScoped<ParticipantSessionService>();
         services.AddScoped<InventoryCreationService>();
         services.AddScoped<InventoryListingService>();
+        services.AddScoped<InventoryInvalidationReader>();
         services.AddScoped<InventoryAuthorizationService>();
         services.AddScoped<InventorySelectionService>();
         services.AddScoped<InventoryBootstrapService>();

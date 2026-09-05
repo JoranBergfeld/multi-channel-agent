@@ -108,6 +108,26 @@ public static class TurnEndpoints
             return view is null ? Results.NotFound() : Results.Ok(view);
         });
 
+        group.MapGet("/{turnId:guid}/events", async (
+            Guid turnId,
+            HttpContext httpContext,
+            ClaimsPrincipal user,
+            TurnEventReader eventReader,
+            CancellationToken cancellationToken) =>
+        {
+            var participantId = user.GetParticipantId();
+            var resumePoint = ServerSentEvents.ReadResumePoint(httpContext.Request, TurnEventSequence.IsIssued);
+
+            // The first page is read before any streaming header is written, so a Turn that does not
+            // exist - or belongs to a different Participant - can still be answered with a plain 404,
+            // identical in both cases exactly as the Outcome endpoint answers them.
+            var firstPage = await eventReader.ReadAfterAsync(new TurnId(turnId), participantId, resumePoint, cancellationToken);
+
+            return firstPage is null
+                ? Results.NotFound()
+                : new TurnEventStreamResult(new TurnId(turnId), participantId, resumePoint, firstPage);
+        });
+
         return endpoints;
     }
 

@@ -20,13 +20,28 @@ public sealed class TwoPartyGatedInboxStore(IInboxStore inner, TaskCompletionSou
     public Task<InboundTurn?> FindByTurnIdAsync(TurnId turnId, CancellationToken cancellationToken) =>
         inner.FindByTurnIdAsync(turnId, cancellationToken);
 
-    public async Task<InboxAcceptResult> AcceptAsync(InboundTurn turn, CancellationToken cancellationToken)
+    public async Task<InboxAcceptResult> AcceptAsync(
+        InboundTurn turn, FoundryConversationBinding binding, CancellationToken cancellationToken)
     {
         ownReady.TrySetResult();
         await otherReady;
 
-        return await inner.AcceptAsync(turn, cancellationToken);
+        return await inner.AcceptAsync(turn, binding, cancellationToken);
     }
+
+    /// <summary>
+    /// The same convenience overload <see cref="InMemoryInboxStore"/> keeps, for tests that race
+    /// acceptance without caring which generation each racer resolved.
+    /// </summary>
+    public Task<InboxAcceptResult> AcceptAsync(InboundTurn turn, CancellationToken cancellationToken) =>
+        AcceptAsync(
+            turn,
+            FoundryConversationBinding.CreateFirstGeneration(
+                turn.ParticipantId, turn.ChannelConversationId, turn.ReceivedAt),
+            cancellationToken);
+
+    public Task<CapturedConversationBinding?> FindCapturedBindingAsync(TurnId turnId, CancellationToken cancellationToken) =>
+        inner.FindCapturedBindingAsync(turnId, cancellationToken);
 
     public Task<IReadOnlyList<InboundTurn>> ClaimPendingAsync(int maxCount, CancellationToken cancellationToken) =>
         inner.ClaimPendingAsync(maxCount, cancellationToken);

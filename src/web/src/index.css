@@ -109,3 +109,82 @@ code {
   padding: 4px 8px;
   background: var(--code-bg);
 }
+
+/*
+  Conversation primary at every width. `main` is always the layout's own grid container and always
+  has the same three children - the tab list, the conversation panel, and the Inventory panel - so a
+  breakpoint change only ever changes their attributes and visibility, never which subtrees exist (see
+  WorkspacePanel). On a wide viewport the tab list collapses out of the grid and the two panels sit
+  side by side; below the breakpoint they stack behind the tab list instead.
+*/
+.workspace-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+  gap: 24px;
+  align-items: start;
+  text-align: left;
+  padding: 0 16px 32px;
+}
+
+.workspace-layout-narrow {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.workspace-conversation,
+.workspace-panel {
+  min-width: 0;
+}
+
+.workspace-panel {
+  border-inline-start: 1px solid var(--border);
+  padding-inline-start: 24px;
+}
+
+.workspace-tabs {
+  display: flex;
+  gap: 8px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 16px;
+}
+
+/*
+  An author style always outranks the `[hidden]` attribute's own display:none, regardless of
+  specificity, so the tab list's own `display: flex` needs this to actually disappear (and stop
+  taking a grid cell) on a wide viewport - `hidden` alone still keeps it out of the accessibility
+  tree and the tab order either way, but this keeps the visual result honest too.
+*/
+.workspace-tabs[hidden] {
+  display: none;
+}
+
+.workspace-tabs [role='tab'] {
+  background: none;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  padding: 8px 12px;
+}
+
+.workspace-tabs [role='tab'][aria-selected='true'] {
+  border-bottom-color: var(--accent);
+  color: var(--text-h);
+}
+
+.workspace-tabs [role='tab']:focus-visible,
+[role='tabpanel']:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+@media (max-width: 1023px) {
+  .workspace-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .workspace-panel {
+    border-inline-start: 0;
+    padding-inline-start: 0;
+  }
+}

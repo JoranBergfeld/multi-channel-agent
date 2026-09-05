@@ -41,6 +41,13 @@ public enum ProposalStatus
     /// <summary>An interrupted Turn arrived, so nothing said in this conversation may be treated as approval.</summary>
     Interrupted,
 
+    /// <summary>
+    /// The Participant deliberately started a new conversation. Whatever was waiting for a "confirm"
+    /// belonged to the conversation they just ended, so it stops being confirmable - while every
+    /// authorization they hold, and the Inventory they were working in, are untouched.
+    /// </summary>
+    ConversationReset,
+
     /// <summary>Execution found current state no longer matching the expected versions, so nothing was applied.</summary>
     Conflicted,
 }

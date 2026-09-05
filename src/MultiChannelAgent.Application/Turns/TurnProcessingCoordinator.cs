@@ -6,21 +6,26 @@ namespace MultiChannelAgent.Application.Turns;
 
 /// <summary>
 /// Claims durably accepted Turns and drives them to a terminal <see cref="Outcome"/> through the
-/// scripted model boundary, atomically recording the Outcome, any requested Deliveries, and inbox
-/// completion via <see cref="ITurnResultStore"/>. Runs under an exclusive lease so multiple hosted
-/// replicas never process the same Turn twice, and exposes a deterministic one-shot operation so
-/// tests can drive processing without timing a background loop. Per-ChannelConversation FIFO is
-/// owned by <see cref="IInboxStore.ClaimPendingAsync"/>, which only ever offers a conversation's
-/// head; this coordinator additionally stops offering a conversation any further Turn for the rest of
-/// the pass once its head fails, while unrelated ChannelConversations proceed independently.
+/// scripted model boundary. Before the first model call it publishes a durable Processing courtesy
+/// event through <see cref="ITurnProgressEventStore"/>; that write is intentionally separate from the
+/// terminal result transaction, and exact Turn/sequence idempotency makes retries harmless. It then
+/// atomically records the Outcome, any requested Deliveries, and inbox completion via
+/// <see cref="ITurnResultStore"/>. Runs under an exclusive lease so multiple hosted replicas never
+/// process the same Turn twice, and exposes a deterministic one-shot operation so tests can drive
+/// processing without timing a background loop. Per-ChannelConversation FIFO is owned by
+/// <see cref="IInboxStore.ClaimPendingAsync"/>, which only ever offers a conversation's head; this
+/// coordinator additionally stops offering a conversation any further Turn for the rest of the pass
+/// once its head fails, while unrelated ChannelConversations proceed independently.
 ///
 /// It also reconciles pending confirmation state against the freshly assembled trusted context before
 /// the Turn is interpreted, so an interrupted Turn, a switched Active Inventory, or lost access can
-/// never leave a confirmable proposal behind.
+/// never leave a confirmable proposal behind - and once more after dispatch, so neither can a
+/// conversation reset that landed while this Turn was being processed.
 /// </summary>
 public sealed class TurnProcessingCoordinator(
     IInboxStore inboxStore,
     ITurnResultStore turnResultStore,
+    ITurnProgressEventStore turnProgressEventStore,
     ILeaseCoordinator leaseCoordinator,
     IModelBoundary modelBoundary,
     TurnExecutionContextFactory executionContextFactory,
@@ -120,6 +125,20 @@ public sealed class TurnProcessingCoordinator(
         // any later one - to trigger.
         await proposalLifecycle.ReconcileAsync(executionContext, now, cancellationToken);
 
+        // Processing progress is a courtesy write separate from the terminal result transaction.
+        // Losing it must never block model processing or the terminal Outcome.
+        try
+        {
+            await turnProgressEventStore.AppendAsync(TurnProgressEvent.Processing(turn.TurnId, now), cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogError(
+                ex,
+                "Failed to publish processing progress for Turn {TurnId}; terminal processing will continue.",
+                turn.TurnId);
+        }
+
         var proposal = await modelBoundary.ProposeAsync(
             turn,
             new ModelInvocationContext(executionContext.FoundryConversationId, executionContext.FoundryConversationGeneration, turn.Locale),
@@ -128,6 +147,23 @@ public sealed class TurnProcessingCoordinator(
         var decision = proposal.Kind == ModelProposalKind.Direct
             ? proposal.Direct!
             : await toolDispatcher.DispatchAsync(proposal.ToolCall!, executionContext, now, cancellationToken);
+
+        // The reconcile above ran before this Turn had proposed anything, so it could not settle a
+        // proposal that did not exist yet. A reset that landed while this Turn was in the model call
+        // or in dispatch would therefore find nothing, and this Turn would go on to leave a
+        // confirmable proposal in a conversation the Participant has already left. Re-reading the
+        // binding here - never trusting the flag the context captured earlier - is what closes that
+        // window, and it happens before the Outcome is recorded so the answer never offers a token
+        // that has already stopped working. Whether this pass or the reset itself settled the
+        // proposal makes no difference to the answer: what decides it is that the conversation moved
+        // on at all.
+        var settlement = await proposalLifecycle.SettleSupersededConversationAsync(
+            executionContext, now, cancellationToken);
+
+        if (settlement.ConversationWasSuperseded && decision.Category == OutcomeCategory.ConfirmationRequired)
+        {
+            decision = ConfirmationProposalLifecycle.ConversationResetAnswer;
+        }
 
         var outcome = Outcome.Record(
             turn.TurnId, decision.Category, decision.Code, decision.Summary, now, decision.Payload, decision.PayloadRetention);

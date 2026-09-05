@@ -48,7 +48,20 @@ public sealed class SqlInboxStore(MultiChannelAgentDbContext db) : IInboxStore
         return entity is null ? null : await ToDomainAsync(entity, cancellationToken);
     }
 
-    public async Task<InboxAcceptResult> AcceptAsync(InboundTurn turn, CancellationToken cancellationToken)
+    public async Task<CapturedConversationBinding?> FindCapturedBindingAsync(TurnId turnId, CancellationToken cancellationToken)
+    {
+        var captured = await db.InboxEntries
+            .AsNoTracking()
+            .Where(e => e.TurnId == turnId.Value)
+            .Select(e => new { e.FoundryConversationId, e.FoundryConversationGeneration })
+            .FirstOrDefaultAsync(cancellationToken);
+
+        return captured is { FoundryConversationId: { } conversationId, FoundryConversationGeneration: { } generation }
+            ? new CapturedConversationBinding(new FoundryConversationId(conversationId), generation)
+            : null;
+    }
+
+    public async Task<InboxAcceptResult> AcceptAsync(InboundTurn turn, FoundryConversationBinding binding, CancellationToken cancellationToken)
     {
         // Acceptance assigns the Turn's durable place in its ChannelConversation's order. The next
         // sequence is read from the database and confirmed by the unique
@@ -73,6 +86,8 @@ public sealed class SqlInboxStore(MultiChannelAgentDbContext db) : IInboxStore
                 Locale = turn.Locale,
                 TraceId = turn.TraceId,
                 WasInterrupted = turn.WasInterrupted,
+                FoundryConversationId = binding.FoundryConversationId.Value,
+                FoundryConversationGeneration = binding.Generation,
                 ReceivedAt = turn.ReceivedAt,
                 ReceivedAtTicks = turn.ReceivedAt.UtcTicks,
                 CreatedAt = turn.ReceivedAt,

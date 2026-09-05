@@ -44,6 +44,13 @@ builder.Services.AddAntiforgery(options =>
 builder.Services.AddHostedService<TurnProcessingWorker>();
 builder.Services.AddHostedService<DeliveryDispatchWorker>();
 builder.Services.AddHostedService<OutcomePayloadCleanupWorker>();
+builder.Services.AddHostedService<TurnProgressEventCleanupWorker>();
+
+// The production numbers, in one place. A test that must not wait fifteen real seconds for a
+// heartbeat replaces this one registration and changes nothing else.
+builder.Services.AddSingleton(new TurnStreamOptions());
+builder.Services.AddSingleton(new InventoryStreamOptions());
+
 builder.Services.AddHostedService<ConfirmationProposalCleanupWorker>();
 builder.Services.AddHostedService<ImportCleanupWorker>();
 
@@ -72,6 +79,8 @@ app.MapSessionEndpoints();
 app.MapInventoryEndpoints();
 app.MapInventoryGovernanceEndpoints();
 app.MapInventoryRecoveryEndpoints();
+app.MapInventoryEventEndpoints();
+app.MapConversationEndpoints();
 app.MapStockEndpoints();
 app.MapReferenceEndpoints();
 app.MapImportEndpoints();

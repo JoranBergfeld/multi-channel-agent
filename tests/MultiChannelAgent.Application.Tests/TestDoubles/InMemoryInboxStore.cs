@@ -9,6 +9,7 @@ public sealed class InMemoryInboxStore : IInboxStore
     private readonly object _gate = new();
     private readonly List<InboundTurn> _turns = [];
     private readonly HashSet<Guid> _completed = [];
+    private readonly Dictionary<Guid, CapturedConversationBinding> _capturedBindings = [];
 
     public IReadOnlyList<InboundTurn> Turns => _turns;
 
@@ -38,9 +39,11 @@ public sealed class InMemoryInboxStore : IInboxStore
     /// Mirrors the atomicity <see cref="IInboxStore.AcceptAsync"/> requires from a real store: a lock
     /// makes the "is one already accepted for this native message key" check and the insert a single
     /// indivisible step, so concurrent callers racing this method converge on whichever Turn actually
-    /// wins, exactly like the real unique index at the database does.
+    /// wins, exactly like the real unique index at the database does. The loser's binding is
+    /// discarded with its Turn: the winner keeps the conversation it was accepted under.
     /// </summary>
-    public Task<InboxAcceptResult> AcceptAsync(InboundTurn turn, CancellationToken cancellationToken)
+    public Task<InboxAcceptResult> AcceptAsync(
+        InboundTurn turn, FoundryConversationBinding binding, CancellationToken cancellationToken)
     {
         lock (_gate)
         {
@@ -51,7 +54,32 @@ public sealed class InMemoryInboxStore : IInboxStore
             }
 
             _turns.Add(turn);
+            _capturedBindings[turn.TurnId.Value] =
+                new CapturedConversationBinding(binding.FoundryConversationId, binding.Generation);
+
             return Task.FromResult(new InboxAcceptResult(turn, WasAlreadyAccepted: false));
+        }
+    }
+
+    /// <summary>
+    /// Accepts a Turn into a first-generation binding for its own conversation. Not part of
+    /// <see cref="IInboxStore"/> - it exists so the many tests that predate captured bindings, and
+    /// genuinely do not care which generation a Turn was accepted under, keep saying what they mean
+    /// instead of restating an irrelevant detail. Tests that DO care pass the binding explicitly.
+    /// </summary>
+    public Task<InboxAcceptResult> AcceptAsync(InboundTurn turn, CancellationToken cancellationToken) =>
+        AcceptAsync(
+            turn,
+            FoundryConversationBinding.CreateFirstGeneration(
+                turn.ParticipantId, turn.ChannelConversationId, turn.ReceivedAt),
+            cancellationToken);
+
+    public Task<CapturedConversationBinding?> FindCapturedBindingAsync(TurnId turnId, CancellationToken cancellationToken)
+    {
+        lock (_gate)
+        {
+            _capturedBindings.TryGetValue(turnId.Value, out var captured);
+            return Task.FromResult(captured);
         }
     }
 
