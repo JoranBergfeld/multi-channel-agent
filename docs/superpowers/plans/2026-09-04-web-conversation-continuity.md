@@ -9414,6 +9414,7 @@ git commit -m "feat: make the web layout responsive with an accessible workspace
 Create `src/web/src/TurnTracer.test.tsx`:
 
 ```tsx
+import { StrictMode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -9564,6 +9565,32 @@ describe('TurnTracer', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it('recovers a live stream after StrictMode\'s development-only mount/cleanup/mount', async () => {
+    const fetchMock = stubFetch(() => acceptedResponse('turn-should-not-happen'));
+    rememberSubmission(CONVERSATION, { nativeMessageId: 'native-1', contentText: 'list stock' });
+    rememberTurnId(CONVERSATION, 'native-1', 'turn-resumed');
+
+    const { opened, factory } = recordingEventStreamFactory();
+    render(
+      <StrictMode>
+        <TurnTracer
+          csrfToken="csrf-token"
+          webConversationId={CONVERSATION}
+          onTerminalOutcome={() => {}}
+          createSource={factory}
+        />
+      </StrictMode>,
+    );
+
+    // StrictMode's simulated mount/cleanup/mount may close the stream the first pass opened - that
+    // is the cleanup working - but it must not leave the resumed Turn with no live stream at all.
+    await waitFor(() => expect(opened.some((source) => !source.closed)).toBe(true));
+    expect(opened.find((source) => !source.closed)?.url).toBe('/api/turns/turn-resumed/events');
+
+    // Reconnecting is a read, StrictMode or not. Nothing mutation-capable is resubmitted.
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it('resubmits the very same native message id when it never learned the Turn id', async () => {
     const fetchMock = stubFetch(() => acceptedResponse('turn-recovered'));
     rememberSubmission(CONVERSATION, { nativeMessageId: 'native-lost', contentText: 'list stock' });
@@ -9641,6 +9668,46 @@ describe('TurnTracer', () => {
     // A parent re-render with fresh callback identities - which any unmemoized parent produces on
     // every render - must not make this component submit mutation-capable work a second time.
     rerender(<TurnTracer {...props} onTerminalOutcome={() => {}} />);
+
+    resolveSubmission(acceptedResponse('turn-recovered'));
+
+    await waitFor(() => expect(opened).toHaveLength(1));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('still resubmits only once when it never learned the Turn id, under StrictMode and a parent re-render together', async () => {
+    let resolveSubmission: (response: Response) => void = () => {};
+    const pending = new Promise<Response>((resolve) => {
+      resolveSubmission = resolve;
+    });
+
+    const fetchMock = vi.fn(() => pending);
+    vi.stubGlobal('fetch', fetchMock);
+
+    rememberSubmission(CONVERSATION, { nativeMessageId: 'native-lost', contentText: 'list stock' });
+
+    const { opened, factory } = recordingEventStreamFactory();
+    const props = {
+      csrfToken: 'csrf-token',
+      webConversationId: CONVERSATION,
+      onTerminalOutcome: () => {},
+      createSource: factory,
+    };
+
+    // StrictMode's own mount/cleanup/mount happens first and alone must not resubmit a second
+    // time; the later parent re-render (any unmemoized parent's ordinary behaviour) must not either.
+    const { rerender } = render(
+      <StrictMode>
+        <TurnTracer {...props} />
+      </StrictMode>,
+    );
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+
+    rerender(
+      <StrictMode>
+        <TurnTracer {...props} onTerminalOutcome={() => {}} />
+      </StrictMode>,
+    );
 
     resolveSubmission(acceptedResponse('turn-recovered'));
 
@@ -9912,6 +9979,16 @@ function TurnTracer({ csrfToken, webConversationId, onTerminalOutcome, createSou
 
   useEffect(() => {
     if (resumeAttemptedRef.current) {
+      // Already decided once whether to reconnect or resubmit - never repeat that decision, since
+      // repeating it for the unknown-Turn-id case would resubmit. But React StrictMode's
+      // development-only mount/cleanup/mount may have closed and released a stream this same
+      // effect opened moments ago (see the close-on-unmount effect below), leaving a known Turn id
+      // with nothing watching it. Recovering that is always a pure read, so it is always safe to
+      // repeat: `watchTurn` itself is a no-op if a live stream for this id already exists.
+      const stored = readInFlightTurn(webConversationId);
+      if (stored?.turnId != null) {
+        watchTurn(stored.turnId);
+      }
       return;
     }
 
@@ -9920,7 +9997,7 @@ function TurnTracer({ csrfToken, webConversationId, onTerminalOutcome, createSou
     void (async () => {
       await resumeStoredTurn();
     })();
-  }, [resumeStoredTurn]);
+  }, [resumeStoredTurn, watchTurn, webConversationId]);
 
   useEffect(
     () =>
@@ -9935,7 +10012,18 @@ function TurnTracer({ csrfToken, webConversationId, onTerminalOutcome, createSou
     [watchTurn, webConversationId],
   );
 
-  useEffect(() => () => streamRef.current?.close(), []);
+  useEffect(
+    () => () => {
+      // Symmetric with `watchTurn` taking ownership: release both the stream and the ids that
+      // guard against re-acquiring it, so a subsequent mount - a real one, or the second half of
+      // StrictMode's development-only mount/cleanup/mount - starts from a clean slate instead of
+      // believing a now-closed stream is still live.
+      streamRef.current?.close();
+      streamRef.current = null;
+      watchedTurnRef.current = null;
+    },
+    [],
+  );
 
   async function handleSubmit(event: React.FormEvent) {
     event.preventDefault();
@@ -10141,7 +10229,13 @@ Delete the now-unused `getTurnOutcome` import if the compiler reports it; the re
 - [ ] **Step 6: Run the tests to verify they pass**
 
 Run: `cd src/web && npm test`
-Expected: PASS, 10 new tests.
+Expected: PASS, 12 new tests.
+
+A quality review found one genuine bug in Steps 1-5 as first written: the mount-time resume effect had no cleanup, so React StrictMode's development-only mount → cleanup → mount cycle (`main.tsx` wraps `App` in `StrictMode`) opened a stream on the first mount, the close-on-unmount effect's cleanup then closed it, and the second mount's resume effect saw `resumeAttemptedRef.current` already `true` and skipped - leaving a resumed Turn with `watchedTurnRef` still claiming ownership of a stream that was actually dead, forever. The unknown-Turn-id (POST) path was never affected: its side effect (`watchTurn`, called from inside `resumeStoredTurn`) only runs after `await submitTurn(...)` resolves, strictly after StrictMode's synchronous mount/cleanup/mount has already finished, so there was only ever one fetch either way.
+
+The fix is symmetric ownership, not StrictMode detection or a timer: the close-on-unmount effect now also nulls `streamRef.current` and `watchedTurnRef.current`, undoing exactly what `watchTurn` set up, and the resume effect's already-attempted branch - instead of only returning - re-reads the stored record and calls `watchTurn` again if it names a Turn id. That call is always a pure `GET`, and it is a no-op whenever `watchedTurnRef.current` already matches (the ordinary case, including every ordinary parent re-render once a stream is live) - it only actually reopens a connection when the refs were just cleared, which happens only on an unmount, real or StrictMode-simulated. `resumeAttemptedRef` itself is never reset, so the unknown-Turn-id case can never resubmit a second time.
+
+Steps 1-5 above already carry this fix and the two tests that pin it down: rendering inside `<StrictMode>` with a stored Turn id and asserting a live (not merely once-opened) stream survives the mount/cleanup/mount with no POST, and combining `<StrictMode>` with an explicit parent re-render on the unknown-Turn-id path and asserting exactly one `fetch` call throughout. `TurnTracer.test.tsx` grew from 10 to 12 tests (web suite: 63 to 65 tests across 7 files).
 
 - [ ] **Step 7: Check types and lint**
 
@@ -10829,7 +10923,7 @@ export default App;
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `cd src/web && npm test`
-Expected: PASS. The whole web suite - roughly 73 tests across eight files (Task 19's `WorkspacePanel.test.tsx` grew from 10 to 15 tests and gained a sibling `useMediaQuery.test.ts` with 2 tests, both during that task's own quality-review hardening) - is green.
+Expected: PASS. The whole web suite - roughly 75 tests across eight files (Task 19's `WorkspacePanel.test.tsx` grew from 10 to 15 tests and gained a sibling `useMediaQuery.test.ts` with 2 tests, both during that task's own quality-review hardening; Task 20's `TurnTracer.test.tsx` grew from 10 to 12 tests during its own StrictMode hardening) - is green.
 
 - [ ] **Step 5: Check types, lint, and build**
 
@@ -10961,8 +11055,8 @@ If Step 6 changed nothing, skip this commit rather than creating an empty one.
 | 1 | Desktop and narrow-screen layouts keep conversation primary and expose an accessible live Inventory workspace | Task 19 (`WorkspacePanel`, `useMediaQuery`, `index.css`), Task 21 (`App` shell, always-visible Active Inventory) | `WorkspacePanel.test.tsx` (landmarks, DOM order, tab semantics, arrow-key navigation, panel labelling, both panel ids always present so no tab's `aria-controls` ever dangles, conversation and workspace identity and state preserved - not remounted - across a breakpoint transition and back, media query subscription cleaned up on unmount, a focused element inside either panel stays visible and focused when narrowing even against a stale prior tab selection), `useMediaQuery.test.ts` (a stable subscription survives an unrelated rerender, a query change tears it down and starts a new one), `App.test.tsx` (conversation in `main` on desktop, conversation tab first and selected on narrow, header Active Inventory), Task 22 Step 7.1 |
 | 2 | Typed Turns return stable Turn IDs and publish finite resumable SSE progress, semantic parts, and terminal Outcomes with event IDs | Task 1 (fixed sequences), Task 2 (`processing`), Task 3 (`TurnEventReader`), Task 4 (durable progress rows), Task 5 (retention), Task 6 (`GET /api/turns/{id}/events`), Task 16 (client) | `TurnStreamEventTests`, `TurnEventReaderTests` (ordering, replay, terminal, swept log, single-line data), `TurnEventStreamHttpTests` (full order with ids, resume by query and by header, ignored bad resume point, finite terminal, framing, keep-alive heartbeat), `turnStream.test.ts`, `WebConversationContinuitySqlScenarioTests` on real SQL Server. Honest scope: progress is incremental (`accepted`, then `processing`); the semantic parts are projected from the recorded Outcome and therefore arrive with the terminal event - stated in D1 and in Known limits |
 | 3 | A separate Participant-level SSE stream invalidates Inventory projections after changes from any channel | Task 7 (version bump at the persistence seam, no foreign key), Task 8 (`InventoryInvalidationReader`, `GET /api/inventory-events`), Task 18 (client), Task 21 (`App` wiring) | `InventoryVersionBumpTests` (one bump per audited commit, none on denial, none on rollback, independent per Inventory, no foreign key, fallback insertion), `InventoryInvalidationReaderTests`, `InventoryEventStreamHttpTests` (snapshot, change via the conversational worker, change by another Participant over HTTP, revocation, non-disclosure, and a change made while nothing was connected arriving in the reconnect snapshot - the proof that no cursor is needed), `inventoryStream.test.ts`, `App.test.tsx` (version-driven refetch, and a local signal never swallowing the server's next version), `WebConversationContinuitySqlScenarioTests` (a genuinely concurrent pair of commits, asserted from a captured baseline) |
-| 4 | One browser-profile ChannelConversation resumes across refreshes, restarts, and tabs while preserving the shared FIFO queue | Shipped `WebConversationCookie` + `SqlInboxStore` FIFO, Task 17 (`conversationStorage`), Task 20 (mount-time resume, cross-tab `storage` subscription) | `SharedBrowserProfileScenario` (one ChannelConversation across tabs, one shared FIFO order, a second tab watching the first tab's Turn, identical replay on reconnect), `conversationStorage.test.ts`, `TurnTracer.test.tsx` (resume on mount, adopt another tab's Turn), Task 22 Step 7.3 |
-| 5 | Disconnect recovery retrieves recorded status and Outcome without resubmitting unknown mutation-capable work | Task 6 (the stream is a pure `GET`; disconnect cancels and undoes nothing), Task 17 (idempotency key recorded before the request leaves), Task 20 (resume reads; resubmits only the same native message id, and at most once per mount) | `TurnEventStreamHttpTests` disconnect test, `SharedBrowserProfileScenario` resubmission test (one inbox row, quantity applied exactly once), `TurnTracer.test.tsx` (reconnect issues no fetch at all; the lost-response case reuses the same `nativeMessageId`; a parent re-render during the pre-Turn-id window resubmits nothing) |
+| 4 | One browser-profile ChannelConversation resumes across refreshes, restarts, and tabs while preserving the shared FIFO queue | Shipped `WebConversationCookie` + `SqlInboxStore` FIFO, Task 17 (`conversationStorage`), Task 20 (mount-time resume, cross-tab `storage` subscription) | `SharedBrowserProfileScenario` (one ChannelConversation across tabs, one shared FIFO order, a second tab watching the first tab's Turn, identical replay on reconnect), `conversationStorage.test.ts`, `TurnTracer.test.tsx` (resume on mount and recovers a live stream after StrictMode's development-only remount, adopt another tab's Turn), Task 22 Step 7.3 |
+| 5 | Disconnect recovery retrieves recorded status and Outcome without resubmitting unknown mutation-capable work | Task 6 (the stream is a pure `GET`; disconnect cancels and undoes nothing), Task 17 (idempotency key recorded before the request leaves), Task 20 (resume reads; resubmits only the same native message id, and at most once per mount) | `TurnEventStreamHttpTests` disconnect test, `SharedBrowserProfileScenario` resubmission test (one inbox row, quantity applied exactly once), `TurnTracer.test.tsx` (reconnect issues no fetch at all; the lost-response case reuses the same `nativeMessageId`; a parent re-render during the pre-Turn-id window resubmits nothing, including together with React StrictMode's development-only mount/cleanup/mount) |
 | 6 | "Use in this conversation" explicitly switches Active Inventory and records the switch; browsing never switches implicitly | Shipped `InventorySelectionService` + `POST /api/inventories/{id}/select`, Task 21 (the button is the only caller) | `SharedBrowserProfileScenario` (browsing lists, Stock, and references changes nothing; selection changes and records; a switch in one tab is every tab's switch), `App.test.tsx` (no `/select` call until the button is clicked), Task 22 Step 7.5 |
 | 7 | "New conversation" rotates Foundry history and clears pending clarification/confirmation state without removing authorized access | Task 9 (generation captured at acceptance), Task 10 (`SqlConversationRotationStore`, `ProposalStatus.ConversationReset`), Task 11 (a superseded-conversation Turn leaves nothing confirmable, decided by re-reading the binding after dispatch), Task 12 (`POST /api/conversation/new`), Task 21 (the control, its notice, and forgetting the in-flight Turn) | `SqlConversationRotationStoreTests` (new generation, settled proposal, Membership and selection untouched, other conversations untouched, two rotations advancing two generations), `ConversationRotationServiceTests`, `TurnExecutionContextFactoryTests` (superseded detection and its fallback), `ConfirmationProposalLifecycleTests` (settled before dispatch; settled after dispatch by re-reading the current generation; settled when the reset lands *after* the trusted context was assembled, which is the ordering a captured flag cannot see; and the re-read waiting for a reset that is still committing rather than answering from the generation it replaces), `FoundryConversationBindingSupersessionReadTests` and `SqlFoundryConversationBindingSupersessionReadTests` (the locking read's per-provider shape, and that it never creates a binding), `SqlSupersessionReadSerializationTests` (the U &lt; P &lt; S &lt; R window on real SQL Server with `READ_COMMITTED_SNAPSHOT` on), `TurnProcessingCoordinatorTests` (a stale mutation Turn leaves nothing pending, and a reset that commits while the Turn is parked at the model boundary still leaves nothing pending), `ConversationRotationHttpTests` (generation changes, authorizations and Active Inventory survive, the held token stops working, the Initial Import proposal survives, CSRF and authentication required, work accepted before the reset still completes, and a proposal created after the reset out of work from before it can never be confirmed), `App.test.tsx` (the in-flight Turn is forgotten and no old stream reopens), `WebConversationContinuitySqlScenarioTests` (concurrent resets with a real deadlock retry, reset racing acceptance) |
 | — | No monetary budget enforcement within this initial scope | Nothing is built | No task adds a cost check, spend ceiling, or budget policy; the Scope section forbids it outright |

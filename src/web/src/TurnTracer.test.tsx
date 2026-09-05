@@ -1,3 +1,4 @@
+import { StrictMode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -148,6 +149,32 @@ describe('TurnTracer', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it('recovers a live stream after StrictMode\'s development-only mount/cleanup/mount', async () => {
+    const fetchMock = stubFetch(() => acceptedResponse('turn-should-not-happen'));
+    rememberSubmission(CONVERSATION, { nativeMessageId: 'native-1', contentText: 'list stock' });
+    rememberTurnId(CONVERSATION, 'native-1', 'turn-resumed');
+
+    const { opened, factory } = recordingEventStreamFactory();
+    render(
+      <StrictMode>
+        <TurnTracer
+          csrfToken="csrf-token"
+          webConversationId={CONVERSATION}
+          onTerminalOutcome={() => {}}
+          createSource={factory}
+        />
+      </StrictMode>,
+    );
+
+    // StrictMode's simulated mount/cleanup/mount may close the stream the first pass opened - that
+    // is the cleanup working - but it must not leave the resumed Turn with no live stream at all.
+    await waitFor(() => expect(opened.some((source) => !source.closed)).toBe(true));
+    expect(opened.find((source) => !source.closed)?.url).toBe('/api/turns/turn-resumed/events');
+
+    // Reconnecting is a read, StrictMode or not. Nothing mutation-capable is resubmitted.
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it('resubmits the very same native message id when it never learned the Turn id', async () => {
     const fetchMock = stubFetch(() => acceptedResponse('turn-recovered'));
     rememberSubmission(CONVERSATION, { nativeMessageId: 'native-lost', contentText: 'list stock' });
@@ -225,6 +252,46 @@ describe('TurnTracer', () => {
     // A parent re-render with fresh callback identities - which any unmemoized parent produces on
     // every render - must not make this component submit mutation-capable work a second time.
     rerender(<TurnTracer {...props} onTerminalOutcome={() => {}} />);
+
+    resolveSubmission(acceptedResponse('turn-recovered'));
+
+    await waitFor(() => expect(opened).toHaveLength(1));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('still resubmits only once when it never learned the Turn id, under StrictMode and a parent re-render together', async () => {
+    let resolveSubmission: (response: Response) => void = () => {};
+    const pending = new Promise<Response>((resolve) => {
+      resolveSubmission = resolve;
+    });
+
+    const fetchMock = vi.fn(() => pending);
+    vi.stubGlobal('fetch', fetchMock);
+
+    rememberSubmission(CONVERSATION, { nativeMessageId: 'native-lost', contentText: 'list stock' });
+
+    const { opened, factory } = recordingEventStreamFactory();
+    const props = {
+      csrfToken: 'csrf-token',
+      webConversationId: CONVERSATION,
+      onTerminalOutcome: () => {},
+      createSource: factory,
+    };
+
+    // StrictMode's own mount/cleanup/mount happens first and alone must not resubmit a second
+    // time; the later parent re-render (any unmemoized parent's ordinary behaviour) must not either.
+    const { rerender } = render(
+      <StrictMode>
+        <TurnTracer {...props} />
+      </StrictMode>,
+    );
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+
+    rerender(
+      <StrictMode>
+        <TurnTracer {...props} onTerminalOutcome={() => {}} />
+      </StrictMode>,
+    );
 
     resolveSubmission(acceptedResponse('turn-recovered'));
 

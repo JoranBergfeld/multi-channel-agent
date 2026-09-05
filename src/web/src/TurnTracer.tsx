@@ -420,6 +420,16 @@ function TurnTracer({ csrfToken, webConversationId, onTerminalOutcome, createSou
 
   useEffect(() => {
     if (resumeAttemptedRef.current) {
+      // Already decided once whether to reconnect or resubmit - never repeat that decision, since
+      // repeating it for the unknown-Turn-id case would resubmit. But React StrictMode's
+      // development-only mount/cleanup/mount may have closed and released a stream this same
+      // effect opened moments ago (see the close-on-unmount effect below), leaving a known Turn id
+      // with nothing watching it. Recovering that is always a pure read, so it is always safe to
+      // repeat: `watchTurn` itself is a no-op if a live stream for this id already exists.
+      const stored = readInFlightTurn(webConversationId);
+      if (stored?.turnId != null) {
+        watchTurn(stored.turnId);
+      }
       return;
     }
 
@@ -428,7 +438,7 @@ function TurnTracer({ csrfToken, webConversationId, onTerminalOutcome, createSou
     void (async () => {
       await resumeStoredTurn();
     })();
-  }, [resumeStoredTurn]);
+  }, [resumeStoredTurn, watchTurn, webConversationId]);
 
   useEffect(
     () =>
@@ -443,7 +453,18 @@ function TurnTracer({ csrfToken, webConversationId, onTerminalOutcome, createSou
     [watchTurn, webConversationId],
   );
 
-  useEffect(() => () => streamRef.current?.close(), []);
+  useEffect(
+    () => () => {
+      // Symmetric with `watchTurn` taking ownership: release both the stream and the ids that
+      // guard against re-acquiring it, so a subsequent mount - a real one, or the second half of
+      // StrictMode's development-only mount/cleanup/mount - starts from a clean slate instead of
+      // believing a now-closed stream is still live.
+      streamRef.current?.close();
+      streamRef.current = null;
+      watchedTurnRef.current = null;
+    },
+    [],
+  );
 
   async function handleSubmit(event: React.FormEvent) {
     event.preventDefault();
