@@ -114,13 +114,25 @@ public sealed class ConfirmationProposalLifecycle(
     /// Why this closes that window. Write P for the instant this Turn's proposal became durable, S
     /// for the binding read below, and U and R for the rotation's own settle statement and its
     /// commit, with U before R. P always precedes S, because the proposal is stored during dispatch
-    /// and this runs after dispatch. If P precedes U, the rotation's settle sees a durable Pending
-    /// proposal and settles it inside its own transaction
-    /// (<see cref="IConversationRotationStore"/>) - which is exactly why the answer below reports the
-    /// conversation as superseded even when it settled nothing itself. Otherwise U precedes P, so
-    /// there was nothing for the rotation to settle and this pass must catch it: it does whenever S
-    /// observes the rotated binding, which R preceding S guarantees, and which a read that serializes
-    /// against the in-flight rotation gives for the remaining U-P-S-R interleaving.
+    /// and this runs after dispatch.
+    ///
+    /// The read below serializes against an in-flight rotation of this conversation's binding
+    /// (<see cref="IFoundryConversationBindingStore.ReadCurrentForSupersessionAsync"/>), so it and the
+    /// rotation's own generation bump are strictly ordered - which leaves exactly two cases.
+    ///
+    /// <list type="bullet">
+    /// <item><b>The read goes first.</b> It answers with the generation the Turn was accepted under,
+    /// this pass settles nothing - and the rotation, whose bump and whose settle both run after that
+    /// read has finished, therefore runs its settle after P. It finds the proposal durable and
+    /// Pending and settles it inside its own transaction.</item>
+    /// <item><b>The rotation goes first.</b> The read waits for it and answers with the newer
+    /// generation, so this pass settles whatever the Turn left pending.</item>
+    /// </list>
+    ///
+    /// There is no third case, and that is the whole point of reading through that seam rather than
+    /// the ordinary one: an unserialized read can answer from a generation a rotation is in the middle
+    /// of replacing, and then neither side settles anything - the rotation's settle ran before P, and
+    /// this pass believed the conversation was current.
     /// </summary>
     public async Task<SupersededConversationSettlement> SettleSupersededConversationAsync(
         TurnExecutionContext context, DateTimeOffset now, CancellationToken cancellationToken)
@@ -129,10 +141,12 @@ public sealed class ConfirmationProposalLifecycle(
 
         // A read that fails is not evidence the conversation is still current, so it is left to
         // propagate: the Turn records no Outcome and is retried, rather than completing on a guess.
-        var current = await bindingStore.GetOrCreateAsync(
-            context.ParticipantId, context.ChannelConversationId, now, cancellationToken);
+        var current = await bindingStore.ReadCurrentForSupersessionAsync(
+            context.ParticipantId, context.ChannelConversationId, cancellationToken);
 
-        if (context.FoundryConversationGeneration >= current.Generation)
+        // No binding at all means no rotation has ever run for this conversation, so nothing this Turn
+        // did can be stranded in one. Creating a binding to say so is not this reader's business.
+        if (current is null || context.FoundryConversationGeneration >= current.Generation)
         {
             return SupersededConversationSettlement.StillCurrent;
         }

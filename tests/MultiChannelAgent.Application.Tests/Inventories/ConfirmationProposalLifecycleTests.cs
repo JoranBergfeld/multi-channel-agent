@@ -245,6 +245,63 @@ public sealed class ConfirmationProposalLifecycleTests
             DateTimeOffset now,
             CancellationToken cancellationToken) =>
             Task.FromException<FoundryConversationBinding>(failure);
+
+        public Task<FoundryConversationBinding?> ReadCurrentForSupersessionAsync(
+            ParticipantId participantId,
+            ChannelConversationId channelConversationId,
+            CancellationToken cancellationToken) =>
+            Task.FromException<FoundryConversationBinding?>(failure);
+    }
+
+    // The settlement asks a different question from every other reader of this binding - "is a reset
+    // committing right now?" - and it has to be asked through the seam that can answer it. Reading
+    // through the ordinary get-or-create would create a binding no one asked for, which is how this
+    // test tells the two apart without needing a database.
+    [Fact]
+    public async Task Settling_never_creates_a_binding_for_a_conversation_that_has_none()
+    {
+        var proposals = new InMemoryConfirmationProposalStore();
+        var bindings = new InMemoryFoundryConversationBindingStore();
+
+        var settlement = await Lifecycle(proposals, bindings).SettleSupersededConversationAsync(
+            Context(SomeInventory), Now, CancellationToken.None);
+
+        // No binding at all means no rotation has ever run for this conversation, so nothing can have
+        // been superseded - the same answer a first-generation binding gives, without writing a row.
+        Assert.False(settlement.ConversationWasSuperseded);
+        Assert.Empty(bindings.Bindings);
+        Assert.Equal(1, bindings.SupersessionReadCount);
+    }
+
+    // The whole reason the seam exists. While a reset holds the binding row uncommitted, the
+    // generation every ordinary read still sees is the one being replaced; answering from it would
+    // report the conversation as current and leave this Turn's proposal confirmable in a conversation
+    // that is about to be gone. The settlement must instead wait for that writer and answer from what
+    // it committed.
+    [Fact]
+    public async Task Settling_waits_for_a_reset_that_is_still_committing_rather_than_reading_the_generation_it_replaces()
+    {
+        var (proposals, proposal) = await PendingAsync();
+        var bindings = new InMemoryFoundryConversationBindingStore();
+        await bindings.GetOrCreateAsync(Participant, new ChannelConversationId(Conversation), Now, CancellationToken.None);
+        bindings.BeginRotation(Participant, new ChannelConversationId(Conversation), Now);
+
+        // The stale answer this must not give: an ordinary read is served the committed generation
+        // throughout, and the Turn was accepted under exactly that.
+        var stale = await bindings.GetOrCreateAsync(
+            Participant, new ChannelConversationId(Conversation), Now, CancellationToken.None);
+        Assert.Equal(1, stale.Generation);
+
+        var settling = Lifecycle(proposals, bindings).SettleSupersededConversationAsync(
+            Context(SomeInventory), Now, CancellationToken.None);
+
+        await bindings.SupersessionReadParkedAsync();
+        bindings.CommitRotation();
+
+        var settlement = await settling;
+        Assert.True(settlement.ConversationWasSuperseded);
+        Assert.Equal(ProposalStatus.ConversationReset, settlement.Settled);
+        Assert.Equal(ProposalStatus.ConversationReset, await proposals.FindStatusAsync(proposal.Id, CancellationToken.None));
     }
 
     [Fact]
