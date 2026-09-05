@@ -7939,7 +7939,7 @@ const defaultEventStreamFactory: EventStreamFactory = (url) => new EventSource(u
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `cd src/web && npm test`
-Expected: PASS, 9 tests.
+Expected: PASS, 10 tests.
 
 - [ ] **Step 5: Check types and lint**
 
