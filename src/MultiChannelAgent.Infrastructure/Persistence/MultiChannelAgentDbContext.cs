@@ -128,6 +128,9 @@ public sealed class MultiChannelAgentDbContext(DbContextOptions<MultiChannelAgen
     /// deliberately NOT claimed to be anything more: it does not serialize the work earlier in those
     /// transactions, and it prevents no deadlock that could already happen on the rows they were
     /// changing. No writer takes this lock first, and nothing here depends on one doing so.
+    ///
+    /// Each publication is one atomic upsert - see <see cref="InventoryVersionPublication"/> for why
+    /// it must never be an update guarded by an insert.
     /// </summary>
     public override async Task<int> SaveChangesAsync(
         bool acceptAllChangesOnSuccess, CancellationToken cancellationToken = default)
@@ -150,19 +153,8 @@ public sealed class MultiChannelAgentDbContext(DbContextOptions<MultiChannelAgen
 
             foreach (var inventoryId in inventoriesToPublish)
             {
-                var bumped = await Database.ExecuteSqlAsync(
-                    $"UPDATE InventoryVersions SET Version = Version + 1 WHERE InventoryId = {inventoryId}",
-                    cancellationToken);
-
-                if (bumped == 0)
-                {
-                    // Only reachable for an Inventory created before this table existed and somehow
-                    // missed by the backfill. Establishing the row here keeps the signal correct
-                    // rather than silently never publishing for that Inventory again.
-                    await Database.ExecuteSqlAsync(
-                        $"INSERT INTO InventoryVersions (InventoryId, Version) VALUES ({inventoryId}, 1)",
-                        cancellationToken);
-                }
+                await Database.ExecuteSqlAsync(
+                    InventoryVersionPublication.Statement(Database, inventoryId), cancellationToken);
             }
 
             if (ownedTransaction is not null)
@@ -212,14 +204,7 @@ public sealed class MultiChannelAgentDbContext(DbContextOptions<MultiChannelAgen
 
             foreach (var inventoryId in inventoriesToPublish)
             {
-                var bumped = Database.ExecuteSql(
-                    $"UPDATE InventoryVersions SET Version = Version + 1 WHERE InventoryId = {inventoryId}");
-
-                if (bumped == 0)
-                {
-                    Database.ExecuteSql(
-                        $"INSERT INTO InventoryVersions (InventoryId, Version) VALUES ({inventoryId}, 1)");
-                }
+                Database.ExecuteSql(InventoryVersionPublication.Statement(Database, inventoryId));
             }
 
             ownedTransaction?.Commit();
