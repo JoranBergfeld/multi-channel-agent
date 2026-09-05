@@ -1,0 +1,7 @@
+{
+  "type": "rtc.call.sdp.create",
+  "sdp_offer": "v=0\r\no=test\r\n",
+  "session": {
+    "modalities": ["text", "audio"]
+  }
+}

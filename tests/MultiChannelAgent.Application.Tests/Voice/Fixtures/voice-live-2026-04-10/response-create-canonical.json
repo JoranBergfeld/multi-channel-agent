@@ -1,0 +1,15 @@
+{
+  "type": "response.create",
+  "response": {
+    "pre_generated_assistant_message": {
+      "type": "message",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "Your request has been submitted."
+        }
+      ]
+    }
+  }
+}

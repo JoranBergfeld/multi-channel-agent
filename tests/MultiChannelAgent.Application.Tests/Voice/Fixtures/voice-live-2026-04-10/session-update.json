@@ -1,0 +1,19 @@
+{
+  "type": "session.update",
+  "session": {
+    "modalities": ["text", "audio"],
+    "voice": {
+      "type": "azure-realtime-native",
+      "name": "diya"
+    },
+    "input_audio_transcription": {
+      "model": "whisper-1"
+    },
+    "turn_detection": {
+      "type": "azure_semantic_vad",
+      "threshold": 0.5,
+      "prefix_padding_ms": 300,
+      "silence_duration_ms": 500
+    }
+  }
+}
