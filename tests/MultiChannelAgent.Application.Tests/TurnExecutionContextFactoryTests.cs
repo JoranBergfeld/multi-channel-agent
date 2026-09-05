@@ -103,6 +103,59 @@ public class TurnExecutionContextFactoryTests
         var binding = Assert.Single(bindings.Bindings);
         Assert.Equal(binding.FoundryConversationId, context.FoundryConversationId);
         Assert.Equal(binding.Generation, context.FoundryConversationGeneration);
+
+        // Falling back to the current binding means it is current, so nothing about it is superseded.
+        Assert.False(context.AcceptedInSupersededConversation);
+    }
+
+    // Processing a Turn in the conversation it was accepted under is right, and is also exactly why
+    // the context has to say so: work whose conversation has moved on must not go on to leave
+    // anything confirmable behind in it.
+    [Fact]
+    public async Task A_turn_whose_conversation_has_since_been_reset_says_so()
+    {
+        var (factory, _, _, inbox, bindings) = CreateFactory();
+        var turn = Turn("conversation-1");
+        var acceptedUnder = await bindings.GetOrCreateAsync(
+            SomeParticipant, turn.ChannelConversationId, Now, CancellationToken.None);
+        await inbox.AcceptAsync(turn, acceptedUnder, CancellationToken.None);
+        bindings.Rotate(SomeParticipant, turn.ChannelConversationId, Now.AddMinutes(1));
+
+        var context = await factory.CreateAsync(turn, Now.AddMinutes(2), CancellationToken.None);
+
+        Assert.True(context.AcceptedInSupersededConversation);
+        Assert.Equal(acceptedUnder.Generation, context.FoundryConversationGeneration);
+    }
+
+    [Fact]
+    public async Task A_turn_whose_conversation_is_still_the_current_one_is_not_marked_superseded()
+    {
+        var (factory, _, _, inbox, bindings) = CreateFactory();
+        var turn = Turn("conversation-1");
+        var acceptedUnder = await bindings.GetOrCreateAsync(
+            SomeParticipant, turn.ChannelConversationId, Now, CancellationToken.None);
+        await inbox.AcceptAsync(turn, acceptedUnder, CancellationToken.None);
+
+        var context = await factory.CreateAsync(turn, Now.AddMinutes(1), CancellationToken.None);
+
+        Assert.False(context.AcceptedInSupersededConversation);
+    }
+
+    // A reset in one ChannelConversation is not a reset in another: the binding is per pair, and a
+    // Turn must never be treated as stale because some other conversation moved on.
+    [Fact]
+    public async Task A_reset_in_another_channel_conversation_never_marks_this_turn_superseded()
+    {
+        var (factory, _, _, inbox, bindings) = CreateFactory();
+        var turn = Turn("conversation-1");
+        var acceptedUnder = await bindings.GetOrCreateAsync(
+            SomeParticipant, turn.ChannelConversationId, Now, CancellationToken.None);
+        await inbox.AcceptAsync(turn, acceptedUnder, CancellationToken.None);
+        bindings.Rotate(SomeParticipant, new ChannelConversationId("conversation-2"), Now.AddMinutes(1));
+
+        var context = await factory.CreateAsync(turn, Now.AddMinutes(2), CancellationToken.None);
+
+        Assert.False(context.AcceptedInSupersededConversation);
     }
 
     [Fact]

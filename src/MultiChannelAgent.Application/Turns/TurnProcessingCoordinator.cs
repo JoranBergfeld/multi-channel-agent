@@ -19,7 +19,8 @@ namespace MultiChannelAgent.Application.Turns;
 ///
 /// It also reconciles pending confirmation state against the freshly assembled trusted context before
 /// the Turn is interpreted, so an interrupted Turn, a switched Active Inventory, or lost access can
-/// never leave a confirmable proposal behind.
+/// never leave a confirmable proposal behind - and once more after dispatch, so neither can a
+/// conversation reset that landed while this Turn was being processed.
 /// </summary>
 public sealed class TurnProcessingCoordinator(
     IInboxStore inboxStore,
@@ -146,6 +147,23 @@ public sealed class TurnProcessingCoordinator(
         var decision = proposal.Kind == ModelProposalKind.Direct
             ? proposal.Direct!
             : await toolDispatcher.DispatchAsync(proposal.ToolCall!, executionContext, now, cancellationToken);
+
+        // The reconcile above ran before this Turn had proposed anything, so it could not settle a
+        // proposal that did not exist yet. A reset that landed while this Turn was in the model call
+        // or in dispatch would therefore find nothing, and this Turn would go on to leave a
+        // confirmable proposal in a conversation the Participant has already left. Re-reading the
+        // binding here - never trusting the flag the context captured earlier - is what closes that
+        // window, and it happens before the Outcome is recorded so the answer never offers a token
+        // that has already stopped working. Whether this pass or the reset itself settled the
+        // proposal makes no difference to the answer: what decides it is that the conversation moved
+        // on at all.
+        var settlement = await proposalLifecycle.SettleSupersededConversationAsync(
+            executionContext, now, cancellationToken);
+
+        if (settlement.ConversationWasSuperseded && decision.Category == OutcomeCategory.ConfirmationRequired)
+        {
+            decision = ConfirmationProposalLifecycle.ConversationResetAnswer;
+        }
 
         var outcome = Outcome.Record(
             turn.TurnId, decision.Category, decision.Code, decision.Summary, now, decision.Payload, decision.PayloadRetention);

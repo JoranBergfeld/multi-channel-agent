@@ -64,12 +64,69 @@ public class TurnProcessingCoordinatorTests
             throw new NotSupportedException();
     }
 
+    /// <summary>
+    /// Parks inside the model call - after the trusted context is assembled and before anything is
+    /// dispatched - so a test can drive the exact window in which a conversation rotates while the
+    /// Turn holds no proposal yet. The handoffs are completed sources rather than sleeps, so the race
+    /// is deterministic; <see cref="ReachedAsync"/> bounds the wait only so a regression that never
+    /// reaches the model call fails the test instead of hanging the run.
+    /// </summary>
+    private sealed class GatedModelBoundary(IModelBoundary inner) : IModelBoundary
+    {
+        private static readonly TimeSpan ReachTimeout = TimeSpan.FromSeconds(30);
+
+        private readonly TaskCompletionSource _reached = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _released = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        /// <summary>Completes once the Turn is parked inside the model call.</summary>
+        public Task ReachedAsync() => _reached.Task.WaitAsync(ReachTimeout);
+
+        public void Release() => _released.TrySetResult();
+
+        public async Task<ModelProposal> ProposeAsync(
+            InboundTurn turn, ModelInvocationContext context, CancellationToken cancellationToken)
+        {
+            _reached.TrySetResult();
+            await _released.Task;
+
+            return await inner.ProposeAsync(turn, context, cancellationToken);
+        }
+    }
+
+    /// <summary>
+    /// Everything one coordinator is wired over, so a test that is about what processing does to
+    /// Inventory state can seed and read the very stores the dispatch runs against.
+    /// </summary>
+    private sealed record CoordinatorHarness(
+        TurnProcessingCoordinator Coordinator,
+        InMemoryInboxStore Inbox,
+        InMemoryOutcomeStore Outcomes,
+        InMemoryDeliveryStore Deliveries,
+        InMemoryTurnResultStore ResultStore,
+        InMemoryFoundryConversationBindingStore Bindings,
+        InMemoryConfirmationProposalStore Proposals,
+        InMemoryInventoryStore Inventories,
+        InMemoryActiveInventorySelectionStore Selections,
+        InMemoryStockStore Stock,
+        InMemoryInventoryReferenceStore References);
+
     private static (TurnProcessingCoordinator Coordinator, InMemoryInboxStore Inbox, InMemoryOutcomeStore Outcomes, InMemoryDeliveryStore Deliveries, InMemoryTurnResultStore ResultStore, InMemoryFoundryConversationBindingStore Bindings)
         CreateCoordinator(
             TimeProvider timeProvider,
             IModelBoundary? modelBoundary = null,
             InMemoryTurnProgressEventStore? progressStore = null,
             ITurnProgressEventStore? progressEventStore = null)
+    {
+        var harness = CreateHarness(timeProvider, modelBoundary, progressStore, progressEventStore);
+
+        return (harness.Coordinator, harness.Inbox, harness.Outcomes, harness.Deliveries, harness.ResultStore, harness.Bindings);
+    }
+
+    private static CoordinatorHarness CreateHarness(
+        TimeProvider timeProvider,
+        IModelBoundary? modelBoundary = null,
+        InMemoryTurnProgressEventStore? progressStore = null,
+        ITurnProgressEventStore? progressEventStore = null)
     {
         var inbox = new InMemoryInboxStore();
         var outcomes = new InMemoryOutcomeStore();
@@ -78,20 +135,19 @@ public class TurnProcessingCoordinatorTests
         progressStore ??= new InMemoryTurnProgressEventStore();
         var leases = new InMemoryLeaseCoordinator(timeProvider);
 
-        // These tests never exercise the tool-dispatch path (their content is always "hello" or the
-        // scripted failure marker, both Direct decisions) - real, minimally wired instances are used
-        // here purely to satisfy the constructor, matching the pattern of Application services
-        // elsewhere backed by in-memory stores.
+        // Real, minimally wired instances: tests whose content is "hello" or the scripted failure
+        // marker never leave the Direct path, and tests that seed Inventory state drive the very same
+        // dispatch production does, through exactly these stores.
         var inventoryStore = new InMemoryInventoryStore(_ => "Owner Name");
         var selectionStore = new InMemoryActiveInventorySelectionStore();
         var auditStore = new InMemoryInventoryAuthorizationAuditStore(selectionStore);
         var authorizationService = new InventoryAuthorizationService(inventoryStore, auditStore);
-        var selectionService = new InventorySelectionService(authorizationService, selectionStore, new InMemoryConfirmationProposalStore());
+        var proposalStore = new InMemoryConfirmationProposalStore();
+        var selectionService = new InventorySelectionService(authorizationService, selectionStore, proposalStore);
         var bindingStore = new InMemoryFoundryConversationBindingStore();
         var executionContextFactory = new TurnExecutionContextFactory(inbox, bindingStore, selectionService);
         var stockStore = new InMemoryStockStore();
         var referenceStore = new InMemoryInventoryReferenceStore();
-        var proposalStore = new InMemoryConfirmationProposalStore();
         var changeSetStore = new InMemoryStockChangeSetStore(stockStore, proposalStore);
         var toolDispatcher = new StockToolDispatcher(
             new StockListingService(stockStore, referenceStore, authorizationService),
@@ -110,12 +166,23 @@ public class TurnProcessingCoordinatorTests
             leases,
             new ProgressObservingModelBoundary(modelBoundary ?? new ScriptedModelBoundary(), progressStore),
             executionContextFactory,
-            new ConfirmationProposalLifecycle(new InMemoryConfirmationProposalStore()),
+            new ConfirmationProposalLifecycle(proposalStore, bindingStore),
             toolDispatcher,
             timeProvider,
             NullLogger<TurnProcessingCoordinator>.Instance);
 
-        return (coordinator, inbox, outcomes, deliveries, resultStore, bindingStore);
+        return new CoordinatorHarness(
+            coordinator,
+            inbox,
+            outcomes,
+            deliveries,
+            resultStore,
+            bindingStore,
+            proposalStore,
+            inventoryStore,
+            selectionStore,
+            stockStore,
+            referenceStore);
     }
 
     /// <summary>
@@ -407,5 +474,193 @@ public class TurnProcessingCoordinatorTests
             byConversation[new ChannelConversationId("conversation-1")][0],
             byConversation[new ChannelConversationId("conversation-2")][0]);
         Assert.Equal(2, bindings.Bindings.Count);
+    }
+
+    private static readonly InventoryId SomeInventory = new(Guid.Parse("33333333-3333-3333-3333-333333333333"));
+    private static readonly UnitId EachUnit = new(Guid.Parse("44444444-4444-4444-4444-444444444444"));
+    private const string MutationConversation = "conversation-1";
+
+    /// <summary>
+    /// Seeds exactly what a real mutation needs to get as far as asking for confirmation: an
+    /// Inventory the Participant may edit, that Inventory selected as the conversation's Active one,
+    /// its reserved <c>each</c> Unit, and one empty Stock Entry a Forget can name. Without all four
+    /// the dispatch would answer no_active_inventory, forbidden, not_found, or
+    /// forget_requires_zero_quantity - and a test asserting "nothing confirmable is left behind"
+    /// would pass without any confirmation ever having been possible.
+    /// </summary>
+    private static async Task SeedForgettableStockAsync(CoordinatorHarness harness)
+    {
+        harness.Inventories.GrantMembership(SomeInventory, SomeParticipant, MembershipRole.Editor, Now);
+        harness.References.AddUnit(SomeInventory, EachUnit, "each");
+        harness.Stock.CreateRow(SomeInventory, "Steel Bolts", EachUnit, "each", null, null, null, Quantity.Zero);
+        await harness.Selections.UpsertAsync(
+            new ActiveInventorySelection(SomeParticipant, MutationConversation, SomeInventory, Now),
+            CancellationToken.None);
+    }
+
+    private static InboundTurn ForgetTurn(string nativeMessageId, DateTimeOffset receivedAt) =>
+        TestTurns.Text(nativeMessageId, SomeParticipant, MutationConversation, "forget stock Steel Bolts", null, receivedAt, null);
+
+    /// <summary>
+    /// Starts a new conversation the way the durable rotation does it: the generation advances and
+    /// whatever was pending in the conversation being left behind stops being confirmable, as one
+    /// step. <see cref="IConversationRotationStore"/> owns that atomicity in production; this states
+    /// the same two effects so a coordinator test can reset a conversation without a database.
+    /// </summary>
+    private static async Task ResetConversationAsync(CoordinatorHarness harness, DateTimeOffset now)
+    {
+        harness.Bindings.Rotate(SomeParticipant, new ChannelConversationId(MutationConversation), now);
+        await harness.Proposals.InvalidatePendingAsync(
+            SomeParticipant, MutationConversation, ProposalStatus.ConversationReset, now, CancellationToken.None);
+    }
+
+    private static async Task<ConfirmationProposal?> PendingProposalAsync(CoordinatorHarness harness) =>
+        await harness.Proposals.FindPendingAsync(SomeParticipant, MutationConversation, CancellationToken.None);
+
+    // The property the whole post-dispatch settlement exists for: a mutation-capable Turn accepted
+    // under one Foundry conversation generation must never leave a confirmable proposal behind once
+    // the Participant has started a new conversation - even though the Turn itself was queued, and
+    // dispatched, entirely legitimately.
+    [Fact]
+    public async Task A_mutation_accepted_before_a_reset_leaves_nothing_confirmable_in_the_new_conversation()
+    {
+        var timeProvider = new FakeTimeProvider(Now);
+        var harness = CreateHarness(timeProvider);
+        await SeedForgettableStockAsync(harness);
+
+        // First, prove the path is genuinely reachable: an identical Turn with no reset anywhere near
+        // it really does reach confirmation and really does leave something confirmable behind.
+        var beforeAnyReset = ForgetTurn("native-1", Now);
+        await AcceptAsync(harness.Inbox, harness.Bindings, beforeAnyReset);
+        await harness.Coordinator.ProcessPendingAsync(CancellationToken.None);
+
+        var control = await harness.Outcomes.FindAsync(beforeAnyReset.TurnId, CancellationToken.None);
+        Assert.Equal(OutcomeCategory.ConfirmationRequired, control!.Category);
+        Assert.NotNull(await PendingProposalAsync(harness));
+
+        // A second Turn is accepted into the same conversation - still the generation it was queued
+        // under - and only then does the Participant start a new conversation.
+        var acceptedBeforeTheReset = ForgetTurn("native-2", Now.AddSeconds(1));
+        await AcceptAsync(harness.Inbox, harness.Bindings, acceptedBeforeTheReset);
+        await ResetConversationAsync(harness, Now.AddSeconds(2));
+        Assert.Null(await PendingProposalAsync(harness));
+
+        await harness.Coordinator.ProcessPendingAsync(CancellationToken.None);
+
+        // It dispatched against the history it was accepted under, as it must - but what it proposed
+        // belongs to a conversation the Participant has walked away from, so nothing confirmable is
+        // left and the answer says so rather than offering a token that would never work.
+        Assert.Null(await PendingProposalAsync(harness));
+        var outcome = await harness.Outcomes.FindAsync(acceptedBeforeTheReset.TurnId, CancellationToken.None);
+        Assert.NotNull(outcome);
+        Assert.NotEqual(OutcomeCategory.ConfirmationRequired, outcome!.Category);
+        Assert.Equal(ConfirmationProposalLifecycle.ConversationResetCode, outcome.Code);
+    }
+
+    // The window the captured flag alone cannot close: at context assembly the conversation really
+    // was current, and the reset lands while the Turn is inside the model call - before it has any
+    // proposal for the rotation to settle. Only re-reading the binding after dispatch catches it.
+    [Fact]
+    public async Task A_reset_that_lands_while_a_turn_is_being_processed_still_settles_what_it_goes_on_to_propose()
+    {
+        var timeProvider = new FakeTimeProvider(Now);
+        var gate = new GatedModelBoundary(new ScriptedModelBoundary());
+        var harness = CreateHarness(timeProvider, gate);
+        await SeedForgettableStockAsync(harness);
+        var turn = ForgetTurn("native-1", Now);
+        await AcceptAsync(harness.Inbox, harness.Bindings, turn);
+
+        var processing = harness.Coordinator.ProcessPendingAsync(CancellationToken.None);
+        try
+        {
+            await gate.ReachedAsync();
+
+            // The hole itself: the trusted context has already been assembled and found the
+            // conversation current, and there is nothing for a reset to settle yet.
+            Assert.Null(await PendingProposalAsync(harness));
+            await ResetConversationAsync(harness, Now.AddSeconds(1));
+        }
+        finally
+        {
+            // Released even if an assertion above fails, so a failing test reports its assertion
+            // rather than leaving the parked coordinator holding its lease forever.
+            gate.Release();
+        }
+
+        Assert.Equal(1, await processing);
+
+        // The proposal really was created - the dispatch ran in full - and then settled by the
+        // post-dispatch re-read rather than left waiting for a "confirm" in a conversation that no
+        // longer exists.
+        var created = Assert.Single(harness.Proposals.Proposals);
+        Assert.Equal(turn.TurnId, created.ProposedInTurnId);
+        Assert.Equal(
+            ProposalStatus.ConversationReset,
+            await harness.Proposals.FindStatusAsync(created.Id, CancellationToken.None));
+        Assert.Null(await PendingProposalAsync(harness));
+        var outcome = await harness.Outcomes.FindAsync(turn.TurnId, CancellationToken.None);
+        Assert.NotEqual(OutcomeCategory.ConfirmationRequired, outcome!.Category);
+    }
+
+    // A reset accepted before this Turn had proposed anything is only one of the two orders. In the
+    // other, this Turn's proposal is already durable when the reset runs, so the reset settles it -
+    // and there is nothing left for the post-dispatch pass to settle. The answer must still not offer
+    // a confirmation: a token that has already stopped working is worse than no token at all.
+    [Fact]
+    public async Task A_reset_that_settles_the_proposal_itself_still_never_answers_with_a_confirmation()
+    {
+        var timeProvider = new FakeTimeProvider(Now);
+        var harness = CreateHarness(timeProvider);
+        await SeedForgettableStockAsync(harness);
+        var turn = ForgetTurn("native-1", Now);
+        await AcceptAsync(harness.Inbox, harness.Bindings, turn);
+
+        // The reset lands in the instant right after this Turn's proposal became confirmable, exactly
+        // as the durable rotation would: it finds the proposal and settles it in its own transaction.
+        harness.Proposals.AfterStore = () => ResetConversationAsync(harness, Now.AddSeconds(1));
+
+        Assert.Equal(1, await harness.Coordinator.ProcessPendingAsync(CancellationToken.None));
+
+        var created = Assert.Single(harness.Proposals.Proposals);
+        Assert.Equal(
+            ProposalStatus.ConversationReset,
+            await harness.Proposals.FindStatusAsync(created.Id, CancellationToken.None));
+        Assert.Null(await PendingProposalAsync(harness));
+
+        var outcome = await harness.Outcomes.FindAsync(turn.TurnId, CancellationToken.None);
+        Assert.NotEqual(OutcomeCategory.ConfirmationRequired, outcome!.Category);
+        Assert.Equal(ConfirmationProposalLifecycle.ConversationResetCode, outcome.Code);
+
+        // No payload and no delivery may still carry the single-use token the proposal was offered
+        // with, in either the answer that is recorded or the one that is sent.
+        Assert.Null(outcome.Payload);
+        Assert.All(
+            harness.Deliveries.Deliveries,
+            delivery => Assert.DoesNotContain("token", delivery.Payload, StringComparison.OrdinalIgnoreCase));
+    }
+
+    // A reset ends what can still be confirmed, not what has already been asked. A read accepted
+    // before it proposes nothing, so it simply answers - from the conversation it was accepted under.
+    [Fact]
+    public async Task A_read_accepted_before_a_reset_still_answers_from_the_conversation_it_was_accepted_under()
+    {
+        var timeProvider = new FakeTimeProvider(Now);
+        var capturing = new CapturingModelBoundary(new ScriptedModelBoundary());
+        var harness = CreateHarness(timeProvider, capturing);
+        await SeedForgettableStockAsync(harness);
+        var turn = TestTurns.Text("native-1", SomeParticipant, MutationConversation, "list stock including zero", null, Now, null);
+        var acceptedUnder = await harness.Bindings.GetOrCreateAsync(
+            SomeParticipant, turn.ChannelConversationId, Now, CancellationToken.None);
+        await harness.Inbox.AcceptAsync(turn, acceptedUnder, CancellationToken.None);
+
+        await ResetConversationAsync(harness, Now.AddSeconds(1));
+        Assert.Equal(1, await harness.Coordinator.ProcessPendingAsync(CancellationToken.None));
+
+        var outcome = await harness.Outcomes.FindAsync(turn.TurnId, CancellationToken.None);
+        Assert.Equal(OutcomeStatus.Completed, outcome!.Status);
+        Assert.Equal(OutcomeCategory.Completed, outcome.Category);
+        Assert.Contains("Steel Bolts", outcome.Payload);
+        Assert.Equal(acceptedUnder.FoundryConversationId, Assert.Single(capturing.Invocations).Foundry);
+        Assert.Empty(harness.Proposals.Proposals);
     }
 }
