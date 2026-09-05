@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useSyncExternalStore } from 'react';
 
 /**
  * Whether the viewport currently matches a CSS media query, kept up to date as it changes.
@@ -7,21 +7,22 @@ import { useEffect, useState } from 'react';
  * is behind a tab, and a tab whose panel is merely hidden with CSS is still in the accessibility
  * tree, still focusable, and still read out. Deciding it here means the DOM says what the screen
  * shows.
+ *
+ * Reads through `useSyncExternalStore` rather than an effect that calls `setState`: the browser's
+ * `MediaQueryList` is the external store, and this is its canonical synchronization hook - the first
+ * render already reflects the current viewport with no synchronize-after-paint flash, and no lint
+ * warning about calling `setState` synchronously inside an effect.
  */
 export function useMediaQuery(query: string): boolean {
-  const [matches, setMatches] = useState(() => window.matchMedia(query).matches);
+  return useSyncExternalStore(
+    (onStoreChange) => {
+      const list = window.matchMedia(query);
+      list.addEventListener('change', onStoreChange);
 
-  useEffect(() => {
-    const list = window.matchMedia(query);
-    const onChange = (event: MediaQueryListEvent) => setMatches(event.matches);
-
-    setMatches(list.matches);
-    list.addEventListener('change', onChange);
-
-    return () => list.removeEventListener('change', onChange);
-  }, [query]);
-
-  return matches;
+      return () => list.removeEventListener('change', onStoreChange);
+    },
+    () => window.matchMedia(query).matches,
+  );
 }
 
 /**

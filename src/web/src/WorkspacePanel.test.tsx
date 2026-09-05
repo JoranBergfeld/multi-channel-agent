@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { useState } from 'react';
+import { describe, expect, it, vi } from 'vitest';
+import { act, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { DESKTOP_WIDTH, NARROW_WIDTH, setViewportWidth } from './testing/setup';
 import WorkspacePanel from './WorkspacePanel';
@@ -10,6 +11,19 @@ function renderPanel() {
       conversation={<p>Conversation content</p>}
       workspace={<p>Workspace content</p>}
     />,
+  );
+}
+
+/** A probe that proves whether it was remounted: its count only ever survives if React kept it. */
+function StatefulProbe({ testId }: { testId: string }) {
+  const [count, setCount] = useState(0);
+
+  return (
+    <div data-testid={testId}>
+      <button type="button" onClick={() => setCount((value) => value + 1)}>
+        {count}
+      </button>
+    </div>
   );
 }
 
@@ -65,15 +79,17 @@ describe('WorkspacePanel on a narrow viewport', () => {
     expect(tabs[1]).toHaveAttribute('aria-selected', 'false');
   });
 
-  it('shows only the selected panel', () => {
+  it('hides the inactive panel from assistive technology and the tab order, without unmounting it', () => {
     setViewportWidth(NARROW_WIDTH);
     renderPanel();
 
+    // Still mounted - so no in-flight state, stream, or focus it might hold is discarded - just
+    // out of the accessibility tree and the tab order, which is what "shows only" has to mean here.
     expect(screen.getByRole('tabpanel')).toHaveTextContent('Conversation content');
-    expect(screen.queryByText('Workspace content')).not.toBeInTheDocument();
+    expect(screen.getByText('Workspace content')).not.toBeVisible();
   });
 
-  it('switches panels when a tab is chosen', async () => {
+  it('switches panels when a tab is chosen, hiding the other without unmounting it', async () => {
     setViewportWidth(NARROW_WIDTH);
     renderPanel();
 
@@ -81,6 +97,7 @@ describe('WorkspacePanel on a narrow viewport', () => {
 
     expect(screen.getByRole('tabpanel')).toHaveTextContent('Workspace content');
     expect(screen.getByRole('tab', { name: 'Inventory' })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByText('Conversation content')).not.toBeVisible();
   });
 
   it('moves between tabs with the arrow keys, and only the selected tab is in the tab order', async () => {
@@ -113,11 +130,98 @@ describe('WorkspacePanel on a narrow viewport', () => {
     expect(tab).toHaveAttribute('aria-controls', panel.id);
   });
 
+  it("keeps both panels present, so neither tab's aria-controls ever points at a missing element", () => {
+    setViewportWidth(NARROW_WIDTH);
+    const { container } = renderPanel();
+
+    for (const tab of screen.getAllByRole('tab')) {
+      const controlledId = tab.getAttribute('aria-controls');
+      expect(controlledId).toBeTruthy();
+      // Queried directly on the DOM, not through an accessibility-tree query, since the point is
+      // that the id exists at all - including for the inactive panel, which is hidden but present.
+      expect(container.querySelector(`#${controlledId}`)).not.toBeNull();
+    }
+  });
+
   it('keeps the conversation first in the document, so it stays the primary surface', () => {
     setViewportWidth(NARROW_WIDTH);
     renderPanel();
 
     const tabs = screen.getAllByRole('tab');
     expect(tabs[0]).toHaveTextContent('Conversation');
+  });
+});
+
+describe('WorkspacePanel across a breakpoint transition', () => {
+  it('keeps the conversation and workspace mounted - not remounted - when the viewport crosses the breakpoint and back', async () => {
+    setViewportWidth(DESKTOP_WIDTH);
+    render(
+      <WorkspacePanel
+        conversation={<StatefulProbe testId="conversation-probe" />}
+        workspace={<StatefulProbe testId="workspace-probe" />}
+      />,
+    );
+
+    const conversationProbe = screen.getByTestId('conversation-probe');
+    const workspaceProbe = screen.getByTestId('workspace-probe');
+
+    await userEvent.click(within(conversationProbe).getByRole('button'));
+    await userEvent.click(within(conversationProbe).getByRole('button'));
+    await userEvent.click(within(workspaceProbe).getByRole('button'));
+
+    expect(conversationProbe).toHaveTextContent('2');
+    expect(workspaceProbe).toHaveTextContent('1');
+
+    act(() => {
+      setViewportWidth(NARROW_WIDTH);
+    });
+
+    // The layout genuinely changed to the narrow, tabbed arrangement...
+    expect(screen.getByRole('tablist')).toBeInTheDocument();
+    // ...yet both probes are the very same DOM nodes, with their state intact - proof neither
+    // was unmounted and remounted by the transition.
+    expect(screen.getByTestId('conversation-probe')).toBe(conversationProbe);
+    expect(screen.getByTestId('workspace-probe')).toBe(workspaceProbe);
+    expect(conversationProbe).toHaveTextContent('2');
+    expect(workspaceProbe).toHaveTextContent('1');
+
+    act(() => {
+      setViewportWidth(DESKTOP_WIDTH);
+    });
+
+    expect(screen.queryByRole('tablist')).not.toBeInTheDocument();
+    expect(screen.getByTestId('conversation-probe')).toBe(conversationProbe);
+    expect(screen.getByTestId('workspace-probe')).toBe(workspaceProbe);
+    expect(conversationProbe).toHaveTextContent('2');
+    expect(workspaceProbe).toHaveTextContent('1');
+  });
+
+  it('unsubscribes its media query listener when unmounted', () => {
+    setViewportWidth(DESKTOP_WIDTH);
+    const originalMatchMedia = window.matchMedia;
+    const subscriptions: { addSpy: ReturnType<typeof vi.spyOn>; removeSpy: ReturnType<typeof vi.spyOn> }[] = [];
+
+    // useMediaQuery reads a fresh MediaQueryList on every render (for its snapshot) as well as one
+    // to subscribe to, so every list this test sees is spied on, and the subscribed one - the one
+    // that actually gets an `addEventListener` call - is picked out afterwards.
+    window.matchMedia = (query: string) => {
+      const list = originalMatchMedia(query);
+      subscriptions.push({
+        addSpy: vi.spyOn(list, 'addEventListener'),
+        removeSpy: vi.spyOn(list, 'removeEventListener'),
+      });
+      return list;
+    };
+
+    const { unmount } = renderPanel();
+
+    const subscribed = subscriptions.find(({ addSpy }) => addSpy.mock.calls.length > 0);
+    expect(subscribed).toBeDefined();
+    const [, listener] = subscribed!.addSpy.mock.calls[0];
+
+    unmount();
+    window.matchMedia = originalMatchMedia;
+
+    expect(subscribed!.removeSpy).toHaveBeenCalledWith('change', listener);
   });
 });

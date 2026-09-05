@@ -111,9 +111,11 @@ code {
 }
 
 /*
-  Conversation primary at every width. On a wide viewport the workspace sits beside it and the
-  conversation gets the larger column; below the breakpoint they stack behind a tab list, which is
-  where WorkspacePanel switches to an ARIA tab pattern so the DOM says exactly what the screen shows.
+  Conversation primary at every width. `main` is always the layout's own grid container and always
+  has the same three children - the tab list, the conversation panel, and the Inventory panel - so a
+  breakpoint change only ever changes their attributes and visibility, never which subtrees exist (see
+  WorkspacePanel). On a wide viewport the tab list collapses out of the grid and the two panels sit
+  side by side; below the breakpoint they stack behind the tab list instead.
 */
 .workspace-layout {
   display: grid;
@@ -143,6 +145,16 @@ code {
   gap: 8px;
   border-bottom: 1px solid var(--border);
   margin-bottom: 16px;
+}
+
+/*
+  An author style always outranks the `[hidden]` attribute's own display:none, regardless of
+  specificity, so the tab list's own `display: flex` needs this to actually disappear (and stop
+  taking a grid cell) on a wide viewport - `hidden` alone still keeps it out of the accessibility
+  tree and the tab order either way, but this keeps the visual result honest too.
+*/
+.workspace-tabs[hidden] {
+  display: none;
 }
 
 .workspace-tabs [role='tab'] {

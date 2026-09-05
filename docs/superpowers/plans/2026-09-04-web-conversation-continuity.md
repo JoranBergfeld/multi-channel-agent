@@ -8695,8 +8695,9 @@ git commit -m "feat: add the Participant-level Inventory invalidation stream cli
 Create `src/web/src/WorkspacePanel.test.tsx`:
 
 ```tsx
-import { describe, expect, it } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { useState } from 'react';
+import { describe, expect, it, vi } from 'vitest';
+import { act, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { DESKTOP_WIDTH, NARROW_WIDTH, setViewportWidth } from './testing/setup';
 import WorkspacePanel from './WorkspacePanel';
@@ -8707,6 +8708,19 @@ function renderPanel() {
       conversation={<p>Conversation content</p>}
       workspace={<p>Workspace content</p>}
     />,
+  );
+}
+
+/** A probe that proves whether it was remounted: its count only ever survives if React kept it. */
+function StatefulProbe({ testId }: { testId: string }) {
+  const [count, setCount] = useState(0);
+
+  return (
+    <div data-testid={testId}>
+      <button type="button" onClick={() => setCount((value) => value + 1)}>
+        {count}
+      </button>
+    </div>
   );
 }
 
@@ -8762,15 +8776,17 @@ describe('WorkspacePanel on a narrow viewport', () => {
     expect(tabs[1]).toHaveAttribute('aria-selected', 'false');
   });
 
-  it('shows only the selected panel', () => {
+  it('hides the inactive panel from assistive technology and the tab order, without unmounting it', () => {
     setViewportWidth(NARROW_WIDTH);
     renderPanel();
 
+    // Still mounted - so no in-flight state, stream, or focus it might hold is discarded - just
+    // out of the accessibility tree and the tab order, which is what "shows only" has to mean here.
     expect(screen.getByRole('tabpanel')).toHaveTextContent('Conversation content');
-    expect(screen.queryByText('Workspace content')).not.toBeInTheDocument();
+    expect(screen.getByText('Workspace content')).not.toBeVisible();
   });
 
-  it('switches panels when a tab is chosen', async () => {
+  it('switches panels when a tab is chosen, hiding the other without unmounting it', async () => {
     setViewportWidth(NARROW_WIDTH);
     renderPanel();
 
@@ -8778,6 +8794,7 @@ describe('WorkspacePanel on a narrow viewport', () => {
 
     expect(screen.getByRole('tabpanel')).toHaveTextContent('Workspace content');
     expect(screen.getByRole('tab', { name: 'Inventory' })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByText('Conversation content')).not.toBeVisible();
   });
 
   it('moves between tabs with the arrow keys, and only the selected tab is in the tab order', async () => {
@@ -8810,12 +8827,99 @@ describe('WorkspacePanel on a narrow viewport', () => {
     expect(tab).toHaveAttribute('aria-controls', panel.id);
   });
 
+  it("keeps both panels present, so neither tab's aria-controls ever points at a missing element", () => {
+    setViewportWidth(NARROW_WIDTH);
+    const { container } = renderPanel();
+
+    for (const tab of screen.getAllByRole('tab')) {
+      const controlledId = tab.getAttribute('aria-controls');
+      expect(controlledId).toBeTruthy();
+      // Queried directly on the DOM, not through an accessibility-tree query, since the point is
+      // that the id exists at all - including for the inactive panel, which is hidden but present.
+      expect(container.querySelector(`#${controlledId}`)).not.toBeNull();
+    }
+  });
+
   it('keeps the conversation first in the document, so it stays the primary surface', () => {
     setViewportWidth(NARROW_WIDTH);
     renderPanel();
 
     const tabs = screen.getAllByRole('tab');
     expect(tabs[0]).toHaveTextContent('Conversation');
+  });
+});
+
+describe('WorkspacePanel across a breakpoint transition', () => {
+  it('keeps the conversation and workspace mounted - not remounted - when the viewport crosses the breakpoint and back', async () => {
+    setViewportWidth(DESKTOP_WIDTH);
+    render(
+      <WorkspacePanel
+        conversation={<StatefulProbe testId="conversation-probe" />}
+        workspace={<StatefulProbe testId="workspace-probe" />}
+      />,
+    );
+
+    const conversationProbe = screen.getByTestId('conversation-probe');
+    const workspaceProbe = screen.getByTestId('workspace-probe');
+
+    await userEvent.click(within(conversationProbe).getByRole('button'));
+    await userEvent.click(within(conversationProbe).getByRole('button'));
+    await userEvent.click(within(workspaceProbe).getByRole('button'));
+
+    expect(conversationProbe).toHaveTextContent('2');
+    expect(workspaceProbe).toHaveTextContent('1');
+
+    act(() => {
+      setViewportWidth(NARROW_WIDTH);
+    });
+
+    // The layout genuinely changed to the narrow, tabbed arrangement...
+    expect(screen.getByRole('tablist')).toBeInTheDocument();
+    // ...yet both probes are the very same DOM nodes, with their state intact - proof neither
+    // was unmounted and remounted by the transition.
+    expect(screen.getByTestId('conversation-probe')).toBe(conversationProbe);
+    expect(screen.getByTestId('workspace-probe')).toBe(workspaceProbe);
+    expect(conversationProbe).toHaveTextContent('2');
+    expect(workspaceProbe).toHaveTextContent('1');
+
+    act(() => {
+      setViewportWidth(DESKTOP_WIDTH);
+    });
+
+    expect(screen.queryByRole('tablist')).not.toBeInTheDocument();
+    expect(screen.getByTestId('conversation-probe')).toBe(conversationProbe);
+    expect(screen.getByTestId('workspace-probe')).toBe(workspaceProbe);
+    expect(conversationProbe).toHaveTextContent('2');
+    expect(workspaceProbe).toHaveTextContent('1');
+  });
+
+  it('unsubscribes its media query listener when unmounted', () => {
+    setViewportWidth(DESKTOP_WIDTH);
+    const originalMatchMedia = window.matchMedia;
+    const subscriptions: { addSpy: ReturnType<typeof vi.spyOn>; removeSpy: ReturnType<typeof vi.spyOn> }[] = [];
+
+    // useMediaQuery reads a fresh MediaQueryList on every render (for its snapshot) as well as one
+    // to subscribe to, so every list this test sees is spied on, and the subscribed one - the one
+    // that actually gets an `addEventListener` call - is picked out afterwards.
+    window.matchMedia = (query: string) => {
+      const list = originalMatchMedia(query);
+      subscriptions.push({
+        addSpy: vi.spyOn(list, 'addEventListener'),
+        removeSpy: vi.spyOn(list, 'removeEventListener'),
+      });
+      return list;
+    };
+
+    const { unmount } = renderPanel();
+
+    const subscribed = subscriptions.find(({ addSpy }) => addSpy.mock.calls.length > 0);
+    expect(subscribed).toBeDefined();
+    const [, listener] = subscribed!.addSpy.mock.calls[0];
+
+    unmount();
+    window.matchMedia = originalMatchMedia;
+
+    expect(subscribed!.removeSpy).toHaveBeenCalledWith('change', listener);
   });
 });
 ```
@@ -8830,7 +8934,7 @@ Expected: FAIL with `Failed to resolve import "./WorkspacePanel"`.
 Create `src/web/src/useMediaQuery.ts`:
 
 ```ts
-import { useEffect, useState } from 'react';
+import { useSyncExternalStore } from 'react';
 
 /**
  * Whether the viewport currently matches a CSS media query, kept up to date as it changes.
@@ -8839,21 +8943,22 @@ import { useEffect, useState } from 'react';
  * is behind a tab, and a tab whose panel is merely hidden with CSS is still in the accessibility
  * tree, still focusable, and still read out. Deciding it here means the DOM says what the screen
  * shows.
+ *
+ * Reads through `useSyncExternalStore` rather than an effect that calls `setState`: the browser's
+ * `MediaQueryList` is the external store, and this is its canonical synchronization hook - the first
+ * render already reflects the current viewport with no synchronize-after-paint flash, and no lint
+ * warning about calling `setState` synchronously inside an effect.
  */
 export function useMediaQuery(query: string): boolean {
-  const [matches, setMatches] = useState(() => window.matchMedia(query).matches);
+  return useSyncExternalStore(
+    (onStoreChange) => {
+      const list = window.matchMedia(query);
+      list.addEventListener('change', onStoreChange);
 
-  useEffect(() => {
-    const list = window.matchMedia(query);
-    const onChange = (event: MediaQueryListEvent) => setMatches(event.matches);
-
-    setMatches(list.matches);
-    list.addEventListener('change', onChange);
-
-    return () => list.removeEventListener('change', onChange);
-  }, [query]);
-
-  return matches;
+      return () => list.removeEventListener('change', onStoreChange);
+    },
+    () => window.matchMedia(query).matches,
+  );
 }
 
 /**
@@ -8886,32 +8991,23 @@ type TabId = (typeof TABS)[number]['id'];
 /**
  * The responsive frame: conversation primary, Inventory workspace beside it or behind a tab.
  *
- * On a wide viewport the conversation is the page's `main` landmark and the workspace is a
- * `complementary` one beside it, which is what "conversation primary with a live workspace" means to
- * a screen reader as much as to an eye. Below the breakpoint they cannot both be usable at once, so
- * the workspace moves behind an ARIA tab list *inside* that same `main` landmark - the landmark never
- * disappears - and only the selected panel is rendered at all, so a hidden panel is never quietly
- * focusable or read out.
+ * Renders one tree shape at every width - a `main` landmark that always wraps the same three
+ * children, in the same order: the tab list, the conversation panel, and the Inventory panel. Only
+ * their attributes and visibility respond to the viewport, never their presence, so `conversation`
+ * and `workspace` are never unmounted (and never lose their state, in-flight streams, or focus) by a
+ * breakpoint change. On a wide viewport the tab list is inert and the Inventory panel is a
+ * `complementary` landmark beside the conversation; below the breakpoint the Inventory panel becomes
+ * an ARIA tabpanel and the tab list switches between them. Either way the inactive panel - if any -
+ * is taken out of the accessibility tree and the tab order with the semantic `hidden` attribute
+ * instead of being removed, so both panel ids always exist for the tabs' `aria-controls` to point at.
  *
- * The conversation comes first in document order at every width, and its tab is selected by default.
- * Document order is what decides reading order and default focus order, so this - not CSS placement -
- * is what actually makes the conversation primary.
+ * The conversation panel is always first in document order, and its tab is selected by default, which
+ * is what actually keeps it primary - CSS placement doesn't decide reading or default focus order.
  */
 function WorkspacePanel({ conversation, workspace }: WorkspacePanelProps) {
   const isNarrow = useMediaQuery(NARROW_SCREEN_QUERY);
   const [selected, setSelected] = useState<TabId>('conversation');
   const tabRefs = useRef<Record<TabId, HTMLButtonElement | null>>({ conversation: null, workspace: null });
-
-  if (!isNarrow) {
-    return (
-      <div className="workspace-layout">
-        <main className="workspace-conversation">{conversation}</main>
-        <aside className="workspace-panel" aria-label="Inventory workspace">
-          {workspace}
-        </aside>
-      </div>
-    );
-  }
 
   const select = (id: TabId) => {
     setSelected(id);
@@ -8937,15 +9033,20 @@ function WorkspacePanel({ conversation, workspace }: WorkspacePanelProps) {
   };
 
   return (
-    <div className="workspace-layout workspace-layout-narrow">
+    <main className={isNarrow ? 'workspace-layout workspace-layout-narrow' : 'workspace-layout'}>
       {/*
-        The main landmark survives the narrow layout. Putting role="tabpanel" on <main> would replace
-        its implicit role and leave the page with no main at all - precisely when a screen-reader user
-        skipping to content needs one most - so the tab list and the one rendered panel live inside it.
+        Always rendered at this same position so its (dis)appearance from an assistive-technology
+        or visual point of view never shifts the panels below it - only its role and content are
+        conditional on the viewport, never its presence in the tree.
       */}
-      <main className="workspace-conversation">
-        <div role="tablist" aria-label="Workspace sections" className="workspace-tabs">
-          {TABS.map((tab) => (
+      <div
+        role={isNarrow ? 'tablist' : undefined}
+        aria-label={isNarrow ? 'Workspace sections' : undefined}
+        hidden={!isNarrow}
+        className="workspace-tabs"
+      >
+        {isNarrow &&
+          TABS.map((tab) => (
             <button
               key={tab.id}
               id={`workspace-tab-${tab.id}`}
@@ -8964,18 +9065,31 @@ function WorkspacePanel({ conversation, workspace }: WorkspacePanelProps) {
               {tab.label}
             </button>
           ))}
-        </div>
+      </div>
 
-        <div
-          id={`workspace-panel-${selected}`}
-          role="tabpanel"
-          aria-labelledby={`workspace-tab-${selected}`}
-          tabIndex={0}
-        >
-          {selected === 'conversation' ? conversation : workspace}
-        </div>
-      </main>
-    </div>
+      <div
+        id="workspace-panel-conversation"
+        className="workspace-conversation"
+        role={isNarrow ? 'tabpanel' : undefined}
+        aria-labelledby={isNarrow ? 'workspace-tab-conversation' : undefined}
+        hidden={isNarrow && selected !== 'conversation'}
+        tabIndex={isNarrow ? 0 : undefined}
+      >
+        {conversation}
+      </div>
+
+      <aside
+        id="workspace-panel-workspace"
+        className="workspace-panel"
+        aria-label={isNarrow ? undefined : 'Inventory workspace'}
+        role={isNarrow ? 'tabpanel' : undefined}
+        aria-labelledby={isNarrow ? 'workspace-tab-workspace' : undefined}
+        hidden={isNarrow && selected !== 'workspace'}
+        tabIndex={isNarrow ? 0 : undefined}
+      >
+        {workspace}
+      </aside>
+    </main>
   );
 }
 
@@ -8988,9 +9102,11 @@ Append to `src/web/src/index.css`:
 
 ```css
 /*
-  Conversation primary at every width. On a wide viewport the workspace sits beside it and the
-  conversation gets the larger column; below the breakpoint they stack behind a tab list, which is
-  where WorkspacePanel switches to an ARIA tab pattern so the DOM says exactly what the screen shows.
+  Conversation primary at every width. `main` is always the layout's own grid container and always
+  has the same three children - the tab list, the conversation panel, and the Inventory panel - so a
+  breakpoint change only ever changes their attributes and visibility, never which subtrees exist (see
+  WorkspacePanel). On a wide viewport the tab list collapses out of the grid and the two panels sit
+  side by side; below the breakpoint they stack behind the tab list instead.
 */
 .workspace-layout {
   display: grid;
@@ -9020,6 +9136,16 @@ Append to `src/web/src/index.css`:
   gap: 8px;
   border-bottom: 1px solid var(--border);
   margin-bottom: 16px;
+}
+
+/*
+  An author style always outranks the `[hidden]` attribute's own display:none, regardless of
+  specificity, so the tab list's own `display: flex` needs this to actually disappear (and stop
+  taking a grid cell) on a wide viewport - `hidden` alone still keeps it out of the accessibility
+  tree and the tab order either way, but this keeps the visual result honest too.
+*/
+.workspace-tabs[hidden] {
+  display: none;
 }
 
 .workspace-tabs [role='tab'] {
@@ -9058,12 +9184,12 @@ Append to `src/web/src/index.css`:
 - [ ] **Step 6: Run the tests to verify they pass**
 
 Run: `cd src/web && npm test`
-Expected: PASS, 10 new tests.
+Expected: PASS, 13 new tests. (The first pass through this task only writes 10 - the desktop and narrow-viewport describes. A quality review then found that the desktop/narrow trees were structurally incompatible, so a breakpoint change unmounted and remounted `conversation` and `workspace`, discarding whatever state, in-flight stream, or focus they held; and that the old `useEffect`-based `useMediaQuery` was oxlint's only `react(set-state-in-effect)` warning in the web app. Steps 3-5 above already carry the fix - one stable tree shape, `hidden` instead of conditional unmounting, and `useSyncExternalStore` - and the test file above already carries the 3 tests that pin it down: the transition test proving both children's identity and state survive a round trip across the breakpoint, the unmount test proving the media query subscription is cleaned up, and the `aria-controls` test proving both panel ids are always present.)
 
 - [ ] **Step 7: Check types and lint**
 
 Run: `cd src/web && npx tsc -b && npm run lint`
-Expected: no output from `tsc`, and no errors from oxlint.
+Expected: no output from `tsc`, and zero warnings or errors from oxlint - including the `react(set-state-in-effect)` warning the old `useEffect`-based hook produced, which `useSyncExternalStore` no longer triggers.
 
 - [ ] **Step 8: Commit**
 
@@ -10500,7 +10626,7 @@ export default App;
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `cd src/web && npm test`
-Expected: PASS. The whole web suite - roughly 66 tests across seven files - is green.
+Expected: PASS. The whole web suite - roughly 69 tests across seven files (Task 19's `WorkspacePanel.test.tsx` grew from 10 to 13 tests during that task's own quality-review hardening) - is green.
 
 - [ ] **Step 5: Check types, lint, and build**
 
@@ -10629,7 +10755,7 @@ If Step 6 changed nothing, skip this commit rather than creating an empty one.
 
 | # | Acceptance criterion (issue #35) | Where it is built | Where it is proved |
 | --- | --- | --- | --- |
-| 1 | Desktop and narrow-screen layouts keep conversation primary and expose an accessible live Inventory workspace | Task 19 (`WorkspacePanel`, `useMediaQuery`, `index.css`), Task 21 (`App` shell, always-visible Active Inventory) | `WorkspacePanel.test.tsx` (landmarks, DOM order, tab semantics, arrow-key navigation, panel labelling), `App.test.tsx` (conversation in `main` on desktop, conversation tab first and selected on narrow, header Active Inventory), Task 22 Step 7.1 |
+| 1 | Desktop and narrow-screen layouts keep conversation primary and expose an accessible live Inventory workspace | Task 19 (`WorkspacePanel`, `useMediaQuery`, `index.css`), Task 21 (`App` shell, always-visible Active Inventory) | `WorkspacePanel.test.tsx` (landmarks, DOM order, tab semantics, arrow-key navigation, panel labelling, both panel ids always present so no tab's `aria-controls` ever dangles, conversation and workspace identity and state preserved - not remounted - across a breakpoint transition and back, media query subscription cleaned up on unmount), `App.test.tsx` (conversation in `main` on desktop, conversation tab first and selected on narrow, header Active Inventory), Task 22 Step 7.1 |
 | 2 | Typed Turns return stable Turn IDs and publish finite resumable SSE progress, semantic parts, and terminal Outcomes with event IDs | Task 1 (fixed sequences), Task 2 (`processing`), Task 3 (`TurnEventReader`), Task 4 (durable progress rows), Task 5 (retention), Task 6 (`GET /api/turns/{id}/events`), Task 16 (client) | `TurnStreamEventTests`, `TurnEventReaderTests` (ordering, replay, terminal, swept log, single-line data), `TurnEventStreamHttpTests` (full order with ids, resume by query and by header, ignored bad resume point, finite terminal, framing, keep-alive heartbeat), `turnStream.test.ts`, `WebConversationContinuitySqlScenarioTests` on real SQL Server. Honest scope: progress is incremental (`accepted`, then `processing`); the semantic parts are projected from the recorded Outcome and therefore arrive with the terminal event - stated in D1 and in Known limits |
 | 3 | A separate Participant-level SSE stream invalidates Inventory projections after changes from any channel | Task 7 (version bump at the persistence seam, no foreign key), Task 8 (`InventoryInvalidationReader`, `GET /api/inventory-events`), Task 18 (client), Task 21 (`App` wiring) | `InventoryVersionBumpTests` (one bump per audited commit, none on denial, none on rollback, independent per Inventory, no foreign key, fallback insertion), `InventoryInvalidationReaderTests`, `InventoryEventStreamHttpTests` (snapshot, change via the conversational worker, change by another Participant over HTTP, revocation, non-disclosure, and a change made while nothing was connected arriving in the reconnect snapshot - the proof that no cursor is needed), `inventoryStream.test.ts`, `App.test.tsx` (version-driven refetch, and a local signal never swallowing the server's next version), `WebConversationContinuitySqlScenarioTests` (a genuinely concurrent pair of commits, asserted from a captured baseline) |
 | 4 | One browser-profile ChannelConversation resumes across refreshes, restarts, and tabs while preserving the shared FIFO queue | Shipped `WebConversationCookie` + `SqlInboxStore` FIFO, Task 17 (`conversationStorage`), Task 20 (mount-time resume, cross-tab `storage` subscription) | `SharedBrowserProfileScenario` (one ChannelConversation across tabs, one shared FIFO order, a second tab watching the first tab's Turn, identical replay on reconnect), `conversationStorage.test.ts`, `TurnTracer.test.tsx` (resume on mount, adopt another tab's Turn), Task 22 Step 7.3 |
