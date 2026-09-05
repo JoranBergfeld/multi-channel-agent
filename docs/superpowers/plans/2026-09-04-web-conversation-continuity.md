@@ -9272,7 +9272,7 @@ function TurnTracer({ csrfToken, webConversationId, onTerminalOutcome, createSou
             onTerminalOutcome();
           },
         },
-        createSource,
+        factory: createSource,
       });
     },
     [createSource, onTerminalOutcome, webConversationId],
