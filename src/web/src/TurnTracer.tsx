@@ -398,8 +398,23 @@ function TurnTracer({ csrfToken, webConversationId, participantId, onTerminalOut
     }
 
     if (stored.turnId !== null) {
-      // A pure read. Reconnecting never resubmits.
+      // A pure read. Reconnecting never resubmits. Works the same whether or not contentText was
+      // redacted, since nothing here needs it.
       watchTurn(stored.turnId);
+      return;
+    }
+
+    if (stored.contentText === null) {
+      // A confirmation's token is deliberately never persisted (see conversationStorage's own
+      // redaction), so its response being lost leaves nothing safe to resubmit - guessing or
+      // reconstructing the command is not an option, and this is the one narrow case that cannot be
+      // resumed automatically. Clear the record - compare-based, only if it is still this exact
+      // submission - so this state is never repeatedly re-attempted, and say so plainly rather than
+      // silently doing nothing.
+      clearInFlightTurnIfMatches(webConversationId, participantId, { nativeMessageId: stored.nativeMessageId });
+      setError(
+        'A confirmation was submitted but could not be resumed automatically. Check the current Inventory state before trying again.',
+      );
       return;
     }
 

@@ -83,6 +83,19 @@ describe('readInFlightTurn', () => {
       turnId: 'turn-1',
     })
   })
+
+  it('accepts a stored record whose contentText is null, exactly as a redacted confirmation writes it', () => {
+    localStorage.setItem(
+      rawKeyFor(CONVERSATION, PARTICIPANT),
+      JSON.stringify({ nativeMessageId: 'native-1', contentText: null, turnId: null }),
+    )
+
+    expect(readInFlightTurn(CONVERSATION, PARTICIPANT)).toEqual({
+      nativeMessageId: 'native-1',
+      contentText: null,
+      turnId: null,
+    })
+  })
 })
 
 describe('rememberSubmission', () => {
@@ -103,6 +116,59 @@ describe('rememberSubmission', () => {
     expect(raw).not.toBeNull()
     const parsed = JSON.parse(raw!) as Record<string, unknown>
     expect(Object.keys(parsed).sort()).toEqual(['contentText', 'nativeMessageId', 'turnId'])
+  })
+})
+
+describe('rememberSubmission redacting a confirmation command', () => {
+  it('redacts a confirm command\'s content to null, keeping the token out of raw localStorage and the record\'s three approved keys intact', () => {
+    rememberSubmission(CONVERSATION, PARTICIPANT, {
+      nativeMessageId: 'native-1',
+      contentText: 'confirm FAKE-TOKEN-DO-NOT-LOG',
+    })
+
+    const raw = localStorage.getItem(rawKeyFor(CONVERSATION, PARTICIPANT))
+    expect(raw).not.toBeNull()
+    expect(raw).not.toContain('FAKE-TOKEN-DO-NOT-LOG')
+    expect(raw).not.toContain('confirm')
+
+    const parsed = JSON.parse(raw!) as Record<string, unknown>
+    expect(Object.keys(parsed).sort()).toEqual(['contentText', 'nativeMessageId', 'turnId'])
+    expect(readInFlightTurn(CONVERSATION, PARTICIPANT)).toEqual({
+      nativeMessageId: 'native-1',
+      contentText: null,
+      turnId: null,
+    })
+  })
+
+  it('recognizes the confirm command leniently by case and whitespace, and only that shape', () => {
+    rememberSubmission(CONVERSATION, PARTICIPANT, {
+      nativeMessageId: 'native-1',
+      contentText: '  CONFIRM   FAKE-TOKEN-DO-NOT-LOG  ',
+    })
+    expect(readInFlightTurn(CONVERSATION, PARTICIPANT)?.contentText).toBeNull()
+
+    rememberSubmission(CONVERSATION, PARTICIPANT, {
+      nativeMessageId: 'native-2',
+      contentText: 'Confirm fake-token-do-not-log',
+    })
+    expect(readInFlightTurn(CONVERSATION, PARTICIPANT)?.contentText).toBeNull()
+
+    // Neither carries a token - a bare "confirm" with nothing after it, and a sentence that merely
+    // mentions the word - so neither is secret, and both are stored exactly as typed.
+    rememberSubmission(CONVERSATION, PARTICIPANT, { nativeMessageId: 'native-3', contentText: 'confirm' })
+    expect(readInFlightTurn(CONVERSATION, PARTICIPANT)?.contentText).toBe('confirm')
+
+    rememberSubmission(CONVERSATION, PARTICIPANT, {
+      nativeMessageId: 'native-4',
+      contentText: 'please confirm this order',
+    })
+    expect(readInFlightTurn(CONVERSATION, PARTICIPANT)?.contentText).toBe('please confirm this order')
+
+    rememberSubmission(CONVERSATION, PARTICIPANT, { nativeMessageId: 'native-5', contentText: 'reject' })
+    expect(readInFlightTurn(CONVERSATION, PARTICIPANT)?.contentText).toBe('reject')
+
+    rememberSubmission(CONVERSATION, PARTICIPANT, { nativeMessageId: 'native-6', contentText: 'list stock' })
+    expect(readInFlightTurn(CONVERSATION, PARTICIPANT)?.contentText).toBe('list stock')
   })
 })
 

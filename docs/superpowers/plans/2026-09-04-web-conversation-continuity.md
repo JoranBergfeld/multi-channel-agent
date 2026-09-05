@@ -8174,6 +8174,19 @@ describe('readInFlightTurn', () => {
       turnId: 'turn-1',
     })
   })
+
+  it('accepts a stored record whose contentText is null, exactly as a redacted confirmation writes it', () => {
+    localStorage.setItem(
+      rawKeyFor(CONVERSATION, PARTICIPANT),
+      JSON.stringify({ nativeMessageId: 'native-1', contentText: null, turnId: null }),
+    )
+
+    expect(readInFlightTurn(CONVERSATION, PARTICIPANT)).toEqual({
+      nativeMessageId: 'native-1',
+      contentText: null,
+      turnId: null,
+    })
+  })
 })
 
 describe('rememberSubmission', () => {
@@ -8194,6 +8207,59 @@ describe('rememberSubmission', () => {
     expect(raw).not.toBeNull()
     const parsed = JSON.parse(raw!) as Record<string, unknown>
     expect(Object.keys(parsed).sort()).toEqual(['contentText', 'nativeMessageId', 'turnId'])
+  })
+})
+
+describe('rememberSubmission redacting a confirmation command', () => {
+  it('redacts a confirm command\'s content to null, keeping the token out of raw localStorage and the record\'s three approved keys intact', () => {
+    rememberSubmission(CONVERSATION, PARTICIPANT, {
+      nativeMessageId: 'native-1',
+      contentText: 'confirm FAKE-TOKEN-DO-NOT-LOG',
+    })
+
+    const raw = localStorage.getItem(rawKeyFor(CONVERSATION, PARTICIPANT))
+    expect(raw).not.toBeNull()
+    expect(raw).not.toContain('FAKE-TOKEN-DO-NOT-LOG')
+    expect(raw).not.toContain('confirm')
+
+    const parsed = JSON.parse(raw!) as Record<string, unknown>
+    expect(Object.keys(parsed).sort()).toEqual(['contentText', 'nativeMessageId', 'turnId'])
+    expect(readInFlightTurn(CONVERSATION, PARTICIPANT)).toEqual({
+      nativeMessageId: 'native-1',
+      contentText: null,
+      turnId: null,
+    })
+  })
+
+  it('recognizes the confirm command leniently by case and whitespace, and only that shape', () => {
+    rememberSubmission(CONVERSATION, PARTICIPANT, {
+      nativeMessageId: 'native-1',
+      contentText: '  CONFIRM   FAKE-TOKEN-DO-NOT-LOG  ',
+    })
+    expect(readInFlightTurn(CONVERSATION, PARTICIPANT)?.contentText).toBeNull()
+
+    rememberSubmission(CONVERSATION, PARTICIPANT, {
+      nativeMessageId: 'native-2',
+      contentText: 'Confirm fake-token-do-not-log',
+    })
+    expect(readInFlightTurn(CONVERSATION, PARTICIPANT)?.contentText).toBeNull()
+
+    // Neither carries a token - a bare "confirm" with nothing after it, and a sentence that merely
+    // mentions the word - so neither is secret, and both are stored exactly as typed.
+    rememberSubmission(CONVERSATION, PARTICIPANT, { nativeMessageId: 'native-3', contentText: 'confirm' })
+    expect(readInFlightTurn(CONVERSATION, PARTICIPANT)?.contentText).toBe('confirm')
+
+    rememberSubmission(CONVERSATION, PARTICIPANT, {
+      nativeMessageId: 'native-4',
+      contentText: 'please confirm this order',
+    })
+    expect(readInFlightTurn(CONVERSATION, PARTICIPANT)?.contentText).toBe('please confirm this order')
+
+    rememberSubmission(CONVERSATION, PARTICIPANT, { nativeMessageId: 'native-5', contentText: 'reject' })
+    expect(readInFlightTurn(CONVERSATION, PARTICIPANT)?.contentText).toBe('reject')
+
+    rememberSubmission(CONVERSATION, PARTICIPANT, { nativeMessageId: 'native-6', contentText: 'list stock' })
+    expect(readInFlightTurn(CONVERSATION, PARTICIPANT)?.contentText).toBe('list stock')
   })
 })
 
@@ -8394,15 +8460,30 @@ Create `src/web/src/conversationStorage.ts`:
 
 const KEY_PREFIX = 'mca.conversation.'
 
-/** One browser profile's outstanding Turn for a single web conversation. */
+/** One browser profile's outstanding Turn for a single web conversation. `contentText` is `null`
+ * exactly when the original message was a confirmation command - see `redactedContentText` below -
+ * so the resumption breadcrumb it carries is never a live single-use secret at rest. */
 export interface InFlightTurn {
   nativeMessageId: string
-  contentText: string
+  contentText: string | null
   turnId: string | null
 }
 
 function keyFor(webConversationId: string, participantId: string): string {
   return `${KEY_PREFIX}${webConversationId}.${participantId}`
+}
+
+/** This application's confirmation command shape - `confirm <token>` - tolerant of the same
+ * surrounding whitespace and case the server's own command grammar is, since a Participant can type
+ * it by hand exactly as readily as the UI's own "Confirm" button constructs it. */
+const CONFIRMATION_COMMAND = /^\s*confirm\s+\S+\s*$/i
+
+/** Redacts a confirmation command's content to `null` before it is ever persisted - its token is a
+ * single-use secret the Participant must be able to quote back, not something this browser profile
+ * should still hold once it has been typed. Anything else - including a bare "confirm" with no
+ * token, or a sentence that merely mentions the word - carries no secret and is returned unchanged. */
+function redactedContentText(contentText: string): string | null {
+  return CONFIRMATION_COMMAND.test(contentText) ? null : contentText
 }
 
 /** Runtime type guard: rejects anything that is not exactly the three-field shape above - no fewer
@@ -8420,7 +8501,7 @@ function isInFlightTurn(value: unknown): value is InFlightTurn {
   return (
     Object.keys(record).length === 3 &&
     typeof record.nativeMessageId === 'string' &&
-    typeof record.contentText === 'string' &&
+    (record.contentText === null || typeof record.contentText === 'string') &&
     (record.turnId === null || typeof record.turnId === 'string')
   )
 }
@@ -8448,13 +8529,18 @@ export function readInFlightTurn(webConversationId: string, participantId: strin
 
 /** Records a just-submitted message as the conversation's in-flight Turn, overwriting whatever
  * was there before for this Participant. `turnId` is always null here: it is filled in later, by
- * `rememberTurnId`, once the HTTP response naming the Turn actually arrives. */
+ * `rememberTurnId`, once the HTTP response naming the Turn actually arrives. `contentText` is
+ * redacted to `null` first if the message was a confirmation command - see `redactedContentText`. */
 export function rememberSubmission(
   webConversationId: string,
   participantId: string,
   submission: { nativeMessageId: string; contentText: string },
 ): void {
-  const record: InFlightTurn = { ...submission, turnId: null }
+  const record: InFlightTurn = {
+    nativeMessageId: submission.nativeMessageId,
+    contentText: redactedContentText(submission.contentText),
+    turnId: null,
+  }
   localStorage.setItem(keyFor(webConversationId, participantId), JSON.stringify(record))
 }
 
@@ -8544,11 +8630,13 @@ export function subscribeToConversationChanges(
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `cd src/web && npm test`
-Expected: PASS, all 24 tests from Step 1 (which includes a hardening case proving `rememberTurnId` never silently creates a record when there is no existing submission to update, a case proving a stale response for a superseded submission never overwrites the submission that replaced it, and a case proving a record with a valid shape plus an unexpected extra field is rejected outright rather than partly trusted).
+Expected: PASS, all 27 tests from Step 1 (which includes a hardening case proving `rememberTurnId` never silently creates a record when there is no existing submission to update, a case proving a stale response for a superseded submission never overwrites the submission that replaced it, and a case proving a record with a valid shape plus an unexpected extra field is rejected outright rather than partly trusted).
 
 A quality review found a genuine gap in Steps 1-3 as first written: every record was keyed by `webConversationId` alone. The long-lived `WebConversationCookie` that id comes from survives a sign-out, so a second Participant signing in on the very same browser profile - before the first Participant's in-flight Turn ever resolved - could resume watching, or even resubmit with its idempotency key, a message that was never theirs. Every function now also takes `participantId` and folds it into the storage key (`mca.conversation.{webConversationId}.{participantId}`); `participantId` lives only in the key, never in the record's own three fields, so the stored shape and its privacy invariant are unchanged. Added a compare-and-delete `clearInFlightTurnIfMatches(webConversationId, participantId, { nativeMessageId } | { turnId })`, which Task 20 needs to keep one superseded Turn's belated completion from clearing a newer one's record - `clearInFlightTurn` itself stays as an unconditional remove, which Task 21's New conversation control still uses (now with both ids).
 
-Steps 1-3 above already carry this fix. Step 1's test file adds: two-Participant isolation for `readInFlightTurn` (including a message never leaking across a sign-out/sign-in on the same browser profile), `rememberTurnId` never stamping a Turn id onto another Participant's record, `clearInFlightTurn` never removing another Participant's record, five tests for the new `clearInFlightTurnIfMatches` (matches by `turnId`, leaves a superseding record alone by `turnId`, matches by `nativeMessageId`, leaves a superseding record alone by `nativeMessageId`, and does nothing when there is no record at all), and `subscribeToConversationChanges` ignoring a storage event for the same web conversation id but a different Participant. `conversationStorage.test.ts` grew from 14 to 24 tests.
+A second quality review found one more genuine gap: `rememberSubmission` persisted whatever `contentText` a Participant typed, unconditionally - including a real "confirm `<token>`" command, which is exactly the plaintext single-use confirmation token `StockProposalPayload`/`ReferenceProposalPayload` themselves warn against persisting. `contentText` is now `string | null`. `rememberSubmission` recognizes that shape - `confirm` (case-insensitive), one run of whitespace, a non-whitespace token, tolerating any surrounding whitespace, exactly as lenient as the server's own command grammar - and redacts it to `null` before it is ever serialized; anything else, including a bare `confirm` with no token or a sentence that merely mentions the word, is not the shape and carries no secret, so it is stored exactly as typed. `isInFlightTurn`'s shape guard now accepts `contentText: null` the same way it already accepted `turnId: null`. This is `conversationStorage`'s own half of a deliberate, narrow tradeoff - Task 20 carries the other half, and states it in Known limits: a confirmation whose response is lost can no longer be resumed automatically, because the token needed to resubmit it was never kept.
+
+Steps 1-3 above already carry both fixes. Step 1's test file adds: `readInFlightTurn` accepting a stored record whose `contentText` is `null` as a valid shape (the redaction the two tests below actually produce), and two tests for the redaction itself - one proving the token never reaches raw `localStorage` at all and the record keeps exactly its three approved keys, and one proving the shape is recognized leniently by case and whitespace while a bare `confirm`, a sentence that merely mentions it, `reject`, and an ordinary message are all left untouched. `conversationStorage.test.ts` grew from 14 to 24 tests during the first hardening pass, then to 27 during this one.
 
 - [ ] **Step 5: Commit**
 
@@ -9792,6 +9880,29 @@ describe('TurnTracer', () => {
     await waitFor(() => expect(opened[0].url).toBe('/api/turns/turn-recovered/events'));
   });
 
+  it('does not resubmit a confirmation whose token was never persisted, and says so plainly', async () => {
+    const fetchMock = stubFetch(() => acceptedResponse('turn-should-not-happen'));
+    // rememberSubmission itself redacts a confirm command's content to null - this is exactly the
+    // record a real "confirm <token>" submission whose response was lost would leave behind.
+    rememberSubmission(CONVERSATION, PARTICIPANT, {
+      nativeMessageId: 'native-confirm',
+      contentText: 'confirm FAKE-TOKEN-DO-NOT-LOG',
+    });
+
+    const { opened, factory } = recordingEventStreamFactory();
+    renderTracer(factory);
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'A confirmation was submitted but could not be resumed automatically. Check the current Inventory state before trying again.',
+    );
+
+    // There is nothing safe to resubmit - the token was deliberately never kept - so nothing is sent
+    // and no stream is ever opened for it.
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(opened).toHaveLength(0);
+    await waitFor(() => expect(readInFlightTurn(CONVERSATION, PARTICIPANT)).toBeNull());
+  });
+
   it('forgets the in-flight Turn once it has an answer', async () => {
     stubFetch(() => acceptedResponse('turn-1'));
     const { opened, factory } = recordingEventStreamFactory();
@@ -10039,6 +10150,44 @@ describe('TurnTracer', () => {
     expect(readInFlightTurn(CONVERSATION, PARTICIPANT)).toEqual(storedBeforeUnmount);
   });
 
+  it('closes an already-open stream on unmount, so a later event on it changes nothing', async () => {
+    stubFetch(() => acceptedResponse('turn-1'));
+    const onTerminalOutcome = vi.fn();
+    const { opened, factory } = recordingEventStreamFactory();
+    const { unmount } = render(
+      <TurnTracer
+        csrfToken="csrf-token"
+        webConversationId={CONVERSATION}
+        participantId={PARTICIPANT}
+        onTerminalOutcome={onTerminalOutcome}
+        createSource={factory}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole('button', { name: 'Send' }));
+    await waitFor(() => expect(opened).toHaveLength(1));
+    const stream = opened[0];
+    expect(stream.closed).toBe(false);
+
+    const storedBeforeUnmount = readInFlightTurn(CONVERSATION, PARTICIPANT);
+    expect(storedBeforeUnmount?.turnId).toBe('turn-1');
+
+    unmount();
+
+    // The cleanup this test exists to pin down: without it, this stream would still be open from
+    // openTurnStream's own point of view, and the emit below would still reach its handlers.
+    expect(stream.closed).toBe(true);
+
+    stream.emit(
+      'outcome',
+      { turnId: 'turn-1', status: 'completed', category: 'completed', code: 'echo', summary: 'Hi.', deliveries: [] },
+      '1000000',
+    );
+
+    expect(onTerminalOutcome).not.toHaveBeenCalled();
+    expect(readInFlightTurn(CONVERSATION, PARTICIPANT)).toEqual(storedBeforeUnmount);
+  });
+
   it('never renders a control that would change a quantity directly', async () => {
     stubFetch(() => acceptedResponse('turn-1'));
     const { factory } = recordingEventStreamFactory();
@@ -10281,8 +10430,23 @@ function TurnTracer({ csrfToken, webConversationId, participantId, onTerminalOut
     }
 
     if (stored.turnId !== null) {
-      // A pure read. Reconnecting never resubmits.
+      // A pure read. Reconnecting never resubmits. Works the same whether or not contentText was
+      // redacted, since nothing here needs it.
       watchTurn(stored.turnId);
+      return;
+    }
+
+    if (stored.contentText === null) {
+      // A confirmation's token is deliberately never persisted (see conversationStorage's own
+      // redaction), so its response being lost leaves nothing safe to resubmit - guessing or
+      // reconstructing the command is not an option, and this is the one narrow case that cannot be
+      // resumed automatically. Clear the record - compare-based, only if it is still this exact
+      // submission - so this state is never repeatedly re-attempted, and say so plainly rather than
+      // silently doing nothing.
+      clearInFlightTurnIfMatches(webConversationId, participantId, { nativeMessageId: stored.nativeMessageId });
+      setError(
+        'A confirmation was submitted but could not be resumed automatically. Check the current Inventory state before trying again.',
+      );
       return;
     }
 
@@ -10607,7 +10771,7 @@ Delete the now-unused `getTurnOutcome` import if the compiler reports it; the re
 - [ ] **Step 6: Run the tests to verify they pass**
 
 Run: `cd src/web && npm test`
-Expected: PASS, 15 new tests.
+Expected: PASS, 17 new tests.
 
 A quality review found one genuine bug in Steps 1-5 as first written: the mount-time resume effect had no cleanup, so React StrictMode's development-only mount → cleanup → mount cycle (`main.tsx` wraps `App` in `StrictMode`) opened a stream on the first mount, the close-on-unmount effect's cleanup then closed it, and the second mount's resume effect saw `resumeAttemptedRef.current` already `true` and skipped - leaving a resumed Turn with `watchedTurnRef` still claiming ownership of a stream that was actually dead, forever. The unknown-Turn-id (POST) path was never affected: its side effect (`watchTurn`, called from inside `resumeStoredTurn`) only runs after `await submitTurn(...)` resolves, strictly after StrictMode's synchronous mount/cleanup/mount has already finished, so there was only ever one fetch either way.
 
@@ -10621,7 +10785,15 @@ A second quality review found three further genuine bugs:
 
 3. **An async continuation could act after a real unmount.** Neither `resumeStoredTurn`'s nor `handleSubmit`'s `await submitTurn(...)` continuation checked whether the component was still mounted before opening a stream, writing storage, or calling `onTerminalOutcome` - so a response arriving after a real unmount (navigating away while a submission was still in flight) opened an `EventSource` nothing would ever close and could fire a stale callback into an unmounted tree. Added `mountedRef`, set `true` in a mount effect and `false` in its cleanup - the same StrictMode-compatible shape as the stream-ownership cleanup, and just as unaffected by StrictMode's simulated mount/cleanup/mount, which always flips it back to `true` long before any awaited response could arrive. Both continuations - and both `catch` blocks - now return immediately if `mountedRef.current` is `false`, before touching state, storage, a stream, or the parent callback.
 
-Steps 1-5 above already carry all four fixes and the tests that pin each one down: two tests proving StrictMode's mount/cleanup/mount recovers a live stream without reconnecting or resubmitting a live stream a second time (unchanged from the first hardening pass); one test submitting a Turn B while Turn A is still streaming and asserting A's belated Outcome neither renders nor touches B's stored record, and that B's own response still associates correctly afterward; and two tests - one for `handleSubmit`, one for `resumeStoredTurn`'s lost-response path, since they are separate continuations - unmounting while a submission is in flight, resolving it, and asserting no `EventSource` ever opens, the parent callback never fires, and the stored record is exactly what it was at the moment of unmount. `TurnTracer.test.tsx` grew from 12 to 15 tests (web suite: 65 to 78 tests across 7 files, following Task 17's own growth from 14 to 24 tests).
+Steps 1-5 above already carry all four fixes and the tests that pin each one down: two tests proving StrictMode's mount/cleanup/mount recovers a live stream without reconnecting or resubmitting a live stream a second time (unchanged from the first hardening pass); one test submitting a Turn B while Turn A is still streaming and asserting A's belated Outcome neither renders nor touches B's stored record, and that B's own response still associates correctly afterward; and two tests - one for `handleSubmit`, one for `resumeStoredTurn`'s lost-response path, since they are separate continuations - unmounting while a submission is in flight, resolving it, and asserting no `EventSource` ever opens, the parent callback never fires, and the stored record is exactly what it was at the moment of unmount. `TurnTracer.test.tsx` grew from 10 to 12 tests during the first hardening pass, then to 15 during this one (web suite: 65 to 78 tests across 7 files, following Task 17's own growth from 14 to 24 tests).
+
+A third quality review found two final findings:
+
+1. **Task 17's redaction is only half the fix.** Persisting `contentText: null` for a confirmation command (see Task 17's own Step 4) protects the token at rest, but its consequence lands here: if that confirmation's own submission response is lost before a Turn id is ever recorded, `resumeStoredTurn` used to resubmit whatever `contentText` it found - which is now `null`, since the token was deliberately never kept. `resumeStoredTurn` now checks for exactly that combination (`turnId` still `null`, `contentText` already `null`) before its resubmit branch, and - rather than resubmitting `null`, or silently doing nothing - clears the record with `clearInFlightTurnIfMatches` (compare-based, by `nativeMessageId`, the same discrimination every other clear here already uses) and surfaces a plain alert: a confirmation could not be resumed automatically, and the Participant should check the current Inventory state before trying again. Every other resume path is unaffected: a confirmation whose acceptance response *was* seen resumes exactly like any other Turn, by a pure `GET`, since that path never reads `contentText` at all. This is the one narrow, unavoidable, and now-documented tradeoff of never persisting the token in the first place - see Known limits.
+
+2. **The stream-ownership cleanup that made the first hardening pass's StrictMode fix possible had no test that would fail if it were later deleted.** Every existing test either never opened a stream before unmounting (the two async-continuation tests above), or never unmounted at all. Added a test that submits normally, confirms the opened fake source is not yet closed, unmounts, asserts that same source *is* now closed, and only then emits an Outcome on it - proving both that the cleanup ran and that `openTurnStream`'s own closed-gate makes the emission inert: no parent callback, and the stored record - which still names that Turn - untouched. Verified by temporarily deleting the cleanup's three lines and confirming this exact test fails (`stream.closed` stays `false`) before restoring them.
+
+Steps 1-5 above already carry both fixes and their two tests. `TurnTracer.test.tsx` grew from 15 to 17 tests (web suite: 78 to 83 tests across 7 files, following Task 17's own growth from 24 to 27 tests).
 
 - [ ] **Step 7: Check types and lint**
 
@@ -11313,7 +11485,7 @@ export default App;
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `cd src/web && npm test`
-Expected: PASS. The whole web suite - roughly 88 tests across eight files (Task 19's `WorkspacePanel.test.tsx` grew from 10 to 15 tests and gained a sibling `useMediaQuery.test.ts` with 2 tests, both during that task's own quality-review hardening; Task 17's `conversationStorage.test.ts` grew from 14 to 24 tests, and Task 20's `TurnTracer.test.tsx` grew from 10 to 15 tests, both during Task 20's own two quality-review hardening passes - StrictMode recovery, then Participant scope/superseded-Turn/unmount safety) - is green.
+Expected: PASS. The whole web suite - roughly 93 tests across eight files (Task 19's `WorkspacePanel.test.tsx` grew from 10 to 15 tests and gained a sibling `useMediaQuery.test.ts` with 2 tests, both during that task's own quality-review hardening; Task 17's `conversationStorage.test.ts` grew from 14 to 24 then to 27 tests, and Task 20's `TurnTracer.test.tsx` grew from 10 to 12 then to 15 then to 17 tests, across Task 20's own three quality-review hardening passes - StrictMode recovery, then Participant scope/superseded-Turn/unmount safety, then keeping a confirmation's token out of storage and proving the stream-close cleanup is actually tested) - is green.
 
 - [ ] **Step 5: Check types, lint, and build**
 
@@ -11445,8 +11617,8 @@ If Step 6 changed nothing, skip this commit rather than creating an empty one.
 | 1 | Desktop and narrow-screen layouts keep conversation primary and expose an accessible live Inventory workspace | Task 19 (`WorkspacePanel`, `useMediaQuery`, `index.css`), Task 21 (`App` shell, always-visible Active Inventory) | `WorkspacePanel.test.tsx` (landmarks, DOM order, tab semantics, arrow-key navigation, panel labelling, both panel ids always present so no tab's `aria-controls` ever dangles, conversation and workspace identity and state preserved - not remounted - across a breakpoint transition and back, media query subscription cleaned up on unmount, a focused element inside either panel stays visible and focused when narrowing even against a stale prior tab selection), `useMediaQuery.test.ts` (a stable subscription survives an unrelated rerender, a query change tears it down and starts a new one), `App.test.tsx` (conversation in `main` on desktop, conversation tab first and selected on narrow, header Active Inventory), Task 22 Step 7.1 |
 | 2 | Typed Turns return stable Turn IDs and publish finite resumable SSE progress, semantic parts, and terminal Outcomes with event IDs | Task 1 (fixed sequences), Task 2 (`processing`), Task 3 (`TurnEventReader`), Task 4 (durable progress rows), Task 5 (retention), Task 6 (`GET /api/turns/{id}/events`), Task 16 (client) | `TurnStreamEventTests`, `TurnEventReaderTests` (ordering, replay, terminal, swept log, single-line data), `TurnEventStreamHttpTests` (full order with ids, resume by query and by header, ignored bad resume point, finite terminal, framing, keep-alive heartbeat), `turnStream.test.ts`, `WebConversationContinuitySqlScenarioTests` on real SQL Server. Honest scope: progress is incremental (`accepted`, then `processing`); the semantic parts are projected from the recorded Outcome and therefore arrive with the terminal event - stated in D1 and in Known limits |
 | 3 | A separate Participant-level SSE stream invalidates Inventory projections after changes from any channel | Task 7 (version bump at the persistence seam, no foreign key), Task 8 (`InventoryInvalidationReader`, `GET /api/inventory-events`), Task 18 (client), Task 21 (`App` wiring) | `InventoryVersionBumpTests` (one bump per audited commit, none on denial, none on rollback, independent per Inventory, no foreign key, fallback insertion), `InventoryInvalidationReaderTests`, `InventoryEventStreamHttpTests` (snapshot, change via the conversational worker, change by another Participant over HTTP, revocation, non-disclosure, and a change made while nothing was connected arriving in the reconnect snapshot - the proof that no cursor is needed), `inventoryStream.test.ts`, `App.test.tsx` (version-driven refetch, and a local signal never swallowing the server's next version), `WebConversationContinuitySqlScenarioTests` (a genuinely concurrent pair of commits, asserted from a captured baseline) |
-| 4 | One browser-profile ChannelConversation resumes across refreshes, restarts, and tabs while preserving the shared FIFO queue | Shipped `WebConversationCookie` + `SqlInboxStore` FIFO, Task 17 (`conversationStorage`, scoped by both `webConversationId` and `participantId`), Task 20 (mount-time resume, cross-tab `storage` subscription) | `SharedBrowserProfileScenario` (one ChannelConversation across tabs, one shared FIFO order, a second tab watching the first tab's Turn, identical replay on reconnect), `conversationStorage.test.ts` (including two Participants sharing one web conversation id kept fully isolated, and a storage event notifying only the matching Participant scope), `TurnTracer.test.tsx` (resume on mount and recovers a live stream after StrictMode's development-only remount, adopt another tab's Turn), Task 22 Step 7.3 |
-| 5 | Disconnect recovery retrieves recorded status and Outcome without resubmitting unknown mutation-capable work | Task 6 (the stream is a pure `GET`; disconnect cancels and undoes nothing), Task 17 (idempotency key recorded before the request leaves; `clearInFlightTurnIfMatches` so a superseded Turn's own belated completion can never clear or overwrite a newer one), Task 20 (resume reads; resubmits only the same native message id, and at most once per mount; a real unmount is checked for before any post-await side effect) | `TurnEventStreamHttpTests` disconnect test, `SharedBrowserProfileScenario` resubmission test (one inbox row, quantity applied exactly once), `TurnTracer.test.tsx` (reconnect issues no fetch at all; the lost-response case reuses the same `nativeMessageId`; a parent re-render during the pre-Turn-id window resubmits nothing, including together with React StrictMode's development-only mount/cleanup/mount; a superseded Turn's streamed Outcome cannot clear or overwrite a newer Turn's record or UI; an unmount while either continuation's submission is still in flight opens no stream and touches nothing) |
+| 4 | One browser-profile ChannelConversation resumes across refreshes, restarts, and tabs while preserving the shared FIFO queue | Shipped `WebConversationCookie` + `SqlInboxStore` FIFO, Task 17 (`conversationStorage`, scoped by both `webConversationId` and `participantId`, and never persisting a confirmation command's token - see Known limits), Task 20 (mount-time resume, cross-tab `storage` subscription) | `SharedBrowserProfileScenario` (one ChannelConversation across tabs, one shared FIFO order, a second tab watching the first tab's Turn, identical replay on reconnect), `conversationStorage.test.ts` (including two Participants sharing one web conversation id kept fully isolated, a storage event notifying only the matching Participant scope, and a confirmation command's token redacted to `null` before it ever reaches raw `localStorage`), `TurnTracer.test.tsx` (resume on mount and recovers a live stream after StrictMode's development-only remount, adopt another tab's Turn), Task 22 Step 7.3 |
+| 5 | Disconnect recovery retrieves recorded status and Outcome without resubmitting unknown mutation-capable work | Task 6 (the stream is a pure `GET`; disconnect cancels and undoes nothing), Task 17 (idempotency key recorded before the request leaves; `clearInFlightTurnIfMatches` so a superseded Turn's own belated completion can never clear or overwrite a newer one), Task 20 (resume reads; resubmits only the same native message id, and at most once per mount; a real unmount is checked for before any post-await side effect) | `TurnEventStreamHttpTests` disconnect test, `SharedBrowserProfileScenario` resubmission test (one inbox row, quantity applied exactly once), `TurnTracer.test.tsx` (reconnect issues no fetch at all; the lost-response case reuses the same `nativeMessageId`; a parent re-render during the pre-Turn-id window resubmits nothing, including together with React StrictMode's development-only mount/cleanup/mount; a superseded Turn's streamed Outcome cannot clear or overwrite a newer Turn's record or UI; an unmount while either continuation's submission is still in flight opens no stream and touches nothing, and - proved separately - closes a stream that was already open rather than leaving it live for a later event to reach; a lost-response confirmation, whose token was never persisted, is not resubmitted at all - the one narrow exception to "resubmits only the same native message id", stated in Known limits) |
 | 6 | "Use in this conversation" explicitly switches Active Inventory and records the switch; browsing never switches implicitly | Shipped `InventorySelectionService` + `POST /api/inventories/{id}/select`, Task 21 (the button is the only caller) | `SharedBrowserProfileScenario` (browsing lists, Stock, and references changes nothing; selection changes and records; a switch in one tab is every tab's switch), `App.test.tsx` (no `/select` call until the button is clicked), Task 22 Step 7.5 |
 | 7 | "New conversation" rotates Foundry history and clears pending clarification/confirmation state without removing authorized access | Task 9 (generation captured at acceptance), Task 10 (`SqlConversationRotationStore`, `ProposalStatus.ConversationReset`), Task 11 (a superseded-conversation Turn leaves nothing confirmable, decided by re-reading the binding after dispatch), Task 12 (`POST /api/conversation/new`), Task 21 (the control, its notice, and forgetting the in-flight Turn) | `SqlConversationRotationStoreTests` (new generation, settled proposal, Membership and selection untouched, other conversations untouched, two rotations advancing two generations), `ConversationRotationServiceTests`, `TurnExecutionContextFactoryTests` (superseded detection and its fallback), `ConfirmationProposalLifecycleTests` (settled before dispatch; settled after dispatch by re-reading the current generation; settled when the reset lands *after* the trusted context was assembled, which is the ordering a captured flag cannot see; and the re-read waiting for a reset that is still committing rather than answering from the generation it replaces), `FoundryConversationBindingSupersessionReadTests` and `SqlFoundryConversationBindingSupersessionReadTests` (the locking read's per-provider shape, and that it never creates a binding), `SqlSupersessionReadSerializationTests` (the U &lt; P &lt; S &lt; R window on real SQL Server with `READ_COMMITTED_SNAPSHOT` on), `TurnProcessingCoordinatorTests` (a stale mutation Turn leaves nothing pending, and a reset that commits while the Turn is parked at the model boundary still leaves nothing pending), `ConversationRotationHttpTests` (generation changes, authorizations and Active Inventory survive, the held token stops working, the Initial Import proposal survives, CSRF and authentication required, work accepted before the reset still completes, and a proposal created after the reset out of work from before it can never be confirmed), `App.test.tsx` (the in-flight Turn is forgotten and no old stream reopens), `WebConversationContinuitySqlScenarioTests` (concurrent resets with a real deadlock retry, reset racing acceptance) |
 | — | No monetary budget enforcement within this initial scope | Nothing is built | No task adds a cost check, spend ceiling, or budget policy; the Scope section forbids it outright |
@@ -11459,12 +11631,13 @@ If Step 6 changed nothing, skip this commit rather than creating an empty one.
 | Stable Turn/Participant/ChannelConversation/Foundry conversation identities | All four are unchanged; the stream is keyed by `TurnId`, the browser conversation by the shipped cookie, and the Foundry conversation is now captured per Turn (Task 9) |
 | One web browser-profile session maps to one active Foundry generation | `FoundryConversationBindings` keeps its `(ParticipantId, ChannelConversationId)` primary key; rotation replaces the row's generation rather than adding one (Task 10), and a Turn accepted under a generation the conversation has moved past leaves nothing confirmable behind (Task 11) |
 | FIFO per ChannelConversation; duplicates return the recorded outcome; processing and delivery separated | `SqlInboxStore.ClaimPendingAsync` is untouched; `SharedBrowserProfileScenario` proves both across tabs; `ITurnResultStore` keeps its atomic contract because the event log deliberately does not join it (D1). FIFO is also load-bearing for D10: it is why every Turn accepted before a reset drains before any Turn accepted after it |
-| User stories 74-84 and 112 | 74/76: no mutation control in the workspace, asserted in `App.test.tsx` and `TurnTracer.test.tsx`. 75/79: Task 8 and Task 21. 77/78: Task 13 and `App.test.tsx`. 80/81/112: Tasks 3, 6, 16, 17, 20. 82: Task 13 and Task 17. 83: Tasks 10, 11, 12, 21. 84: no token ever leaves the server; Task 17 stores only a Turn id and a native message id |
+| User stories 74-84 and 112 | 74/76: no mutation control in the workspace, asserted in `App.test.tsx` and `TurnTracer.test.tsx`. 75/79: Task 8 and Task 21. 77/78: Task 13 and `App.test.tsx`. 80/81/112: Tasks 3, 6, 16, 17, 20. 82: Task 13 and Task 17. 83: Tasks 10, 11, 12, 21. 84: no token ever leaves the server, and none persists in the browser profile either - Task 17 stores a Turn id and a native message id, and redacts a confirmation command's own content to `null` rather than storing it |
 | Web authentication server-side | Unchanged. The two new streams are cookie-authenticated `GET`s behind `AuthorizationPolicies.ActiveTenantMember`; `startNewConversation` sends only the CSRF header |
 
 ## Known limits, stated rather than left to be discovered
 
 - **Semantic response parts arrive with completion, not before it.** By D1 the `part` events are projected from the recorded `Outcomes` row, which does not exist until the Turn finishes - so `part`, `part`, `outcome` all become readable in the same poll and are written back to back. What is genuinely incremental is the status: `accepted` the moment the Turn has an identity, `processing` the moment it is claimed. That satisfies AC 2 as written ("progress, semantic parts, and terminal Outcomes with event IDs"), and it is deliberately not token-by-token streaming, which #26 forbids on every channel. Making the parts incremental would mean writing a second copy of the Outcome payload - including a plaintext confirmation token with its own retention - which D1 rejects with reasons. The client is built for it either way: `TurnTracer` renders whatever parts have arrived, so a future incremental source needs no change there.
+- **A confirmation whose disconnect-recovery response was lost cannot be resumed automatically.** `conversationStorage` never persists a confirmation command's token at all: `rememberSubmission` redacts `contentText` to `null` whenever a message matches the `confirm <token>` shape, so the browser profile's own resumption breadcrumb is never a live single-use secret at rest, on this browser or in any backup of it. That is exactly right up until the one case it cannot help: if a confirmation's own submission response is lost before a Turn id is ever recorded, there is nothing safe left to resubmit with - the token was never kept, and reconstructing or guessing it is not an option. `TurnTracer` detects precisely that combination (`turnId` still null, `contentText` already null) and, rather than silently doing nothing or fabricating a command, clears the stale record and tells the Participant plainly to check the current Inventory state before trying again. Every other disconnect-recovery case is unaffected, including a confirmation whose acceptance response *was* seen, which still resumes by a pure `GET` regardless of redaction - AC 5's "resubmits only the same native message id" is true of every ordinary message; this is its one narrow, deliberate, and now-documented exception.
 - **The per-Turn stream polls the database every 500 ms while a Turn is in flight.** That is a deliberate trade for replica-safety and a short-lived `DbContext` (D4). A Turn is in flight for seconds, and the alternative - the client's shipped 1.5-second polling - cost strictly more requests. The interval is `TurnStreamOptions.PollInterval`, so changing it is one registration; nothing else has to move.
 - **The Participant-level stream re-reads the authorized set every second per connected tab.** Same trade, same single knob (`InventoryStreamOptions.PollInterval`). Membership changes being visible without a reload is worth it.
 - **The Participant-level stream cannot be resumed from a position, only resynchronized.** That is the design (D5), and Task 8 proves it loses nothing. What it does mean is that a client which wants to know *what* changed while it was away cannot ask this stream; it learns only that the version moved and re-reads the projection. Nothing in #35 needs the former.

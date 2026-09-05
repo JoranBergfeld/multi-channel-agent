@@ -19,15 +19,30 @@
 
 const KEY_PREFIX = 'mca.conversation.'
 
-/** One browser profile's outstanding Turn for a single web conversation. */
+/** One browser profile's outstanding Turn for a single web conversation. `contentText` is `null`
+ * exactly when the original message was a confirmation command - see `redactedContentText` below -
+ * so the resumption breadcrumb it carries is never a live single-use secret at rest. */
 export interface InFlightTurn {
   nativeMessageId: string
-  contentText: string
+  contentText: string | null
   turnId: string | null
 }
 
 function keyFor(webConversationId: string, participantId: string): string {
   return `${KEY_PREFIX}${webConversationId}.${participantId}`
+}
+
+/** This application's confirmation command shape - `confirm <token>` - tolerant of the same
+ * surrounding whitespace and case the server's own command grammar is, since a Participant can type
+ * it by hand exactly as readily as the UI's own "Confirm" button constructs it. */
+const CONFIRMATION_COMMAND = /^\s*confirm\s+\S+\s*$/i
+
+/** Redacts a confirmation command's content to `null` before it is ever persisted - its token is a
+ * single-use secret the Participant must be able to quote back, not something this browser profile
+ * should still hold once it has been typed. Anything else - including a bare "confirm" with no
+ * token, or a sentence that merely mentions the word - carries no secret and is returned unchanged. */
+function redactedContentText(contentText: string): string | null {
+  return CONFIRMATION_COMMAND.test(contentText) ? null : contentText
 }
 
 /** Runtime type guard: rejects anything that is not exactly the three-field shape above - no fewer
@@ -45,7 +60,7 @@ function isInFlightTurn(value: unknown): value is InFlightTurn {
   return (
     Object.keys(record).length === 3 &&
     typeof record.nativeMessageId === 'string' &&
-    typeof record.contentText === 'string' &&
+    (record.contentText === null || typeof record.contentText === 'string') &&
     (record.turnId === null || typeof record.turnId === 'string')
   )
 }
@@ -73,13 +88,18 @@ export function readInFlightTurn(webConversationId: string, participantId: strin
 
 /** Records a just-submitted message as the conversation's in-flight Turn, overwriting whatever
  * was there before for this Participant. `turnId` is always null here: it is filled in later, by
- * `rememberTurnId`, once the HTTP response naming the Turn actually arrives. */
+ * `rememberTurnId`, once the HTTP response naming the Turn actually arrives. `contentText` is
+ * redacted to `null` first if the message was a confirmation command - see `redactedContentText`. */
 export function rememberSubmission(
   webConversationId: string,
   participantId: string,
   submission: { nativeMessageId: string; contentText: string },
 ): void {
-  const record: InFlightTurn = { ...submission, turnId: null }
+  const record: InFlightTurn = {
+    nativeMessageId: submission.nativeMessageId,
+    contentText: redactedContentText(submission.contentText),
+    turnId: null,
+  }
   localStorage.setItem(keyFor(webConversationId, participantId), JSON.stringify(record))
 }
 

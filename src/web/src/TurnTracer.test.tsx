@@ -204,6 +204,29 @@ describe('TurnTracer', () => {
     await waitFor(() => expect(opened[0].url).toBe('/api/turns/turn-recovered/events'));
   });
 
+  it('does not resubmit a confirmation whose token was never persisted, and says so plainly', async () => {
+    const fetchMock = stubFetch(() => acceptedResponse('turn-should-not-happen'));
+    // rememberSubmission itself redacts a confirm command's content to null - this is exactly the
+    // record a real "confirm <token>" submission whose response was lost would leave behind.
+    rememberSubmission(CONVERSATION, PARTICIPANT, {
+      nativeMessageId: 'native-confirm',
+      contentText: 'confirm FAKE-TOKEN-DO-NOT-LOG',
+    });
+
+    const { opened, factory } = recordingEventStreamFactory();
+    renderTracer(factory);
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'A confirmation was submitted but could not be resumed automatically. Check the current Inventory state before trying again.',
+    );
+
+    // There is nothing safe to resubmit - the token was deliberately never kept - so nothing is sent
+    // and no stream is ever opened for it.
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(opened).toHaveLength(0);
+    await waitFor(() => expect(readInFlightTurn(CONVERSATION, PARTICIPANT)).toBeNull());
+  });
+
   it('forgets the in-flight Turn once it has an answer', async () => {
     stubFetch(() => acceptedResponse('turn-1'));
     const { opened, factory } = recordingEventStreamFactory();
@@ -447,6 +470,44 @@ describe('TurnTracer', () => {
     await flushAsyncWork();
 
     expect(opened).toHaveLength(0);
+    expect(onTerminalOutcome).not.toHaveBeenCalled();
+    expect(readInFlightTurn(CONVERSATION, PARTICIPANT)).toEqual(storedBeforeUnmount);
+  });
+
+  it('closes an already-open stream on unmount, so a later event on it changes nothing', async () => {
+    stubFetch(() => acceptedResponse('turn-1'));
+    const onTerminalOutcome = vi.fn();
+    const { opened, factory } = recordingEventStreamFactory();
+    const { unmount } = render(
+      <TurnTracer
+        csrfToken="csrf-token"
+        webConversationId={CONVERSATION}
+        participantId={PARTICIPANT}
+        onTerminalOutcome={onTerminalOutcome}
+        createSource={factory}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole('button', { name: 'Send' }));
+    await waitFor(() => expect(opened).toHaveLength(1));
+    const stream = opened[0];
+    expect(stream.closed).toBe(false);
+
+    const storedBeforeUnmount = readInFlightTurn(CONVERSATION, PARTICIPANT);
+    expect(storedBeforeUnmount?.turnId).toBe('turn-1');
+
+    unmount();
+
+    // The cleanup this test exists to pin down: without it, this stream would still be open from
+    // openTurnStream's own point of view, and the emit below would still reach its handlers.
+    expect(stream.closed).toBe(true);
+
+    stream.emit(
+      'outcome',
+      { turnId: 'turn-1', status: 'completed', category: 'completed', code: 'echo', summary: 'Hi.', deliveries: [] },
+      '1000000',
+    );
+
     expect(onTerminalOutcome).not.toHaveBeenCalled();
     expect(readInFlightTurn(CONVERSATION, PARTICIPANT)).toEqual(storedBeforeUnmount);
   });
