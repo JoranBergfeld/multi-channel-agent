@@ -80,6 +80,7 @@ app.MapInventoryEndpoints();
 app.MapInventoryGovernanceEndpoints();
 app.MapInventoryRecoveryEndpoints();
 app.MapInventoryEventEndpoints();
+app.MapConversationEndpoints();
 app.MapStockEndpoints();
 app.MapReferenceEndpoints();
 app.MapImportEndpoints();
