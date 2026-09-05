@@ -24,7 +24,8 @@ type SessionState =
   | { phase: 'forbidden' }
   | { phase: 'ready'; session: BootstrapResponse };
 
-const MEMBERSHIP_RECONCILIATION_RETRY_MS = 250;
+const MEMBERSHIP_RECONCILIATION_MAX_ATTEMPTS = 4;
+const MEMBERSHIP_RECONCILIATION_RETRY_MS = 100;
 
 function inventoryIdSetKey(ids: Iterable<string>): string {
   return JSON.stringify([...ids].sort());
@@ -55,6 +56,7 @@ function App() {
   // select, new conversation) the instant it begins its own attempt; if the stream's warning lived
   // there too, any of those actions would silently erase it while the stream stayed just as dead.
   const [inventoryStreamError, setInventoryStreamError] = useState<string | null>(null);
+  const [membershipRefreshError, setMembershipRefreshError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [newInventoryName, setNewInventoryName] = useState('');
   const [creating, setCreating] = useState(false);
@@ -79,28 +81,31 @@ function App() {
    */
   const invalidateActiveInventory = useCallback(() => setLocalRefetchNonce((nonce) => nonce + 1), []);
 
-  const loadSession = useCallback(async (): Promise<BootstrapResult | null> => {
-    const requestSequence = ++sessionRequestSequence.current;
+  const loadSession = useCallback(
+    async (reportError: (message: string) => void = setError): Promise<BootstrapResult | null> => {
+      const requestSequence = ++sessionRequestSequence.current;
 
-    try {
-      const result = await fetchBootstrap();
-      if (requestSequence !== sessionRequestSequence.current) {
+      try {
+        const result = await fetchBootstrap();
+        if (requestSequence !== sessionRequestSequence.current) {
+          return null;
+        }
+
+        if (result.status === 'ok') {
+          setState({ phase: 'ready', session: result.data });
+        } else {
+          setState({ phase: result.status });
+        }
+        return result;
+      } catch (err) {
+        if (requestSequence === sessionRequestSequence.current) {
+          reportError(err instanceof Error ? err.message : String(err));
+        }
         return null;
       }
-
-      if (result.status === 'ok') {
-        setState({ phase: 'ready', session: result.data });
-      } else {
-        setState({ phase: result.status });
-      }
-      return result;
-    } catch (err) {
-      if (requestSequence === sessionRequestSequence.current) {
-        setError(err instanceof Error ? err.message : String(err));
-      }
-      return null;
-    }
-  }, []);
+    },
+    [],
+  );
 
   useEffect(() => {
     // oxlint(react/set-state-in-effect) only recognizes an inline async IIFE's await boundary, not
@@ -134,22 +139,39 @@ function App() {
 
       reconciliationRunning = true;
       try {
-        while (!stopped && reconciliationTarget !== null) {
+        let attempts = 0;
+        while (
+          !stopped &&
+          reconciliationTarget !== null &&
+          attempts < MEMBERSHIP_RECONCILIATION_MAX_ATTEMPTS
+        ) {
+          attempts += 1;
           const target = reconciliationTarget;
-          const result = await loadSession();
+          const result = await loadSession(setMembershipRefreshError);
           if (stopped || reconciliationTarget !== target) {
             continue;
           }
 
-          if (result?.status === 'ok') {
-            const applied = inventoryIdSetKey(result.data.bootstrap.inventories.map((inventory) => inventory.id));
+          if (result !== null) {
+            setMembershipRefreshError(null);
+            if (result.status !== 'ok') {
+              reconciliationTarget = null;
+              return;
+            }
+
+            const applied = inventoryIdSetKey(
+              result.data.bootstrap.inventories.map((inventory) => inventory.id),
+            );
             if (applied === target) {
               reconciliationTarget = null;
               return;
             }
           }
 
-          await new Promise((resolve) => setTimeout(resolve, MEMBERSHIP_RECONCILIATION_RETRY_MS));
+          if (attempts < MEMBERSHIP_RECONCILIATION_MAX_ATTEMPTS) {
+            const retryDelay = MEMBERSHIP_RECONCILIATION_RETRY_MS * 2 ** (attempts - 1);
+            await new Promise((resolve) => setTimeout(resolve, retryDelay));
+          }
         }
       } finally {
         reconciliationRunning = false;
@@ -317,7 +339,7 @@ function App() {
   // failure is not clearer, and a test asking for "the" alert should never have to disambiguate.
   // The permanent stream warning is listed first because, once it appears, it outlives whatever
   // ordinary operation error came before or after it.
-  const alertMessage = [inventoryStreamError, error].filter(Boolean).join(' ');
+  const alertMessage = [inventoryStreamError, membershipRefreshError, error].filter(Boolean).join(' ');
 
   const conversation = (
     <>

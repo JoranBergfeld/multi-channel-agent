@@ -11612,7 +11612,31 @@ describe('App', () => {
     inventoryStreamIn(streams)!.emit('changed', { inventoryId: 'inventory-3', version: 0 });
 
     expect(await screen.findByText(/Eventually Granted Warehouse/, {}, { timeout: 3000 })).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     expect(bootstrapCalls).toBeGreaterThanOrEqual(4);
+  });
+
+  it('bounds membership reconciliation retries while bootstrap stays unavailable', async () => {
+    setViewportWidth(DESKTOP_WIDTH);
+    let bootstrapCalls = 0;
+    const { streams } = stubApi({
+      '/api/session/bootstrap': () => {
+        bootstrapCalls += 1;
+        return bootstrapCalls === 1 ? json(BOOTSTRAP) : json({}, 503);
+      },
+    });
+
+    render(<App />);
+    await screen.findByRole('banner');
+    await waitFor(() => expect(inventoryStreamIn(streams)).toBeDefined());
+
+    inventoryStreamIn(streams)!.emit('changed', { inventoryId: 'inventory-3', version: 0 });
+
+    await waitFor(() => expect(bootstrapCalls).toBe(5), { timeout: 3000 });
+    await new Promise((resolve) => setTimeout(resolve, 500));
+
+    expect(bootstrapCalls).toBe(5);
+    expect(screen.getByRole('alert')).toHaveTextContent('Reading the session bootstrap failed with status 503.');
   });
 
   it('clears a fatal Inventory-stream warning after a replacement stream resynchronizes', async () => {
@@ -11937,7 +11961,8 @@ type SessionState =
   | { phase: 'forbidden' }
   | { phase: 'ready'; session: BootstrapResponse };
 
-const MEMBERSHIP_RECONCILIATION_RETRY_MS = 250;
+const MEMBERSHIP_RECONCILIATION_MAX_ATTEMPTS = 4;
+const MEMBERSHIP_RECONCILIATION_RETRY_MS = 100;
 
 function inventoryIdSetKey(ids: Iterable<string>): string {
   return JSON.stringify([...ids].sort());
@@ -11968,6 +11993,7 @@ function App() {
   // select, new conversation) the instant it begins its own attempt; if the stream's warning lived
   // there too, any of those actions would silently erase it while the stream stayed just as dead.
   const [inventoryStreamError, setInventoryStreamError] = useState<string | null>(null);
+  const [membershipRefreshError, setMembershipRefreshError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [newInventoryName, setNewInventoryName] = useState('');
   const [creating, setCreating] = useState(false);
@@ -11992,28 +12018,31 @@ function App() {
    */
   const invalidateActiveInventory = useCallback(() => setLocalRefetchNonce((nonce) => nonce + 1), []);
 
-  const loadSession = useCallback(async (): Promise<BootstrapResult | null> => {
-    const requestSequence = ++sessionRequestSequence.current;
+  const loadSession = useCallback(
+    async (reportError: (message: string) => void = setError): Promise<BootstrapResult | null> => {
+      const requestSequence = ++sessionRequestSequence.current;
 
-    try {
-      const result = await fetchBootstrap();
-      if (requestSequence !== sessionRequestSequence.current) {
+      try {
+        const result = await fetchBootstrap();
+        if (requestSequence !== sessionRequestSequence.current) {
+          return null;
+        }
+
+        if (result.status === 'ok') {
+          setState({ phase: 'ready', session: result.data });
+        } else {
+          setState({ phase: result.status });
+        }
+        return result;
+      } catch (err) {
+        if (requestSequence === sessionRequestSequence.current) {
+          reportError(err instanceof Error ? err.message : String(err));
+        }
         return null;
       }
-
-      if (result.status === 'ok') {
-        setState({ phase: 'ready', session: result.data });
-      } else {
-        setState({ phase: result.status });
-      }
-      return result;
-    } catch (err) {
-      if (requestSequence === sessionRequestSequence.current) {
-        setError(err instanceof Error ? err.message : String(err));
-      }
-      return null;
-    }
-  }, []);
+    },
+    [],
+  );
 
   useEffect(() => {
     // oxlint(react/set-state-in-effect) only recognizes an inline async IIFE's await boundary, not
@@ -12047,22 +12076,39 @@ function App() {
 
       reconciliationRunning = true;
       try {
-        while (!stopped && reconciliationTarget !== null) {
+        let attempts = 0;
+        while (
+          !stopped &&
+          reconciliationTarget !== null &&
+          attempts < MEMBERSHIP_RECONCILIATION_MAX_ATTEMPTS
+        ) {
+          attempts += 1;
           const target = reconciliationTarget;
-          const result = await loadSession();
+          const result = await loadSession(setMembershipRefreshError);
           if (stopped || reconciliationTarget !== target) {
             continue;
           }
 
-          if (result?.status === 'ok') {
-            const applied = inventoryIdSetKey(result.data.bootstrap.inventories.map((inventory) => inventory.id));
+          if (result !== null) {
+            setMembershipRefreshError(null);
+            if (result.status !== 'ok') {
+              reconciliationTarget = null;
+              return;
+            }
+
+            const applied = inventoryIdSetKey(
+              result.data.bootstrap.inventories.map((inventory) => inventory.id),
+            );
             if (applied === target) {
               reconciliationTarget = null;
               return;
             }
           }
 
-          await new Promise((resolve) => setTimeout(resolve, MEMBERSHIP_RECONCILIATION_RETRY_MS));
+          if (attempts < MEMBERSHIP_RECONCILIATION_MAX_ATTEMPTS) {
+            const retryDelay = MEMBERSHIP_RECONCILIATION_RETRY_MS * 2 ** (attempts - 1);
+            await new Promise((resolve) => setTimeout(resolve, retryDelay));
+          }
         }
       } finally {
         reconciliationRunning = false;
@@ -12230,7 +12276,7 @@ function App() {
   // failure is not clearer, and a test asking for "the" alert should never have to disambiguate.
   // The permanent stream warning is listed first because, once it appears, it outlives whatever
   // ordinary operation error came before or after it.
-  const alertMessage = [inventoryStreamError, error].filter(Boolean).join(' ');
+  const alertMessage = [inventoryStreamError, membershipRefreshError, error].filter(Boolean).join(' ');
 
   const conversation = (
     <>
@@ -12360,13 +12406,13 @@ export default App;
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `cd src/web && npm test`
-Expected: PASS. The whole web suite - roughly 117 tests across nine files (Task 19's `WorkspacePanel.test.tsx` grew from 10 to 15 tests and gained a sibling `useMediaQuery.test.ts` with 2 tests, both during that task's own quality-review hardening; Task 17's `conversationStorage.test.ts` grew from 14 to 24 to 27 to 34 tests; Task 20's `TurnTracer.test.tsx` grew from 10 to 12 to 15 to 17 to 23 to 25 to 26 tests and gained one direct `turnsApi.test.ts` classification test; and Task 21's `App.test.tsx` grew from 10 to 12 to 14 to 17 tests during its quality-review and branch-wide hardening) - is green.
+Expected: PASS. The whole web suite - roughly 118 tests across nine files (Task 19's `WorkspacePanel.test.tsx` grew from 10 to 15 tests and gained a sibling `useMediaQuery.test.ts` with 2 tests, both during that task's own quality-review hardening; Task 17's `conversationStorage.test.ts` grew from 14 to 24 to 27 to 34 tests; Task 20's `TurnTracer.test.tsx` grew from 10 to 12 to 15 to 17 to 23 to 25 to 26 tests and gained one direct `turnsApi.test.ts` classification test; and Task 21's `App.test.tsx` grew from 10 to 12 to 14 to 17 to 18 tests during its quality-review and branch-wide hardening) - is green.
 
 The Task 21 quality review found two reset-boundary defects. First, a successful reset notice survived a later failed reset and could also suppress the live-region announcement for two identical consecutive successes; every operation now clears the old notice as it begins. Second, `clearInFlightTurn`'s boolean result was ignored even though this is the Participant's explicit reset action: if removal failed, remounting `TurnTracer` could immediately recover old work into the already-rotated conversation. The shell now reports that partial failure and keeps the current tracer mounted instead. The two added tests pin both outcomes, including the old stream remaining open and the recovery record remaining present when removal fails.
 
 The branch-wide specification review found that the server and typed stream client reported Membership grants and revocations, but the shell consumed only the Active Inventory's version. The stream callback now compares its authorized Inventory id set with the bootstrap set and refreshes the session whenever that set changes, so granted Inventories appear and revoked Inventories disappear without a page reload. Two tests drive real `changed` and `revoked` events through the fake EventSource. The test file also relies solely on Vitest's configured `unstubGlobals` teardown: manually unstubbing in an `afterEach` raced React's passive-effect cleanup and could intermittently remove `EventSource` before a late effect opened it.
 
-A focused quality review then hardened that reconciliation path against three races: a failed or replica-lagged bootstrap read now retries until it reflects the streamed authorized set; a replacement stream clears the fatal warning once its next event proves resynchronization; and session reads carry a monotonically increasing request sequence so an older response cannot overwrite a newer Active Inventory or Membership view. Three tests pin those paths directly.
+A focused quality review then hardened that reconciliation path against three races: a failed or replica-lagged bootstrap read retries with bounded exponential backoff (four attempts) until it reflects the streamed authorized set, retaining the last failure if the bounded attempts are exhausted and clearing it after successful convergence; a replacement stream clears the fatal warning once its next event proves resynchronization; and session reads carry a monotonically increasing request sequence so an older response cannot overwrite a newer Active Inventory or Membership view. Four tests pin those paths directly.
 
 - [ ] **Step 5: Check types, lint, and build**
 

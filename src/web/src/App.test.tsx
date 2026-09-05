@@ -314,7 +314,31 @@ describe('App', () => {
     inventoryStreamIn(streams)!.emit('changed', { inventoryId: 'inventory-3', version: 0 });
 
     expect(await screen.findByText(/Eventually Granted Warehouse/, {}, { timeout: 3000 })).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     expect(bootstrapCalls).toBeGreaterThanOrEqual(4);
+  });
+
+  it('bounds membership reconciliation retries while bootstrap stays unavailable', async () => {
+    setViewportWidth(DESKTOP_WIDTH);
+    let bootstrapCalls = 0;
+    const { streams } = stubApi({
+      '/api/session/bootstrap': () => {
+        bootstrapCalls += 1;
+        return bootstrapCalls === 1 ? json(BOOTSTRAP) : json({}, 503);
+      },
+    });
+
+    render(<App />);
+    await screen.findByRole('banner');
+    await waitFor(() => expect(inventoryStreamIn(streams)).toBeDefined());
+
+    inventoryStreamIn(streams)!.emit('changed', { inventoryId: 'inventory-3', version: 0 });
+
+    await waitFor(() => expect(bootstrapCalls).toBe(5), { timeout: 3000 });
+    await new Promise((resolve) => setTimeout(resolve, 500));
+
+    expect(bootstrapCalls).toBe(5);
+    expect(screen.getByRole('alert')).toHaveTextContent('Reading the session bootstrap failed with status 503.');
   });
 
   it('clears a fatal Inventory-stream warning after a replacement stream resynchronizes', async () => {
