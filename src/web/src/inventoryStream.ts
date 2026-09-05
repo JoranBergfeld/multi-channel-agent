@@ -1,5 +1,13 @@
 import type { EventStreamFactory } from './turnStream'
 
+/**
+ * The numeric value of the browser's `EventSource.readyState` once a connection has permanently
+ * failed. Written as a literal rather than read off the global `EventSource` constructor so this
+ * module never depends on that global being defined - a fake source in tests supplies the same
+ * number without needing to exist as a real constructor.
+ */
+const EVENT_SOURCE_CLOSED = 2
+
 /** The version each Inventory this Participant may see is currently at, keyed by Inventory id. */
 export type InventoryVersions = Record<string, number>
 
@@ -19,6 +27,8 @@ interface InventoryRevokedWire {
 export interface OpenInventoryStreamOptions {
   /** Called with the complete current picture every time any part of it changes. */
   onVersions: (versions: InventoryVersions) => void
+  /** Called once the connection has failed permanently and this stream is over. */
+  onFailed?: () => void
   /** Defaults to the real `EventSource`; tests supply a fake instead. */
   createSource?: EventStreamFactory
 }
@@ -40,19 +50,38 @@ export interface InventoryStream {
  * Every callback hands back the whole picture rather than the delta, because that is what a caller
  * actually renders from - and because folding deltas is exactly the sort of bookkeeping a component
  * should never have to get right. The picture is stored internally as a plain `Record` keyed by
- * whatever string Inventory ids the server sends (UUIDs in practice), and every publish clones it
- * with a fresh object literal - never `Object.assign` onto or otherwise mutating the internal copy -
- * so a caller can never corrupt this stream's state through the reference it was handed, and an
- * inventory id that happened to collide with an inherited `Object.prototype` property name could
- * never be misread as already present.
+ * Inventory id (a server-issued GUID in practice), and every publish clones it with a fresh object
+ * literal - never `Object.assign` onto or otherwise mutating the internal copy - so a caller can
+ * never corrupt this stream's state through the reference it was handed.
  */
 export function openInventoryStream({
   onVersions,
+  onFailed,
   createSource = (url: string) => new EventSource(url),
 }: OpenInventoryStreamOptions): InventoryStream {
   const source = createSource('/api/inventory-events')
-  let versions: InventoryVersions = Object.create(null) as InventoryVersions
+  let versions: InventoryVersions = {}
   let closed = false
+
+  source.onerror = () => {
+    if (closed) {
+      return
+    }
+
+    if (source.readyState !== EVENT_SOURCE_CLOSED) {
+      // Transient: the browser reconnects on its own, and the next snapshot resynchronizes -
+      // closing here, or reporting an error, would defeat that reconnect for no reason.
+      return
+    }
+
+    // The browser has already given up permanently (a 401/403/404 response, or one that isn't
+    // `text/event-stream`) and will not reconnect on its own. Closing here is idempotent - the
+    // browser put `readyState` in this state already - but guarantees the caller-visible `closed`
+    // flag agrees with reality regardless.
+    closed = true
+    source.close()
+    onFailed?.()
+  }
 
   function publish(): void {
     onVersions({ ...versions })
@@ -66,14 +95,8 @@ export function openInventoryStream({
     const snapshot = JSON.parse(event.data) as InventorySnapshotWire
 
     // Replaced, never merged: a snapshot is the whole truth, so an Inventory missing from it is
-    // one this Participant may no longer see. Built on a null-prototype object so an id such as
-    // "constructor" or "hasOwnProperty" is stored as an ordinary own property rather than shadowing
-    // (or being shadowed by) something inherited.
-    const next: InventoryVersions = Object.create(null) as InventoryVersions
-    for (const inventory of snapshot.inventories) {
-      next[inventory.inventoryId] = inventory.version
-    }
-    versions = next
+    // one this Participant may no longer see.
+    versions = Object.fromEntries(snapshot.inventories.map((i) => [i.inventoryId, i.version]))
     publish()
   })
 

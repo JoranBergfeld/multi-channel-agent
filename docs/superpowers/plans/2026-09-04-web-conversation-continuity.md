@@ -8400,6 +8400,7 @@ Create `src/web/src/inventoryStream.test.ts`:
 import { describe, expect, it, vi } from 'vitest';
 import { recordingEventStreamFactory } from './testing/fakeEventSource';
 import { openInventoryStream } from './inventoryStream';
+import type { InventoryVersions } from './inventoryStream';
 
 describe('openInventoryStream', () => {
   it('opens the Participant-level stream', () => {
@@ -8424,6 +8425,26 @@ describe('openInventoryStream', () => {
     });
 
     expect(onVersions).toHaveBeenCalledWith({ 'inventory-1': 3, 'inventory-2': 0 });
+  });
+
+  it('does not let a caller corrupt internal state by mutating the object handed to onVersions', () => {
+    const { opened, factory } = recordingEventStreamFactory();
+    const onVersions = vi.fn();
+
+    openInventoryStream({ onVersions, createSource: factory });
+    opened[0].emit('snapshot', { inventories: [{ inventoryId: 'inventory-1', version: 3 }] });
+
+    // Reaches into the very object the stream handed back and pollutes it - exactly what a fresh
+    // object literal on every publish is meant to make harmless.
+    const firstReceived = onVersions.mock.calls[0][0] as InventoryVersions;
+    firstReceived['inventory-1'] = 999;
+    firstReceived['inventory-2'] = 42;
+
+    opened[0].emit('changed', { inventoryId: 'inventory-1', version: 4 });
+
+    // Had the mutation reached the internal picture, this would also carry the stray
+    // "inventory-2": 42 the caller injected above.
+    expect(onVersions).toHaveBeenLastCalledWith({ 'inventory-1': 4 });
   });
 
   it('folds each later change into the picture it already had', () => {
@@ -8475,6 +8496,28 @@ describe('openInventoryStream', () => {
     expect(onVersions).not.toHaveBeenCalled();
     expect(opened[0].closed).toBe(true);
   });
+
+  it('reports a permanent connection failure through onFailed exactly once and closes the source', () => {
+    const { opened, factory } = recordingEventStreamFactory();
+    const onFailed = vi.fn();
+
+    openInventoryStream({ onVersions: () => {}, onFailed, createSource: factory });
+    opened[0].failFatally();
+
+    expect(onFailed).toHaveBeenCalledTimes(1);
+    expect(opened[0].closed).toBe(true);
+  });
+
+  it('ignores a transient connection failure, leaving the source open for the browser to reconnect on its own', () => {
+    const { opened, factory } = recordingEventStreamFactory();
+    const onFailed = vi.fn();
+
+    openInventoryStream({ onVersions: () => {}, onFailed, createSource: factory });
+    opened[0].fail();
+
+    expect(onFailed).not.toHaveBeenCalled();
+    expect(opened[0].closed).toBe(false);
+  });
 });
 ```
 
@@ -8489,6 +8532,14 @@ Create `src/web/src/inventoryStream.ts`:
 
 ```ts
 import type { EventStreamFactory } from './turnStream';
+
+/**
+ * The numeric value of the browser's `EventSource.readyState` once a connection has permanently
+ * failed. Written as a literal rather than read off the global `EventSource` constructor so this
+ * module never depends on that global being defined - a fake source in tests supplies the same
+ * number without needing to exist as a real constructor.
+ */
+const EVENT_SOURCE_CLOSED = 2;
 
 /** The version each Inventory this Participant may see is currently at, keyed by Inventory id. */
 export type InventoryVersions = Record<string, number>;
@@ -8509,6 +8560,8 @@ interface InventoryRevokedWire {
 export interface OpenInventoryStreamOptions {
   /** Called with the complete current picture every time any part of it changes. */
   onVersions: (versions: InventoryVersions) => void;
+  /** Called once the connection has failed permanently and this stream is over. */
+  onFailed?: () => void;
   createSource?: EventStreamFactory;
 }
 
@@ -8528,10 +8581,14 @@ export interface InventoryStream {
  *
  * Every callback hands back the whole picture rather than the delta, because that is what a caller
  * actually renders from - and because folding deltas is exactly the sort of bookkeeping a component
- * should never have to get right.
+ * should never have to get right. The picture is stored internally as a plain `Record` keyed by
+ * Inventory id (a server-issued GUID in practice), and every publish clones it with a fresh object
+ * literal - never `Object.assign` onto or otherwise mutating the internal copy - so a caller can
+ * never corrupt this stream's state through the reference it was handed.
  */
 export function openInventoryStream({
   onVersions,
+  onFailed,
   createSource = defaultEventStreamFactory,
 }: OpenInventoryStreamOptions): InventoryStream {
   const source = createSource('/api/inventory-events');
@@ -8539,6 +8596,26 @@ export function openInventoryStream({
   let closed = false;
 
   const publish = () => onVersions({ ...versions });
+
+  source.onerror = () => {
+    if (closed) {
+      return;
+    }
+
+    if (source.readyState !== EVENT_SOURCE_CLOSED) {
+      // Transient: the browser reconnects on its own, and the next snapshot resynchronizes -
+      // closing here, or reporting an error, would defeat that reconnect for no reason.
+      return;
+    }
+
+    // The browser has already given up permanently (a 401/403/404 response, or one that isn't
+    // `text/event-stream`) and will not reconnect on its own. Closing here is idempotent - the
+    // browser put `readyState` in this state already - but guarantees the caller-visible `closed`
+    // flag agrees with reality regardless.
+    closed = true;
+    source.close();
+    onFailed?.();
+  };
 
   source.addEventListener('snapshot', (event) => {
     if (closed) {
@@ -8569,7 +8646,8 @@ export function openInventoryStream({
     }
 
     const revoked = JSON.parse(event.data) as InventoryRevokedWire;
-    const { [revoked.inventoryId]: _removed, ...remaining } = versions;
+    const remaining = { ...versions };
+    delete remaining[revoked.inventoryId];
     versions = remaining;
     publish();
   });
@@ -8588,18 +8666,12 @@ const defaultEventStreamFactory: EventStreamFactory = (url) => new EventSource(u
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `cd src/web && npm test`
-Expected: PASS, 6 new tests.
+Expected: PASS, 9 new tests.
 
 - [ ] **Step 5: Check types and lint**
 
 Run: `cd src/web && npx tsc -b && npm run lint`
-Expected: no output from `tsc`, and no errors from oxlint. If oxlint objects to the unused `_removed` binding, rename the destructure to use `delete` on a copy instead:
-
-```ts
-    const remaining = { ...versions };
-    delete remaining[revoked.inventoryId];
-    versions = remaining;
-```
+Expected: no output from `tsc`, and no errors from oxlint.
 
 - [ ] **Step 6: Commit**
 
@@ -9901,6 +9973,24 @@ describe('App', () => {
     await waitFor(() => expect(streams.filter((s) => s.url === '/api/inventory-events')).toHaveLength(1));
   });
 
+  it('shows a clear resync message if the Inventory stream fails permanently', async () => {
+    setViewportWidth(DESKTOP_WIDTH);
+    const { streams } = stubApi();
+
+    render(<App />);
+    await screen.findByRole('banner');
+    await waitFor(() => expect(inventoryStreamIn(streams)).toBeDefined());
+
+    // A 401/403/404, or a response that is not `text/event-stream`, ends this way: the browser gives
+    // up reconnecting on its own, so silence here would leave the workspace unable to ever invalidate
+    // again until the Participant does something about it themselves.
+    inventoryStreamIn(streams)!.failFatally();
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Lost the connection to Inventory updates and cannot resync automatically. Refresh the page to try again.',
+    );
+  });
+
   it('refetches the workspace when the stream says the Inventory version changed', async () => {
     setViewportWidth(DESKTOP_WIDTH);
     const { calls, streams } = stubApi();
@@ -10121,7 +10211,11 @@ function App() {
       return;
     }
 
-    const stream = openInventoryStream({ onVersions: setInventoryVersions });
+    const stream = openInventoryStream({
+      onVersions: setInventoryVersions,
+      onFailed: () =>
+        setError('Lost the connection to Inventory updates and cannot resync automatically. Refresh the page to try again.'),
+    });
     return () => stream.close();
   }, [isReady]);
 
@@ -10371,7 +10465,7 @@ export default App;
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `cd src/web && npm test`
-Expected: PASS. The whole web suite - roughly 62 tests across seven files - is green.
+Expected: PASS. The whole web suite - roughly 66 tests across seven files - is green.
 
 - [ ] **Step 5: Check types, lint, and build**
 
