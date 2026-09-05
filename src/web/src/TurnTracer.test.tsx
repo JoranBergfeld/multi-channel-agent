@@ -330,6 +330,48 @@ describe('TurnTracer', () => {
     }
   });
 
+  it('keeps watching the current Turn when storing a newer submission fails', async () => {
+    const fetchMock = stubFetch(() => acceptedResponse('turn-1'));
+    const { opened, factory } = recordingEventStreamFactory();
+    renderTracer(factory);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Send' }));
+    await waitFor(() => expect(opened).toHaveLength(1));
+    const currentStream = opened[0];
+
+    const spy = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new DOMException('Storage is disabled', 'SecurityError');
+    });
+
+    try {
+      await userEvent.click(screen.getByRole('button', { name: 'Send' }));
+
+      expect(await screen.findByRole('alert')).toHaveTextContent(
+        'Browser storage is unavailable, so this message was not sent - safe recovery cannot be guaranteed without it. Try again once storage is available.',
+      );
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(currentStream.closed).toBe(false);
+
+      currentStream.emit(
+        'outcome',
+        {
+          turnId: 'turn-1',
+          status: 'completed',
+          category: 'completed',
+          code: 'echo',
+          summary: 'The original answer still arrives.',
+          deliveries: [],
+        },
+        '1000000',
+      );
+
+      expect(await screen.findByText('The original answer still arrives.')).toBeInTheDocument();
+      expect(readInFlightTurn(CONVERSATION, PARTICIPANT)).toBeNull();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('forgets the in-flight Turn once it has an answer', async () => {
     stubFetch(() => acceptedResponse('turn-1'));
     const { opened, factory } = recordingEventStreamFactory();

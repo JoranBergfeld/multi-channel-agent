@@ -526,12 +526,23 @@ function TurnTracer({ csrfToken, webConversationId, participantId, onTerminalOut
   async function handleSubmit(event: React.FormEvent) {
     event.preventDefault();
 
-    // A newer Turn supersedes whatever this component was watching. Closing it here - before this
-    // submission's own record is even written - guarantees the old stream can never deliver another
-    // event: openTurnStream gates every handler behind its own closed flag the instant close() is
-    // called, synchronously, before this function does anything else. Without this, a queued event
-    // from the superseded Turn - most dangerously its own terminal Outcome - could still fire after
-    // this one exists and clear or overwrite it.
+    const nativeMessageId = crypto.randomUUID();
+
+    // Recorded BEFORE the request leaves, so a response that never arrives still leaves this browser
+    // profile holding the idempotency key it submitted under. If this fails, sending anyway would
+    // leave mutation-capable work in flight with nothing anywhere to recover or de-duplicate it by -
+    // so nothing is sent at all. This guard also runs before replacing the current Turn: a failed
+    // write must not close its still-valid stream or discard an answer already arriving there.
+    if (!rememberSubmission(webConversationId, participantId, { nativeMessageId, contentText })) {
+      setError(
+        'Browser storage is unavailable, so this message was not sent - safe recovery cannot be guaranteed without it. Try again once storage is available.',
+      );
+      return;
+    }
+
+    // The new record now exists, so this Turn genuinely supersedes whatever the component was
+    // watching. openTurnStream gates every handler behind its closed flag synchronously, ensuring a
+    // queued terminal Outcome from the old Turn cannot clear or overwrite the new record.
     streamRef.current?.close();
     streamRef.current = null;
     watchedTurnRef.current = null;
@@ -541,21 +552,6 @@ function TurnTracer({ csrfToken, webConversationId, participantId, onTerminalOut
     partsRef.current = [];
     setParts([]);
     setProgress('submitting');
-
-    const nativeMessageId = crypto.randomUUID();
-
-    // Recorded BEFORE the request leaves, so a response that never arrives still leaves this browser
-    // profile holding the idempotency key it submitted under. If this fails, sending anyway would
-    // leave mutation-capable work in flight with nothing anywhere to recover or de-duplicate it by -
-    // so nothing is sent at all, and the Participant is told plainly rather than left wondering why
-    // nothing happened.
-    if (!rememberSubmission(webConversationId, participantId, { nativeMessageId, contentText })) {
-      setProgress('idle');
-      setError(
-        'Browser storage is unavailable, so this message was not sent - safe recovery cannot be guaranteed without it. Try again once storage is available.',
-      );
-      return;
-    }
 
     try {
       const result = await submitTurn({ nativeMessageId, contentText }, csrfToken);
