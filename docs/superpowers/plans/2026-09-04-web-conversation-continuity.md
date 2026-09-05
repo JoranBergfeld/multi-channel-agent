@@ -8121,6 +8121,12 @@ describe('conversation continuity storage', () => {
     expect(readInFlightTurn(CONVERSATION)?.turnId).toBe('turn-1');
   });
 
+  it('never silently creates a record from a Turn id alone', () => {
+    rememberTurnId(CONVERSATION, 'turn-1');
+
+    expect(readInFlightTurn(CONVERSATION)).toBeNull();
+  });
+
   it('never stores the answer, because a proposal payload carries a short-lived secret', () => {
     rememberSubmission(CONVERSATION, { nativeMessageId: 'native-1', contentText: 'forget stock Steel Bolts' });
     rememberTurnId(CONVERSATION, 'turn-1');
@@ -8318,7 +8324,7 @@ export function subscribeToConversationChanges(webConversationId: string, onChan
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `cd src/web && npm test`
-Expected: PASS, 11 new tests.
+Expected: PASS, 12 new tests (the 11 above plus a hardening case proving `rememberTurnId` never silently creates a record when there is no existing submission to update).
 
 - [ ] **Step 5: Commit**
 
