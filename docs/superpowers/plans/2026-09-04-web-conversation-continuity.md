@@ -6854,12 +6854,15 @@ Create `tests/MultiChannelAgent.IntegrationTests/WebConversationContinuitySqlSce
 
 ```csharp
 using System.Net;
+using System.Runtime.ExceptionServices;
+using System.Text.RegularExpressions;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.Extensions.DependencyInjection;
 using MultiChannelAgent.Application.Turns;
 using MultiChannelAgent.Domain.Inventories;
-using MultiChannelAgent.Domain.Turns;
 using MultiChannelAgent.Infrastructure.Persistence;
 using MultiChannelAgent.Infrastructure.Persistence.Entities;
 
@@ -6877,22 +6880,52 @@ namespace MultiChannelAgent.IntegrationTests;
 public sealed class WebConversationContinuitySqlScenarioTests : SqlIntegrationTestBase
 {
     private const int DeadlockVictimErrorNumber = 1205;
+    private const string SchemaBeforeWebConversationContinuity = "20260904125923_AddInventoryAuditOccurredAtTicks";
+    private static readonly DateTimeOffset LegacyAcceptedAt = new(2026, 9, 4, 22, 50, 0, TimeSpan.Zero);
 
     [SkippableFact]
-    public async Task Every_migration_applies_and_the_new_tables_are_there_with_their_backfilled_rows()
+    public async Task Idempotent_upgrade_script_backfills_existing_inventory_and_turn_rows()
     {
         Skip.IfNot(DockerAvailable, "Docker is not available for the SQL Server-backed scenario.");
 
-        var http = ConversationTestClient.CreateHttpsClient(Factory!);
-        var participant = await ConversationTestClient.SignInAsync(http, "Migrating Participant");
-        var inventoryId = await participant.CreateAndSelectInventoryAsync("Migrated Warehouse");
+        var participantId = Guid.NewGuid();
+        var inventoryId = Guid.NewGuid();
+        var turnId = Guid.NewGuid();
+        var foundryConversationId = Guid.NewGuid();
+        const string channelConversationId = "web:legacy-profile";
 
-        using var scope = Factory!.Services.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<MultiChannelAgentDbContext>();
+        using (var scope = Factory!.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<MultiChannelAgentDbContext>();
+            var migrator = db.Database.GetService<IMigrator>();
 
-        Assert.Empty(await db.Database.GetPendingMigrationsAsync());
-        Assert.Equal(0L, (await db.InventoryVersions.AsNoTracking().SingleAsync(v => v.InventoryId == inventoryId)).Version);
-        Assert.Empty(await db.TurnProgressEvents.AsNoTracking().ToListAsync());
+            await migrator.MigrateAsync(SchemaBeforeWebConversationContinuity);
+            await SeedLegacyConversationAsync(
+                db,
+                participantId,
+                inventoryId,
+                turnId,
+                channelConversationId,
+                foundryConversationId);
+
+            var script = migrator.GenerateScript(
+                SchemaBeforeWebConversationContinuity,
+                options: MigrationsSqlGenerationOptions.Idempotent);
+            await ExecuteSqlScriptAsync(db, script);
+        }
+
+        using var verifyScope = Factory!.Services.CreateScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<MultiChannelAgentDbContext>();
+
+        Assert.Empty(await verifyDb.Database.GetPendingMigrationsAsync());
+        Assert.Equal(
+            0L,
+            (await verifyDb.InventoryVersions.AsNoTracking().SingleAsync(v => v.InventoryId == inventoryId)).Version);
+        Assert.Empty(await verifyDb.TurnProgressEvents.AsNoTracking().ToListAsync());
+
+        var entry = await verifyDb.InboxEntries.AsNoTracking().SingleAsync(i => i.TurnId == turnId);
+        Assert.Equal(foundryConversationId, entry.FoundryConversationId);
+        Assert.Equal(1, entry.FoundryConversationGeneration);
     }
 
     [SkippableFact]
@@ -6941,6 +6974,7 @@ public sealed class WebConversationContinuitySqlScenarioTests : SqlIntegrationTe
             using var scope = Factory!.Services.CreateScope();
             var db = scope.ServiceProvider.GetRequiredService<MultiChannelAgentDbContext>();
 
+            var occurredAt = DateTimeOffset.UtcNow;
             db.InventoryAudits.Add(new InventoryAuditEntity
             {
                 Id = Guid.NewGuid(),
@@ -6950,9 +6984,9 @@ public sealed class WebConversationContinuitySqlScenarioTests : SqlIntegrationTe
                 InventoryId = inventoryId,
                 SubjectParticipantId = null,
                 OutcomeCode = outcomeCode,
-                OccurredAtUtc = DateTimeOffset.UtcNow,
-                OccurredAtUtcTicks = DateTimeOffset.UtcNow.UtcTicks,
-                ExpiresAtUtc = DateTimeOffset.UtcNow.AddDays(90),
+                OccurredAtUtc = occurredAt,
+                OccurredAtUtcTicks = occurredAt.UtcTicks,
+                ExpiresAtUtc = occurredAt.AddDays(90),
             });
 
             await db.SaveChangesAsync();
@@ -6999,10 +7033,10 @@ public sealed class WebConversationContinuitySqlScenarioTests : SqlIntegrationTe
         var secondTab = participant.OpenAnotherTab();
 
         // Both requests are in flight before either is awaited, so this is a real race at the database.
-        var responses = await RunConcurrentlyRetryingDeadlockVictimAsync(
+        var statuses = await RunConcurrentlyRetryingDeadlockVictimAsync(
             participant.StartNewConversationAsync, secondTab.StartNewConversationAsync);
 
-        Assert.All(responses, response => Assert.Equal(HttpStatusCode.OK, response.StatusCode));
+        Assert.All(statuses, status => Assert.Equal(HttpStatusCode.OK, status));
 
         using var scope = Factory!.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<MultiChannelAgentDbContext>();
@@ -7024,9 +7058,8 @@ public sealed class WebConversationContinuitySqlScenarioTests : SqlIntegrationTe
         var submission = participant.SubmitTurnAsync("native-sql-reset-race", "list stock");
         var reset = secondTab.StartNewConversationAsync();
 
-        await Task.WhenAll(submission, reset);
-        Assert.Equal(HttpStatusCode.Accepted, submission.Result.StatusCode);
-        Assert.Equal(HttpStatusCode.OK, reset.Result.StatusCode);
+        var statuses = await SettleConcurrentRequestsAsync(submission, reset);
+        Assert.Equal([HttpStatusCode.Accepted, HttpStatusCode.OK], statuses);
 
         await ProcessUntilQuietAsync();
 
@@ -7055,26 +7088,95 @@ public sealed class WebConversationContinuitySqlScenarioTests : SqlIntegrationTe
     /// pretended to have succeeded. Fabricating a success would leave the caller asserting a
     /// generation that was never reached.
     /// </summary>
-    private static async Task<IReadOnlyList<HttpResponseMessage>> RunConcurrentlyRetryingDeadlockVictimAsync(
+    private static async Task<IReadOnlyList<HttpStatusCode>> RunConcurrentlyRetryingDeadlockVictimAsync(
         params Func<Task<HttpResponseMessage>>[] attempts)
     {
-        var started = attempts.Select(attempt => (Attempt: attempt, Task: attempt())).ToList();
-        var responses = new List<HttpResponseMessage>();
+        var settled = await SettleAsync(attempts.Select(attempt => attempt()).ToList());
+        var statuses = new List<HttpStatusCode>(attempts.Length);
 
-        foreach (var (attempt, task) in started)
+        for (var index = 0; index < settled.Count; index++)
         {
-            try
+            if (settled[index].Status is { } status)
             {
-                responses.Add(await task);
+                statuses.Add(status);
+                continue;
             }
-            catch (SqlException exception) when (exception.Number == DeadlockVictimErrorNumber)
+
+            // Only SQL Server error 1205 - "chosen as the deadlock victim" - is retried; every other
+            // fault is rethrown with its original stack, so this can never quietly absorb a real
+            // failure or turn one into a second request nobody asked for.
+            var fault = settled[index].Fault!;
+            if (DeadlockVictim(fault) is null)
             {
-                responses.Add(await attempt());
+                ExceptionDispatchInfo.Throw(fault);
+            }
+
+            using var retried = await attempts[index]();
+            statuses.Add(retried.StatusCode);
+        }
+
+        return statuses;
+    }
+
+    /// <summary>
+    /// Awaits requests that were already in flight and reports their status codes in the order they
+    /// were started, rethrowing the first fault only once every one of them has settled.
+    /// </summary>
+    private static async Task<IReadOnlyList<HttpStatusCode>> SettleConcurrentRequestsAsync(
+        params Task<HttpResponseMessage>[] started)
+    {
+        var settled = await SettleAsync(started);
+
+        foreach (var request in settled)
+        {
+            if (request.Fault is { } fault)
+            {
+                ExceptionDispatchInfo.Throw(fault);
             }
         }
 
-        return responses;
+        return settled.Select(request => request.Status!.Value).ToList();
     }
+
+    /// <summary>
+    /// Awaits every started request to completion, disposing each response the moment its status has
+    /// been read, and reports what each one did.
+    ///
+    /// Nothing is decided about any request until all of them have settled, because deciding earlier
+    /// is what leaks: a fault in the first would otherwise abandon the response the second is still
+    /// producing, and an <see cref="HttpResponseMessage"/> nobody disposes holds its buffered body
+    /// open for the rest of the run. Only the status code escapes, so no live response can.
+    /// </summary>
+    private static async Task<IReadOnlyList<SettledRequest>> SettleAsync(
+        IReadOnlyList<Task<HttpResponseMessage>> started)
+    {
+        var settled = new List<SettledRequest>(started.Count);
+
+        foreach (var request in started)
+        {
+            try
+            {
+                using var response = await request;
+                settled.Add(new SettledRequest(response.StatusCode, null));
+            }
+            catch (Exception exception)
+            {
+                settled.Add(new SettledRequest(null, exception));
+            }
+        }
+
+        return settled;
+    }
+
+    /// <summary>What one started request did: the status it answered with, or the fault it raised.</summary>
+    private readonly record struct SettledRequest(HttpStatusCode? Status, Exception? Fault);
+
+    private static SqlException? DeadlockVictim(Exception exception) => exception switch
+    {
+        SqlException { Number: DeadlockVictimErrorNumber } deadlock => deadlock,
+        { InnerException: { } inner } => DeadlockVictim(inner),
+        _ => null,
+    };
 
     private async Task<long> VersionAsync(Guid inventoryId)
     {
@@ -7082,6 +7184,63 @@ public sealed class WebConversationContinuitySqlScenarioTests : SqlIntegrationTe
         var db = scope.ServiceProvider.GetRequiredService<MultiChannelAgentDbContext>();
 
         return (await db.InventoryVersions.AsNoTracking().SingleAsync(v => v.InventoryId == inventoryId)).Version;
+    }
+
+    private static async Task SeedLegacyConversationAsync(
+        MultiChannelAgentDbContext db,
+        Guid participantId,
+        Guid inventoryId,
+        Guid turnId,
+        string channelConversationId,
+        Guid foundryConversationId)
+    {
+        await db.Database.ExecuteSqlAsync(
+            $"""
+             INSERT INTO Participants (Id, DisplayName, CreatedAt, UpdatedAt, IsActive)
+             VALUES ({participantId}, 'Legacy Participant', {LegacyAcceptedAt}, {LegacyAcceptedAt}, 1);
+             """);
+        await db.Database.ExecuteSqlAsync(
+            $"""
+             INSERT INTO Inventories (Id, Name, NormalizedName, CreatedByParticipantId, ClientRequestId, CreatedAt)
+             VALUES ({inventoryId}, 'Legacy Warehouse', 'legacy warehouse', {participantId}, 'legacy-create', {LegacyAcceptedAt});
+             """);
+        await db.Database.ExecuteSqlAsync(
+            $"""
+             INSERT INTO FoundryConversationBindings
+                 (ParticipantId, ChannelConversationId, FoundryConversationId, Generation, CreatedAt)
+             VALUES
+                 ({participantId}, {channelConversationId}, {foundryConversationId}, 1, {LegacyAcceptedAt});
+             """);
+        await db.Database.ExecuteSqlAsync(
+            $"""
+             INSERT INTO InboxEntries
+                 (TurnId, NativeMessageId, ParticipantId, ChannelConversationId, ConversationSequence,
+                  Channel, PrincipalKind, PrincipalSubject, PrincipalTenantId, Capabilities, Locale,
+                  TraceId, WasInterrupted, ReceivedAt, ReceivedAtTicks, CreatedAt, Status)
+             VALUES
+                 ({turnId}, 'legacy-native-message', {participantId}, {channelConversationId}, 1,
+                  'web', 'EntraUser', {participantId.ToString()}, NULL, 7, 'en-US',
+                  'legacy-trace', 0, {LegacyAcceptedAt}, {LegacyAcceptedAt.UtcTicks}, {LegacyAcceptedAt}, 'Pending');
+             """);
+    }
+
+    private static async Task ExecuteSqlScriptAsync(MultiChannelAgentDbContext db, string script)
+    {
+        await db.Database.OpenConnectionAsync();
+        try
+        {
+            foreach (var batch in Regex.Split(script, @"^\s*GO\s*;?\s*$", RegexOptions.Multiline))
+            {
+                if (!string.IsNullOrWhiteSpace(batch))
+                {
+                    await db.Database.ExecuteSqlRawAsync(batch);
+                }
+            }
+        }
+        finally
+        {
+            await db.Database.CloseConnectionAsync();
+        }
     }
 
     private async Task ProcessUntilQuietAsync()

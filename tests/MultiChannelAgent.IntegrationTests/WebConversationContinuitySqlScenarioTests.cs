@@ -1,7 +1,10 @@
 using System.Net;
 using System.Runtime.ExceptionServices;
+using System.Text.RegularExpressions;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.Extensions.DependencyInjection;
 using MultiChannelAgent.Application.Turns;
 using MultiChannelAgent.Domain.Inventories;
@@ -22,22 +25,52 @@ namespace MultiChannelAgent.IntegrationTests;
 public sealed class WebConversationContinuitySqlScenarioTests : SqlIntegrationTestBase
 {
     private const int DeadlockVictimErrorNumber = 1205;
+    private const string SchemaBeforeWebConversationContinuity = "20260904125923_AddInventoryAuditOccurredAtTicks";
+    private static readonly DateTimeOffset LegacyAcceptedAt = new(2026, 9, 4, 22, 50, 0, TimeSpan.Zero);
 
     [SkippableFact]
-    public async Task Every_migration_applies_and_the_new_tables_are_there_with_their_backfilled_rows()
+    public async Task Idempotent_upgrade_script_backfills_existing_inventory_and_turn_rows()
     {
         Skip.IfNot(DockerAvailable, "Docker is not available for the SQL Server-backed scenario.");
 
-        var http = ConversationTestClient.CreateHttpsClient(Factory!);
-        var participant = await ConversationTestClient.SignInAsync(http, "Migrating Participant");
-        var inventoryId = await participant.CreateAndSelectInventoryAsync("Migrated Warehouse");
+        var participantId = Guid.NewGuid();
+        var inventoryId = Guid.NewGuid();
+        var turnId = Guid.NewGuid();
+        var foundryConversationId = Guid.NewGuid();
+        const string channelConversationId = "web:legacy-profile";
 
-        using var scope = Factory!.Services.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<MultiChannelAgentDbContext>();
+        using (var scope = Factory!.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<MultiChannelAgentDbContext>();
+            var migrator = db.Database.GetService<IMigrator>();
 
-        Assert.Empty(await db.Database.GetPendingMigrationsAsync());
-        Assert.Equal(0L, (await db.InventoryVersions.AsNoTracking().SingleAsync(v => v.InventoryId == inventoryId)).Version);
-        Assert.Empty(await db.TurnProgressEvents.AsNoTracking().ToListAsync());
+            await migrator.MigrateAsync(SchemaBeforeWebConversationContinuity);
+            await SeedLegacyConversationAsync(
+                db,
+                participantId,
+                inventoryId,
+                turnId,
+                channelConversationId,
+                foundryConversationId);
+
+            var script = migrator.GenerateScript(
+                SchemaBeforeWebConversationContinuity,
+                options: MigrationsSqlGenerationOptions.Idempotent);
+            await ExecuteSqlScriptAsync(db, script);
+        }
+
+        using var verifyScope = Factory!.Services.CreateScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<MultiChannelAgentDbContext>();
+
+        Assert.Empty(await verifyDb.Database.GetPendingMigrationsAsync());
+        Assert.Equal(
+            0L,
+            (await verifyDb.InventoryVersions.AsNoTracking().SingleAsync(v => v.InventoryId == inventoryId)).Version);
+        Assert.Empty(await verifyDb.TurnProgressEvents.AsNoTracking().ToListAsync());
+
+        var entry = await verifyDb.InboxEntries.AsNoTracking().SingleAsync(i => i.TurnId == turnId);
+        Assert.Equal(foundryConversationId, entry.FoundryConversationId);
+        Assert.Equal(1, entry.FoundryConversationGeneration);
     }
 
     [SkippableFact]
@@ -296,6 +329,63 @@ public sealed class WebConversationContinuitySqlScenarioTests : SqlIntegrationTe
         var db = scope.ServiceProvider.GetRequiredService<MultiChannelAgentDbContext>();
 
         return (await db.InventoryVersions.AsNoTracking().SingleAsync(v => v.InventoryId == inventoryId)).Version;
+    }
+
+    private static async Task SeedLegacyConversationAsync(
+        MultiChannelAgentDbContext db,
+        Guid participantId,
+        Guid inventoryId,
+        Guid turnId,
+        string channelConversationId,
+        Guid foundryConversationId)
+    {
+        await db.Database.ExecuteSqlAsync(
+            $"""
+             INSERT INTO Participants (Id, DisplayName, CreatedAt, UpdatedAt, IsActive)
+             VALUES ({participantId}, 'Legacy Participant', {LegacyAcceptedAt}, {LegacyAcceptedAt}, 1);
+             """);
+        await db.Database.ExecuteSqlAsync(
+            $"""
+             INSERT INTO Inventories (Id, Name, NormalizedName, CreatedByParticipantId, ClientRequestId, CreatedAt)
+             VALUES ({inventoryId}, 'Legacy Warehouse', 'legacy warehouse', {participantId}, 'legacy-create', {LegacyAcceptedAt});
+             """);
+        await db.Database.ExecuteSqlAsync(
+            $"""
+             INSERT INTO FoundryConversationBindings
+                 (ParticipantId, ChannelConversationId, FoundryConversationId, Generation, CreatedAt)
+             VALUES
+                 ({participantId}, {channelConversationId}, {foundryConversationId}, 1, {LegacyAcceptedAt});
+             """);
+        await db.Database.ExecuteSqlAsync(
+            $"""
+             INSERT INTO InboxEntries
+                 (TurnId, NativeMessageId, ParticipantId, ChannelConversationId, ConversationSequence,
+                  Channel, PrincipalKind, PrincipalSubject, PrincipalTenantId, Capabilities, Locale,
+                  TraceId, WasInterrupted, ReceivedAt, ReceivedAtTicks, CreatedAt, Status)
+             VALUES
+                 ({turnId}, 'legacy-native-message', {participantId}, {channelConversationId}, 1,
+                  'web', 'EntraUser', {participantId.ToString()}, NULL, 7, 'en-US',
+                  'legacy-trace', 0, {LegacyAcceptedAt}, {LegacyAcceptedAt.UtcTicks}, {LegacyAcceptedAt}, 'Pending');
+             """);
+    }
+
+    private static async Task ExecuteSqlScriptAsync(MultiChannelAgentDbContext db, string script)
+    {
+        await db.Database.OpenConnectionAsync();
+        try
+        {
+            foreach (var batch in Regex.Split(script, @"^\s*GO\s*;?\s*$", RegexOptions.Multiline))
+            {
+                if (!string.IsNullOrWhiteSpace(batch))
+                {
+                    await db.Database.ExecuteSqlRawAsync(batch);
+                }
+            }
+        }
+        finally
+        {
+            await db.Database.CloseConnectionAsync();
+        }
     }
 
     private async Task ProcessUntilQuietAsync()
