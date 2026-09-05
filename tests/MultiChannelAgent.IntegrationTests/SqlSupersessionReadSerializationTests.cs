@@ -2,7 +2,6 @@ using System.Data.Common;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
-using Microsoft.Extensions.DependencyInjection;
 using MultiChannelAgent.Application.Inventories;
 using MultiChannelAgent.Application.Turns;
 using MultiChannelAgent.Domain.Inventories;
@@ -56,9 +55,24 @@ public sealed class SqlSupersessionReadSerializationTests : SqlIntegrationTestBa
     {
         Skip.IfNot(DockerAvailable, "Docker is not available in this environment; skipping the SQL-backed supersession serialization proof.");
 
-        var connectionString = ConnectionString();
-        await EnableReadCommittedSnapshotAsync(connectionString);
-        await SeedAsync();
+        // Its own database, because the setting this scenario exists to run under cannot be put on
+        // the container's shared `master` at all - and is set here before anything connects, so
+        // migrations and every context that follows already see it.
+        await using var database = await SqlUserDatabase.CreateAsync(ServerConnectionString!, CancellationToken.None);
+        await database.EnableReadCommittedSnapshotAsync(CancellationToken.None);
+
+        Assert.True(
+            await database.IsReadCommittedSnapshotOnAsync(CancellationToken.None),
+            "READ_COMMITTED_SNAPSHOT is not on, so this run would prove nothing about the isolation this fix exists for.");
+
+        var connectionString = database.ConnectionString;
+
+        using (var migrate = Context(connectionString))
+        {
+            await migrate.Database.MigrateAsync();
+        }
+
+        await SeedAsync(connectionString);
 
         using (var db = Context(connectionString))
         {
@@ -82,49 +96,59 @@ public sealed class SqlSupersessionReadSerializationTests : SqlIntegrationTestBa
                 .RotateAsync(Participant, Conversation, Now.AddMinutes(1), CancellationToken.None);
         });
 
-        await reachedTheGate.Task.WaitAsync(GateTimeout);
-
-        // P: the queued Turn, accepted under generation 1, stores the proposal the reset never saw.
-        // Bounded, so an orchestration that cannot reach P - because the paused reset blocked it -
-        // reports a failure rather than hanging the run.
-        var proposal = StockProposal();
-        await Task.Run(async () =>
-        {
-            using var db = Context(connectionString);
-            await new SqlConfirmationProposalStore(db).StoreAsync(proposal, Now.AddMinutes(2), CancellationToken.None);
-        }).WaitAsync(GateTimeout);
-
-        // The control this whole test rests on: with RCSI on, an ordinary read is still served the
-        // generation the reset is replacing. Answering the supersession question from this is exactly
-        // the defect - and it is invisible on a database without RCSI, which is why this runs here.
-        var snapshotGeneration = await Task.Run(async () =>
-        {
-            using var db = Context(connectionString);
-            var snapshot = await new SqlFoundryConversationBindingStore(db)
-                .GetOrCreateAsync(Participant, Conversation, Now.AddMinutes(3), CancellationToken.None);
-
-            return snapshot.Generation;
-        }).WaitAsync(GateTimeout);
-
-        Assert.Equal(1, snapshotGeneration);
-
         // S: the post-dispatch check, run through the seam that takes the row's lock.
         using var settleDb = Context(connectionString);
-        var settling = Task.Run(() => new ConfirmationProposalLifecycle(
-                new SqlConfirmationProposalStore(settleDb), new SqlFoundryConversationBindingStore(settleDb))
-            .SettleSupersededConversationAsync(AcceptedUnderGenerationOne(), Now.AddMinutes(4), CancellationToken.None));
+        var proposal = StockProposal();
+        Task<SupersededConversationSettlement> settling;
 
-        // It must not be able to answer at all while the reset holds the binding row. An unhinted read
-        // would have answered here, from the stale generation, and settled nothing.
-        await Assert.ThrowsAsync<TimeoutException>(() => settling.WaitAsync(BlockedWindow));
+        try
+        {
+            await reachedTheGate.Task.WaitAsync(GateTimeout);
 
-        // And it must be waiting on that row rather than merely slow to start: a check that had not
-        // yet reached the database would time out above for a reason that proves nothing.
-        Assert.True(
-            await SomeRequestIsBlockedAsync(connectionString),
-            "The supersession check was not blocked on the reset's binding row, so this run proved nothing.");
+            // P: the queued Turn, accepted under generation 1, stores the proposal the reset never
+            // saw. Bounded, so an orchestration that cannot reach P - because the paused reset
+            // blocked it - reports a failure rather than hanging the run.
+            await Task.Run(async () =>
+            {
+                using var db = Context(connectionString);
+                await new SqlConfirmationProposalStore(db).StoreAsync(proposal, Now.AddMinutes(2), CancellationToken.None);
+            }).WaitAsync(GateTimeout);
 
-        release.TrySetResult();
+            // The control this whole test rests on: with RCSI on, an ordinary read is still served the
+            // generation the reset is replacing. Answering the supersession question from this is
+            // exactly the defect - and it is invisible on a database without RCSI, which is why this
+            // scenario builds itself a database that has it.
+            var snapshotGeneration = await Task.Run(async () =>
+            {
+                using var db = Context(connectionString);
+                var snapshot = await new SqlFoundryConversationBindingStore(db)
+                    .GetOrCreateAsync(Participant, Conversation, Now.AddMinutes(3), CancellationToken.None);
+
+                return snapshot.Generation;
+            }).WaitAsync(GateTimeout);
+
+            Assert.Equal(1, snapshotGeneration);
+
+            settling = Task.Run(() => new ConfirmationProposalLifecycle(
+                    new SqlConfirmationProposalStore(settleDb), new SqlFoundryConversationBindingStore(settleDb))
+                .SettleSupersededConversationAsync(AcceptedUnderGenerationOne(), Now.AddMinutes(4), CancellationToken.None));
+
+            // It must not be able to answer at all while the reset holds the binding row. An unhinted
+            // read would have answered here, from the stale generation, and settled nothing.
+            await Assert.ThrowsAsync<TimeoutException>(() => settling.WaitAsync(BlockedWindow));
+
+            // And it must be waiting on that row rather than merely slow to start: a check that had
+            // not yet reached the database would time out above for a reason that proves nothing.
+            Assert.True(
+                await SomeRequestIsBlockedAsync(connectionString),
+                "The supersession check was not blocked on the reset's binding row, so this run proved nothing.");
+        }
+        finally
+        {
+            // Released even when an assertion above fails, so the reset finishes its transaction and
+            // the failing assertion is what gets reported - not a database that could not be dropped.
+            release.TrySetResult();
+        }
 
         var rotated = await rotating.WaitAsync(GateTimeout);
         Assert.Equal(2, rotated.Binding.Generation);
@@ -143,51 +167,6 @@ public sealed class SqlSupersessionReadSerializationTests : SqlIntegrationTestBa
         Assert.Equal(nameof(ProposalStatus.ConversationReset), stored.Status);
         Assert.Null(await new SqlConfirmationProposalStore(verifyDb)
             .FindPendingAsync(Participant, Conversation.Value, CancellationToken.None));
-    }
-
-    private string ConnectionString()
-    {
-        using var scope = Factory!.Services.CreateScope();
-
-        return scope.ServiceProvider.GetRequiredService<MultiChannelAgentDbContext>().Database.GetConnectionString()!;
-    }
-
-    /// <summary>
-    /// Puts the test database in the mode Azure SQL databases are created in. It is done against
-    /// <c>master</c> with <c>ROLLBACK IMMEDIATE</c> because the option cannot be set while other
-    /// sessions hold the database, and the pool is cleared afterwards so nothing reuses a connection
-    /// that was closed out from under it. The setting is then read back: a test that silently ran
-    /// without it would prove nothing at all.
-    /// </summary>
-    private static async Task EnableReadCommittedSnapshotAsync(string connectionString)
-    {
-        var databaseName = new SqlConnectionStringBuilder(connectionString).InitialCatalog;
-        var masterConnectionString = new SqlConnectionStringBuilder(connectionString) { InitialCatalog = "master" }
-            .ConnectionString;
-
-        await using (var master = new SqlConnection(masterConnectionString))
-        {
-            await master.OpenAsync();
-
-            // The database name cannot be a parameter in ALTER DATABASE, so it is quoted through
-            // QUOTENAME rather than concatenated, and it is a container name this test itself created.
-            await using var alter = master.CreateCommand();
-            alter.CommandText =
-                "DECLARE @sql nvarchar(max) = N'ALTER DATABASE ' + QUOTENAME(@database) + " +
-                "N' SET READ_COMMITTED_SNAPSHOT ON WITH ROLLBACK IMMEDIATE'; EXEC sp_executesql @sql;";
-            alter.Parameters.AddWithValue("@database", databaseName);
-            await alter.ExecuteNonQueryAsync();
-        }
-
-        SqlConnection.ClearAllPools();
-
-        await using var verify = new SqlConnection(masterConnectionString);
-        await verify.OpenAsync();
-        await using var query = verify.CreateCommand();
-        query.CommandText = "SELECT is_read_committed_snapshot_on FROM sys.databases WHERE name = @database";
-        query.Parameters.AddWithValue("@database", databaseName);
-
-        Assert.True((bool)(await query.ExecuteScalarAsync())!);
     }
 
     private static MultiChannelAgentDbContext Context(string connectionString, DbCommandInterceptor? interceptor = null)
@@ -226,10 +205,9 @@ public sealed class SqlSupersessionReadSerializationTests : SqlIntegrationTestBa
         SomeInventory,
         TraceId: null);
 
-    private async Task SeedAsync()
+    private static async Task SeedAsync(string connectionString)
     {
-        using var scope = Factory!.Services.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<MultiChannelAgentDbContext>();
+        using var db = Context(connectionString);
 
         db.Participants.Add(new ParticipantEntity
         {

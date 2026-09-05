@@ -20,6 +20,14 @@ public abstract class SqlIntegrationTestBase : IAsyncLifetime
 
     protected CustomWebApplicationFactory? Factory { get; private set; }
 
+    /// <summary>
+    /// The container's own connection string. It points at <c>master</c>, which every scenario here
+    /// shares deliberately - one database in one container is what keeps them fast. A scenario that
+    /// needs a database-level option cannot use it (see <see cref="SqlUserDatabase"/>) and creates
+    /// its own database from this.
+    /// </summary>
+    protected string? ServerConnectionString { get; private set; }
+
     public async Task InitializeAsync()
     {
         var dockerRequired = DockerTestPolicy.IsDockerRequired(Environment.GetEnvironmentVariable);
@@ -45,8 +53,9 @@ public abstract class SqlIntegrationTestBase : IAsyncLifetime
         // migration failure) is a real bug and must propagate as a failing test.
         _sqlContainer = new MsSqlBuilder("mcr.microsoft.com/mssql/server:2022-CU14-ubuntu-22.04").Build();
         await _sqlContainer.StartAsync();
+        ServerConnectionString = _sqlContainer.GetConnectionString();
 
-        Factory = new CustomWebApplicationFactory(_sqlContainer.GetConnectionString());
+        Factory = new CustomWebApplicationFactory(ServerConnectionString);
 
         using var scope = Factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<MultiChannelAgentDbContext>();
