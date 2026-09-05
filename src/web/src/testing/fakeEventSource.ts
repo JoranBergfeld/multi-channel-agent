@@ -82,8 +82,8 @@ export function recordingEventStreamFactory(): {
  * `vite.config.ts` enables Vitest's `unstubGlobals` option, so the stub is undone automatically
  * before the next test runs - a caller never has to restore it itself.
  */
-export function installFakeEventSource(): { opened: FakeEventSource[] } {
+export function installFakeEventSource(): FakeEventSource[] {
   const { opened, factory } = recordingEventStreamFactory()
   vi.stubGlobal('EventSource', factory)
-  return { opened }
+  return opened
 }

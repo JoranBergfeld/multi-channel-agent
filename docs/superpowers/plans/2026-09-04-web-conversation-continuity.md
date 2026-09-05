@@ -7307,6 +7307,9 @@ Replace `src/web/vite.config.ts` with:
 
 ```ts
 import react from '@vitejs/plugin-react'
+// `defineConfig` comes from `vitest/config` (a superset of Vite's) so the same config file can
+// carry both the build/dev settings and the `test` block Vitest reads - without this, Vitest and
+// Vite would need separate config files that could drift out of sync.
 import { defineConfig } from 'vitest/config'
 
 // https://vite.dev/config/
@@ -7316,6 +7319,9 @@ export default defineConfig({
     environment: 'jsdom',
     setupFiles: ['./src/testing/setup.ts'],
     include: ['src/**/*.test.{ts,tsx}'],
+    // Every stubbed global (installFakeEventSource uses `vi.stubGlobal`) is torn down between
+    // tests automatically, so one test's fake `EventSource` can never leak into the next.
+    unstubGlobals: true,
   },
 })
 ```
@@ -7482,84 +7488,94 @@ afterEach(() => {
 Create `src/web/src/testing/fakeEventSource.ts`:
 
 ```ts
-import { vi } from 'vitest';
+// Faithful enough to swap in for the browser's global `EventSource` in tests: components under
+// test call `new EventSource(url)`, `addEventListener`, and `close()` exactly as they would against
+// the real thing, and the test drives the stream forward with `emit`/`fail` instead of a real HTTP
+// response. Deliberately imports no production-code types - it stands in for a Web Platform API,
+// not for anything this application defines, so it must never drift out of sync with either.
+import { vi } from 'vitest'
 
-/**
- * A controllable stand-in for the browser's `EventSource`, which jsdom does not implement. Tests push
- * events into it and assert what the client did with them, which is the only way to prove reconnect,
- * resume, and terminal-close behaviour without a real browser and a real server.
- *
- * It deliberately imports no type from the code under test: matching structurally is exactly what
- * proves the production client depends only on the small `EventSource` surface it claims to.
- */
+type SseListener = (event: MessageEvent<string>) => void
+
+/** A minimal, structurally-compatible stand-in for the browser's `EventSource`. */
 export class FakeEventSource {
-  readonly url: string;
-  closed = false;
-  onerror: ((event: Event) => void) | null = null;
+  readonly url: string
+  closed = false
+  onerror: ((event: Event) => void) | null = null
 
-  private readonly listeners = new Map<string, ((event: MessageEvent) => void)[]>();
+  private readonly listeners = new Map<string, Set<SseListener>>()
 
   constructor(url: string) {
-    this.url = url;
+    this.url = url
   }
 
-  addEventListener(type: string, listener: (event: MessageEvent) => void) {
-    const existing = this.listeners.get(type) ?? [];
-    existing.push(listener);
-    this.listeners.set(type, existing);
-  }
-
-  close() {
-    this.closed = true;
-  }
-
-  /** Delivers one server event, exactly as the browser would after parsing a `text/event-stream` record. */
-  emit(type: string, data: unknown, lastEventId = '') {
-    const event = new MessageEvent(type, { data: JSON.stringify(data), lastEventId });
-    for (const listener of this.listeners.get(type) ?? []) {
-      listener(event);
+  addEventListener(type: string, listener: SseListener): void {
+    let forType = this.listeners.get(type)
+    if (!forType) {
+      forType = new Set()
+      this.listeners.set(type, forType)
     }
+
+    forType.add(listener)
   }
 
-  /** Fails the connection, exactly as the browser does when the response ends or the network drops. */
-  fail() {
-    this.onerror?.(new Event('error'));
+  removeEventListener(type: string, listener: SseListener): void {
+    this.listeners.get(type)?.delete(listener)
   }
-}
 
-/** Records every stream the code under test opened, so a test can assert on the resumed URL. */
-export function recordingEventStreamFactory() {
-  const opened: FakeEventSource[] = [];
+  close(): void {
+    this.closed = true
+  }
 
-  const factory = (url: string) => {
-    const source = new FakeEventSource(url);
-    opened.push(source);
-    return source;
-  };
+  /**
+   * Delivers a named SSE event to every listener registered for it, JSON-encoding `data` exactly
+   * as the real backend does (see `ServerSentEvents.WriteEventAsync`), so a test passes a plain
+   * value and the component under test still receives a JSON string in `event.data`.
+   */
+  emit(type: string, data: unknown, lastEventId = ''): void {
+    const event = new MessageEvent(type, { data: JSON.stringify(data), lastEventId })
+    this.listeners.get(type)?.forEach((listener) => listener(event))
+  }
 
-  return { opened, factory };
+  /**
+   * Simulates the underlying connection failing - exactly how a real `EventSource` reports one:
+   * through `onerror`, never by throwing. Does not close the stream by itself, since a real
+   * `EventSource` reconnects on its own after a transient error unless the server ends the stream.
+   */
+  fail(): void {
+    this.onerror?.(new Event('error'))
+  }
 }
 
 /**
- * Replaces the global `EventSource` for the duration of a test, for code that opens a stream through
- * the default factory rather than an injected one. `vi.unstubAllGlobals()` in the test's teardown
- * removes it.
+ * Builds an `EventSource`-shaped factory function that records every instance it creates, so a
+ * test can reach into `opened` to drive (or inspect) whichever stream the component under test has
+ * open - including after a reconnect, which opens a new instance rather than reusing the old one.
  */
-export function installFakeEventSource() {
-  const opened: FakeEventSource[] = [];
+export function recordingEventStreamFactory(): {
+  opened: FakeEventSource[]
+  factory: (url: string) => FakeEventSource
+} {
+  const opened: FakeEventSource[] = []
 
-  vi.stubGlobal(
-    'EventSource',
-    class {
-      constructor(url: string) {
-        const source = new FakeEventSource(url);
-        opened.push(source);
-        return source as unknown as EventSource;
-      }
-    },
-  );
+  function factory(url: string): FakeEventSource {
+    const source = new FakeEventSource(url)
+    opened.push(source)
+    return source
+  }
 
-  return opened;
+  return { opened, factory }
+}
+
+/**
+ * Replaces the global `EventSource` constructor with a recording fake for the current test.
+ * `vite.config.ts` enables Vitest's `unstubGlobals` option, so the stub is undone automatically
+ * before the next test runs - a caller never has to restore it itself.
+ */
+export function installFakeEventSource(): FakeEventSource[] {
+  const { opened, factory } = recordingEventStreamFactory()
+  vi.stubGlobal('EventSource', factory)
+  return opened
 }
 ```
 
@@ -7568,28 +7584,42 @@ export function installFakeEventSource() {
 Create `src/web/src/testing/setup.test.ts`:
 
 ```ts
-import { describe, expect, it } from 'vitest';
-import { DESKTOP_WIDTH, NARROW_WIDTH, setViewportWidth } from './setup';
+import { describe, expect, it } from 'vitest'
 
-describe('the test harness', () => {
-  it('answers width queries against the viewport the test chose', () => {
-    setViewportWidth(NARROW_WIDTH);
-    expect(window.matchMedia('(max-width: 1023px)').matches).toBe(true);
+import { DESKTOP_WIDTH, NARROW_WIDTH, setViewportWidth } from './setup'
 
-    setViewportWidth(DESKTOP_WIDTH);
-    expect(window.matchMedia('(max-width: 1023px)').matches).toBe(false);
-  });
+describe('test runtime setup', () => {
+  it('resolves max-width and min-width media queries against the width set by setViewportWidth', () => {
+    // `beforeEach` in setup.ts already put us at DESKTOP_WIDTH.
+    expect(window.matchMedia(`(max-width: ${NARROW_WIDTH}px)`).matches).toBe(false)
+    expect(window.matchMedia(`(min-width: ${DESKTOP_WIDTH}px)`).matches).toBe(true)
 
-  it('starts every test with an empty browser profile', () => {
-    expect(window.localStorage.length).toBe(0);
-  });
-});
+    setViewportWidth(NARROW_WIDTH)
+
+    expect(window.matchMedia(`(max-width: ${NARROW_WIDTH}px)`).matches).toBe(true)
+    expect(window.matchMedia(`(min-width: ${DESKTOP_WIDTH}px)`).matches).toBe(false)
+
+    // Leave something behind for the next test to prove does not leak across tests.
+    window.localStorage.setItem('leftover', 'from-a-previous-test')
+  })
+
+  it('treats an unsupported media query as non-matching instead of defaulting to true', () => {
+    // `(width <= ...)` is neither the supported max-width nor min-width token, so a fail-closed
+    // harness must report no match rather than silently matching every unrecognized query.
+    expect(window.matchMedia(`(width <= ${NARROW_WIDTH}px)`).matches).toBe(false)
+  })
+
+  it('starts with empty localStorage even though the previous test wrote to it', () => {
+    expect(window.localStorage.length).toBe(0)
+    expect(window.localStorage.getItem('leftover')).toBeNull()
+  })
+})
 ```
 
 - [ ] **Step 6: Run the test to verify it passes**
 
 Run: `cd src/web && npm test`
-Expected: PASS, 2 tests. `fakeEventSource.ts` has no test of its own and imports nothing from the code under test, so it compiles on its own here and is exercised from Task 16 onwards.
+Expected: PASS, 3 tests. `fakeEventSource.ts` has no test of its own and imports nothing from the code under test, so it compiles on its own here and is exercised from Task 16 onwards.
 
 - [ ] **Step 7: Add the CI gate**
 
