@@ -87,6 +87,7 @@ public static class ServiceCollectionExtensions
         services.AddScoped<ParticipantSessionService>();
         services.AddScoped<InventoryCreationService>();
         services.AddScoped<InventoryListingService>();
+        services.AddScoped<InventoryInvalidationReader>();
         services.AddScoped<InventoryAuthorizationService>();
         services.AddScoped<InventorySelectionService>();
         services.AddScoped<InventoryBootstrapService>();

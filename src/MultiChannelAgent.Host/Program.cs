@@ -79,6 +79,7 @@ app.MapSessionEndpoints();
 app.MapInventoryEndpoints();
 app.MapInventoryGovernanceEndpoints();
 app.MapInventoryRecoveryEndpoints();
+app.MapInventoryEventEndpoints();
 app.MapStockEndpoints();
 app.MapReferenceEndpoints();
 app.MapImportEndpoints();
