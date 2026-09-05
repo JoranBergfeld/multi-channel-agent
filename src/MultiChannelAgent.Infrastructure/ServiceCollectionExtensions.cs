@@ -67,6 +67,7 @@ public static class ServiceCollectionExtensions
         services.AddScoped<IImportExecutionStore, SqlImportExecutionStore>();
         services.AddScoped<IStockEmptyStateReader, SqlStockEmptyStateReader>();
         services.AddScoped<IInventoryAuditRetentionStore, SqlInventoryAuditRetentionStore>();
+        services.AddScoped<IInventoryVersionStore, SqlInventoryVersionStore>();
         services.AddScoped<ReferenceChangeResolver>();
         services.AddScoped<ReferenceAdministrationService>();
         services.AddScoped<ReferenceListingService>();
