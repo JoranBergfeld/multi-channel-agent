@@ -109,3 +109,70 @@ code {
   padding: 4px 8px;
   background: var(--code-bg);
 }
+
+/*
+  Conversation primary at every width. On a wide viewport the workspace sits beside it and the
+  conversation gets the larger column; below the breakpoint they stack behind a tab list, which is
+  where WorkspacePanel switches to an ARIA tab pattern so the DOM says exactly what the screen shows.
+*/
+.workspace-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+  gap: 24px;
+  align-items: start;
+  text-align: left;
+  padding: 0 16px 32px;
+}
+
+.workspace-layout-narrow {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.workspace-conversation,
+.workspace-panel {
+  min-width: 0;
+}
+
+.workspace-panel {
+  border-inline-start: 1px solid var(--border);
+  padding-inline-start: 24px;
+}
+
+.workspace-tabs {
+  display: flex;
+  gap: 8px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 16px;
+}
+
+.workspace-tabs [role='tab'] {
+  background: none;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  padding: 8px 12px;
+}
+
+.workspace-tabs [role='tab'][aria-selected='true'] {
+  border-bottom-color: var(--accent);
+  color: var(--text-h);
+}
+
+.workspace-tabs [role='tab']:focus-visible,
+[role='tabpanel']:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+@media (max-width: 1023px) {
+  .workspace-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .workspace-panel {
+    border-inline-start: 0;
+    padding-inline-start: 0;
+  }
+}
