@@ -95,14 +95,27 @@ function App() {
   }, [loadSession]);
 
   const isReady = state.phase === 'ready';
+  const authorizedInventorySetKey =
+    state.phase === 'ready'
+      ? JSON.stringify(state.session.bootstrap.inventories.map((inventory) => inventory.id).sort())
+      : '';
 
   useEffect(() => {
     if (!isReady) {
       return;
     }
 
+    let lastAuthorizedInventorySetKey = authorizedInventorySetKey;
     const stream = openInventoryStream({
-      onVersions: setInventoryVersions,
+      onVersions: (versions) => {
+        setInventoryVersions(versions);
+
+        const nextAuthorizedInventorySetKey = JSON.stringify(Object.keys(versions).sort());
+        if (nextAuthorizedInventorySetKey !== lastAuthorizedInventorySetKey) {
+          lastAuthorizedInventorySetKey = nextAuthorizedInventorySetKey;
+          void loadSession();
+        }
+      },
       // Into the dedicated, persistent state - never into `error` - so that no unrelated handler's
       // `setError(null)` can make this warning disappear while the stream is still just as dead.
       onFailed: () =>
@@ -111,7 +124,7 @@ function App() {
         ),
     });
     return () => stream.close();
-  }, [isReady]);
+  }, [authorizedInventorySetKey, isReady, loadSession]);
 
   async function handleCreateInventory(event: React.FormEvent) {
     event.preventDefault();

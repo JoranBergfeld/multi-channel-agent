@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { DESKTOP_WIDTH, NARROW_WIDTH, setViewportWidth } from './testing/setup';
@@ -77,10 +77,6 @@ function inventoryStreamIn(streams: FakeEventSource[]) {
 function turnStreamIn(streams: FakeEventSource[]) {
   return streams.find((stream) => stream.url.startsWith('/api/turns/'));
 }
-
-afterEach(() => {
-  vi.unstubAllGlobals();
-});
 
 describe('App', () => {
   it('keeps the conversation in the main landmark on a desktop viewport', async () => {
@@ -193,6 +189,85 @@ describe('App', () => {
     inventoryStreamIn(streams)!.emit('changed', { inventoryId: 'inventory-1', version: 1 });
 
     await waitFor(() => expect(calls.filter((url) => url.includes('/stock')).length).toBeGreaterThan(1));
+  });
+
+  it('refreshes the authorized Inventory list when the stream reports a revocation', async () => {
+    setViewportWidth(DESKTOP_WIDTH);
+    let bootstrapCalls = 0;
+    const { streams } = stubApi({
+      '/api/session/bootstrap': () => {
+        bootstrapCalls += 1;
+        return json(
+          bootstrapCalls === 1
+            ? BOOTSTRAP
+            : {
+                ...BOOTSTRAP,
+                bootstrap: {
+                  ...BOOTSTRAP.bootstrap,
+                  inventories: [BOOTSTRAP.bootstrap.inventories[0]],
+                },
+              },
+        );
+      },
+    });
+
+    render(<App />);
+    await screen.findByText(/Spare Warehouse/);
+    await waitFor(() => expect(inventoryStreamIn(streams)).toBeDefined());
+
+    inventoryStreamIn(streams)!.emit('snapshot', {
+      inventories: [
+        { inventoryId: 'inventory-1', version: 0 },
+        { inventoryId: 'inventory-2', version: 0 },
+      ],
+    });
+    inventoryStreamIn(streams)!.emit('revoked', { inventoryId: 'inventory-2' });
+
+    await waitFor(() => expect(screen.queryByText(/Spare Warehouse/)).not.toBeInTheDocument());
+    expect(bootstrapCalls).toBe(2);
+  });
+
+  it('refreshes the authorized Inventory list when the stream reports a new grant', async () => {
+    setViewportWidth(DESKTOP_WIDTH);
+    let bootstrapCalls = 0;
+    const grantedInventory = {
+      id: 'inventory-3',
+      shortId: 'cccccccc',
+      name: 'Granted Warehouse',
+      ownerDisplayName: 'Grace Hopper',
+      role: 'Viewer',
+    };
+    const { streams } = stubApi({
+      '/api/session/bootstrap': () => {
+        bootstrapCalls += 1;
+        return json(
+          bootstrapCalls === 1
+            ? BOOTSTRAP
+            : {
+                ...BOOTSTRAP,
+                bootstrap: {
+                  ...BOOTSTRAP.bootstrap,
+                  inventories: [...BOOTSTRAP.bootstrap.inventories, grantedInventory],
+                },
+              },
+        );
+      },
+    });
+
+    render(<App />);
+    await screen.findByRole('banner');
+    await waitFor(() => expect(inventoryStreamIn(streams)).toBeDefined());
+
+    inventoryStreamIn(streams)!.emit('snapshot', {
+      inventories: [
+        { inventoryId: 'inventory-1', version: 0 },
+        { inventoryId: 'inventory-2', version: 0 },
+      ],
+    });
+    inventoryStreamIn(streams)!.emit('changed', { inventoryId: 'inventory-3', version: 0 });
+
+    expect(await screen.findByText(/Granted Warehouse/)).toBeInTheDocument();
+    expect(bootstrapCalls).toBe(2);
   });
 
   it('does not let a locally signalled refetch swallow the next version the server publishes', async () => {

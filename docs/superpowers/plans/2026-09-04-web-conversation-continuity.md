@@ -9850,7 +9850,7 @@ Create `src/web/src/TurnTracer.test.tsx`:
 
 ```tsx
 import { StrictMode } from 'react';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { recordingEventStreamFactory } from './testing/fakeEventSource';
@@ -11376,10 +11376,6 @@ function stubApi(overrides: Record<string, () => Response> = {}) {
   return { fetchMock, calls, streams };
 }
 
-afterEach(() => {
-  vi.unstubAllGlobals();
-});
-
 describe('App', () => {
   it('keeps the conversation in the main landmark on a desktop viewport', async () => {
     setViewportWidth(DESKTOP_WIDTH);
@@ -11491,6 +11487,85 @@ describe('App', () => {
     inventoryStreamIn(streams)!.emit('changed', { inventoryId: 'inventory-1', version: 1 });
 
     await waitFor(() => expect(calls.filter((url) => url.includes('/stock')).length).toBeGreaterThan(1));
+  });
+
+  it('refreshes the authorized Inventory list when the stream reports a revocation', async () => {
+    setViewportWidth(DESKTOP_WIDTH);
+    let bootstrapCalls = 0;
+    const { streams } = stubApi({
+      '/api/session/bootstrap': () => {
+        bootstrapCalls += 1;
+        return json(
+          bootstrapCalls === 1
+            ? BOOTSTRAP
+            : {
+                ...BOOTSTRAP,
+                bootstrap: {
+                  ...BOOTSTRAP.bootstrap,
+                  inventories: [BOOTSTRAP.bootstrap.inventories[0]],
+                },
+              },
+        );
+      },
+    });
+
+    render(<App />);
+    await screen.findByText(/Spare Warehouse/);
+    await waitFor(() => expect(inventoryStreamIn(streams)).toBeDefined());
+
+    inventoryStreamIn(streams)!.emit('snapshot', {
+      inventories: [
+        { inventoryId: 'inventory-1', version: 0 },
+        { inventoryId: 'inventory-2', version: 0 },
+      ],
+    });
+    inventoryStreamIn(streams)!.emit('revoked', { inventoryId: 'inventory-2' });
+
+    await waitFor(() => expect(screen.queryByText(/Spare Warehouse/)).not.toBeInTheDocument());
+    expect(bootstrapCalls).toBe(2);
+  });
+
+  it('refreshes the authorized Inventory list when the stream reports a new grant', async () => {
+    setViewportWidth(DESKTOP_WIDTH);
+    let bootstrapCalls = 0;
+    const grantedInventory = {
+      id: 'inventory-3',
+      shortId: 'cccccccc',
+      name: 'Granted Warehouse',
+      ownerDisplayName: 'Grace Hopper',
+      role: 'Viewer',
+    };
+    const { streams } = stubApi({
+      '/api/session/bootstrap': () => {
+        bootstrapCalls += 1;
+        return json(
+          bootstrapCalls === 1
+            ? BOOTSTRAP
+            : {
+                ...BOOTSTRAP,
+                bootstrap: {
+                  ...BOOTSTRAP.bootstrap,
+                  inventories: [...BOOTSTRAP.bootstrap.inventories, grantedInventory],
+                },
+              },
+        );
+      },
+    });
+
+    render(<App />);
+    await screen.findByRole('banner');
+    await waitFor(() => expect(inventoryStreamIn(streams)).toBeDefined());
+
+    inventoryStreamIn(streams)!.emit('snapshot', {
+      inventories: [
+        { inventoryId: 'inventory-1', version: 0 },
+        { inventoryId: 'inventory-2', version: 0 },
+      ],
+    });
+    inventoryStreamIn(streams)!.emit('changed', { inventoryId: 'inventory-3', version: 0 });
+
+    expect(await screen.findByText(/Granted Warehouse/)).toBeInTheDocument();
+    expect(bootstrapCalls).toBe(2);
   });
 
   it('does not let a locally signalled refetch swallow the next version the server publishes', async () => {
@@ -11769,14 +11844,27 @@ function App() {
   }, [loadSession]);
 
   const isReady = state.phase === 'ready';
+  const authorizedInventorySetKey =
+    state.phase === 'ready'
+      ? JSON.stringify(state.session.bootstrap.inventories.map((inventory) => inventory.id).sort())
+      : '';
 
   useEffect(() => {
     if (!isReady) {
       return;
     }
 
+    let lastAuthorizedInventorySetKey = authorizedInventorySetKey;
     const stream = openInventoryStream({
-      onVersions: setInventoryVersions,
+      onVersions: (versions) => {
+        setInventoryVersions(versions);
+
+        const nextAuthorizedInventorySetKey = JSON.stringify(Object.keys(versions).sort());
+        if (nextAuthorizedInventorySetKey !== lastAuthorizedInventorySetKey) {
+          lastAuthorizedInventorySetKey = nextAuthorizedInventorySetKey;
+          void loadSession();
+        }
+      },
       // Into the dedicated, persistent state - never into `error` - so that no unrelated handler's
       // `setError(null)` can make this warning disappear while the stream is still just as dead.
       onFailed: () =>
@@ -11785,7 +11873,7 @@ function App() {
         ),
     });
     return () => stream.close();
-  }, [isReady]);
+  }, [authorizedInventorySetKey, isReady, loadSession]);
 
   async function handleCreateInventory(event: React.FormEvent) {
     event.preventDefault();
@@ -12052,9 +12140,11 @@ export default App;
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `cd src/web && npm test`
-Expected: PASS. The whole web suite - roughly 112 tests across nine files (Task 19's `WorkspacePanel.test.tsx` grew from 10 to 15 tests and gained a sibling `useMediaQuery.test.ts` with 2 tests, both during that task's own quality-review hardening; Task 17's `conversationStorage.test.ts` grew from 14 to 24 to 27 to 34 tests; Task 20's `TurnTracer.test.tsx` grew from 10 to 12 to 15 to 17 to 23 to 25 to 26 tests and gained one direct `turnsApi.test.ts` classification test; and Task 21's `App.test.tsx` grew from 10 to 12 tests during its quality-review hardening) - is green.
+Expected: PASS. The whole web suite - roughly 114 tests across nine files (Task 19's `WorkspacePanel.test.tsx` grew from 10 to 15 tests and gained a sibling `useMediaQuery.test.ts` with 2 tests, both during that task's own quality-review hardening; Task 17's `conversationStorage.test.ts` grew from 14 to 24 to 27 to 34 tests; Task 20's `TurnTracer.test.tsx` grew from 10 to 12 to 15 to 17 to 23 to 25 to 26 tests and gained one direct `turnsApi.test.ts` classification test; and Task 21's `App.test.tsx` grew from 10 to 12 to 14 tests during its quality-review and branch-wide specification hardening) - is green.
 
 The Task 21 quality review found two reset-boundary defects. First, a successful reset notice survived a later failed reset and could also suppress the live-region announcement for two identical consecutive successes; every operation now clears the old notice as it begins. Second, `clearInFlightTurn`'s boolean result was ignored even though this is the Participant's explicit reset action: if removal failed, remounting `TurnTracer` could immediately recover old work into the already-rotated conversation. The shell now reports that partial failure and keeps the current tracer mounted instead. The two added tests pin both outcomes, including the old stream remaining open and the recovery record remaining present when removal fails.
+
+The branch-wide specification review found that the server and typed stream client reported Membership grants and revocations, but the shell consumed only the Active Inventory's version. The stream callback now compares its authorized Inventory id set with the bootstrap set and refreshes the session whenever that set changes, so granted Inventories appear and revoked Inventories disappear without a page reload. Two tests drive real `changed` and `revoked` events through the fake EventSource. The test file also relies solely on Vitest's configured `unstubGlobals` teardown: manually unstubbing in an `afterEach` raced React's passive-effect cleanup and could intermittently remove `EventSource` before a late effect opened it.
 
 - [ ] **Step 5: Check types, lint, and build**
 
