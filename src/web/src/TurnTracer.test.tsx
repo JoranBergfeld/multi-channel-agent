@@ -183,6 +183,35 @@ describe('TurnTracer', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it('keeps one live stream and its rendered parts across a parent rerender', async () => {
+    stubFetch(() => acceptedResponse('turn-1'));
+    const { opened, factory } = recordingEventStreamFactory();
+    const props = {
+      csrfToken: 'csrf-token',
+      webConversationId: CONVERSATION,
+      participantId: PARTICIPANT,
+      onTerminalOutcome: () => {},
+      createSource: factory,
+    };
+    const { rerender } = render(<TurnTracer {...props} />);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Send' }));
+    await waitFor(() => expect(opened).toHaveLength(1));
+    opened[0].emit(
+      'part',
+      { turnId: 'turn-1', order: 1, kind: 'text', text: 'Still streaming.', payload: null },
+      '100',
+    );
+    expect(await screen.findByText('Still streaming.')).toBeInTheDocument();
+
+    rerender(<TurnTracer {...props} onTerminalOutcome={() => {}} />);
+    await flushAsyncWork();
+
+    expect(opened).toHaveLength(1);
+    expect(opened[0].closed).toBe(false);
+    expect(screen.getByText('Still streaming.')).toBeInTheDocument();
+  });
+
   it('recovers a live stream after StrictMode\'s development-only mount/cleanup/mount', async () => {
     const fetchMock = stubFetch(() => acceptedResponse('turn-should-not-happen'));
     rememberSubmission(CONVERSATION, PARTICIPANT, { nativeMessageId: 'native-1', contentText: 'list stock' });

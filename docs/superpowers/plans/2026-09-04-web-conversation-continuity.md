@@ -10034,6 +10034,35 @@ describe('TurnTracer', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it('keeps one live stream and its rendered parts across a parent rerender', async () => {
+    stubFetch(() => acceptedResponse('turn-1'));
+    const { opened, factory } = recordingEventStreamFactory();
+    const props = {
+      csrfToken: 'csrf-token',
+      webConversationId: CONVERSATION,
+      participantId: PARTICIPANT,
+      onTerminalOutcome: () => {},
+      createSource: factory,
+    };
+    const { rerender } = render(<TurnTracer {...props} />);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Send' }));
+    await waitFor(() => expect(opened).toHaveLength(1));
+    opened[0].emit(
+      'part',
+      { turnId: 'turn-1', order: 1, kind: 'text', text: 'Still streaming.', payload: null },
+      '100',
+    );
+    expect(await screen.findByText('Still streaming.')).toBeInTheDocument();
+
+    rerender(<TurnTracer {...props} onTerminalOutcome={() => {}} />);
+    await flushAsyncWork();
+
+    expect(opened).toHaveLength(1);
+    expect(opened[0].closed).toBe(false);
+    expect(screen.getByText('Still streaming.')).toBeInTheDocument();
+  });
+
   it('recovers a live stream after StrictMode\'s development-only mount/cleanup/mount', async () => {
     const fetchMock = stubFetch(() => acceptedResponse('turn-should-not-happen'));
     rememberSubmission(CONVERSATION, PARTICIPANT, { nativeMessageId: 'native-1', contentText: 'list stock' });
@@ -11218,7 +11247,7 @@ Delete the now-unused `getTurnOutcome` import if the compiler reports it; the re
 - [ ] **Step 6: Run the tests to verify they pass**
 
 Run: `cd src/web && npm test`
-Expected: PASS, 26 new tests across two files.
+Expected: PASS, 27 new tests across two files.
 
 A quality review found one genuine bug in Steps 1-5 as first written: the mount-time resume effect had no cleanup, so React StrictMode's development-only mount → cleanup → mount cycle (`main.tsx` wraps `App` in `StrictMode`) opened a stream on the first mount, the close-on-unmount effect's cleanup then closed it, and the second mount's resume effect saw `resumeAttemptedRef.current` already `true` and skipped - leaving a resumed Turn with `watchedTurnRef` still claiming ownership of a stream that was actually dead, forever. The unknown-Turn-id (POST) path was never affected: its side effect (`watchTurn`, called from inside `resumeStoredTurn`) only runs after `await submitTurn(...)` resolves, strictly after StrictMode's synchronous mount/cleanup/mount has already finished, so there was only ever one fetch either way.
 
@@ -11248,7 +11277,9 @@ A fourth quality review, treating `conversationStorage` and its callers here as 
 
 Steps 1-5 above already carry both fixes and their six tests: one submitting normally against a 400 and asserting the record is cleared; one for a stored lost-response submission whose resubmission gets the same 400, asserting the record is cleared and - remounted fresh afterward, as a later refresh or reopened tab would be - that it is not resubmitted a second time; one for a network failure (`fetch` itself rejecting) asserting the record survives; one for a retryable status (429) asserting the same; one that makes `localStorage.setItem` throw before any Turn exists and asserts no `fetch` call ever happens, the Participant sees a clear alert, and the Send button stays enabled; and one that makes the same write fail while a prior Turn is streaming and proves its stream remains open and its Outcome still arrives. `TurnTracer.test.tsx` grew from 15 to 17 tests during the third hardening pass, then to 23 during this one (web suite: 83 to 96 tests across 7 files, following Task 17's own growth from 27 to 34 tests).
 
-A fifth quality review found two unguarded safety branches even though their implementation was already correct: the HTTP 200 "already answered" result at both `submitTurn` call sites, and the full definitive-rejection boundary rather than only its 400/429 examples. Task 20 now includes two `TurnTracer` tests proving both a fresh submission and a lost-response resubmission render the recorded Outcome, clear the matching breadcrumb, notify the workspace, and open no stream. A direct `turnsApi.test.ts` test pins permanent client failures as definitive while preserving 401, 408, 429, and 5xx statuses as retryable or ambiguous. Task 20 therefore finishes with 25 `TurnTracer` tests plus one `turnsApi` classification test; the whole pre-Task-21 web suite is 99 tests across eight files.
+A fifth quality review found two unguarded safety branches even though their implementation was already correct: the HTTP 200 "already answered" result at both `submitTurn` call sites, and the full definitive-rejection boundary rather than only its 400/429 examples. Task 20 now includes two `TurnTracer` tests proving both a fresh submission and a lost-response resubmission render the recorded Outcome, clear the matching breadcrumb, notify the workspace, and open no stream. A direct `turnsApi.test.ts` test pins permanent client failures as definitive while preserving 401, 408, 429, and 5xx statuses as retryable or ambiguous. At that review checkpoint, Task 20 had 25 `TurnTracer` tests plus one `turnsApi` classification test; the pre-Task-21 web suite had 99 tests across eight files.
+
+A sixth quality review found that `watchTurn`'s same-id guard was correct but unpinned: an ordinary parent rerender changes an inline callback identity and reruns the resume effect, which must not close and reopen the stream already owned for that Turn. A focused test now streams one text part, rerenders with a fresh callback, and asserts the same source remains open, no second source appears, and the rendered part survives. Task 20 therefore finishes with 26 `TurnTracer` tests plus one `turnsApi` classification test; the whole pre-Task-21 web suite is 100 tests across eight files.
 
 - [ ] **Step 7: Check types and lint**
 
@@ -11940,7 +11971,7 @@ export default App;
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `cd src/web && npm test`
-Expected: PASS. The whole web suite - roughly 109 tests across nine files (Task 19's `WorkspacePanel.test.tsx` grew from 10 to 15 tests and gained a sibling `useMediaQuery.test.ts` with 2 tests, both during that task's own quality-review hardening; Task 17's `conversationStorage.test.ts` grew from 14 to 24 to 27 to 34 tests; and Task 20's `TurnTracer.test.tsx` grew from 10 to 12 to 15 to 17 to 23 to 25 tests, then gained one direct `turnsApi.test.ts` classification test, across Task 20's own five quality-review hardening passes - StrictMode recovery, then Participant scope/superseded-Turn/unmount safety, then keeping a confirmation's token out of storage by shape and proving the stream-close cleanup is actually tested, then drawing the definitive-vs-retryable rejection line and tolerating `localStorage` itself failing without abandoning an already-streaming Turn, then pinning both HTTP 200 replay callers and every rejection carve-out) - is green.
+Expected: PASS. The whole web suite - roughly 110 tests across nine files (Task 19's `WorkspacePanel.test.tsx` grew from 10 to 15 tests and gained a sibling `useMediaQuery.test.ts` with 2 tests, both during that task's own quality-review hardening; Task 17's `conversationStorage.test.ts` grew from 14 to 24 to 27 to 34 tests; and Task 20's `TurnTracer.test.tsx` grew from 10 to 12 to 15 to 17 to 23 to 25 to 26 tests, then gained one direct `turnsApi.test.ts` classification test, across Task 20's own six quality-review hardening passes - StrictMode recovery, then Participant scope/superseded-Turn/unmount safety, then keeping a confirmation's token out of storage by shape and proving the stream-close cleanup is actually tested, then drawing the definitive-vs-retryable rejection line and tolerating `localStorage` itself failing without abandoning an already-streaming Turn, then pinning both HTTP 200 replay callers and every rejection carve-out, then preserving one live stream and its rendered parts across parent rerenders) - is green.
 
 - [ ] **Step 5: Check types, lint, and build**
 
