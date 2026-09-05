@@ -8324,7 +8324,7 @@ export function subscribeToConversationChanges(webConversationId: string, onChan
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `cd src/web && npm test`
-Expected: PASS, 12 new tests (the 11 above plus a hardening case proving `rememberTurnId` never silently creates a record when there is no existing submission to update).
+Expected: PASS, all 12 tests from Step 1 (which includes a hardening case proving `rememberTurnId` never silently creates a record when there is no existing submission to update).
 
 - [ ] **Step 5: Commit**
 
@@ -10320,7 +10320,7 @@ export default App;
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `cd src/web && npm test`
-Expected: PASS. The whole web suite - roughly 59 tests across seven files - is green.
+Expected: PASS. The whole web suite - roughly 60 tests across seven files - is green.
 
 - [ ] **Step 5: Check types, lint, and build**
 
