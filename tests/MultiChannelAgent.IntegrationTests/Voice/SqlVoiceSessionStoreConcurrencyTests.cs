@@ -119,6 +119,95 @@ public sealed class SqlVoiceSessionStoreConcurrencyTests : IDisposable
         Assert.True(r2.Admitted);
     }
 
+    // ── AbandonAsync regression ──────────────────────────────────────────────
+
+    [Fact]
+    public async Task Denied_admission_leaves_context_clean_for_subsequent_operations()
+    {
+        // A denied admission (same-participant AlreadyActive or GlobalCapReached) must leave the
+        // DbContext's ChangeTracker clean so a subsequent admission on the SAME context/store does
+        // not accidentally commit a rejected Added entity.
+        using var setupDb = CreateContext();
+        var setupStore = new SqlVoiceSessionStore(setupDb);
+        var existingSession = VoiceSession.Reserve(SomeParticipant, SomeConversation, SomeOwner, Now, DefaultDeadlines(Now));
+        var setup = await setupStore.TryAdmitAsync(existingSession, DefaultCap, CancellationToken.None);
+        Assert.True(setup.Admitted);
+
+        // SUT: single context that first gets a denial, then must still work.
+        using var sutDb = CreateContext();
+        var sut = new SqlVoiceSessionStore(sutDb);
+
+        var duplicate = VoiceSession.Reserve(SomeParticipant, SomeConversation, SomeOwner, Now, DefaultDeadlines(Now));
+        var denied = await sut.TryAdmitAsync(duplicate, DefaultCap, CancellationToken.None);
+        Assert.False(denied.Admitted);
+        Assert.Equal(VoiceAdmissionDenialReason.AlreadyActive, denied.DenialReason);
+
+        // Admit a different participant on the same context/store.
+        var otherParticipant = new ParticipantId(Guid.NewGuid());
+        var otherSession = VoiceSession.Reserve(otherParticipant, SomeConversation, SomeOwner, Now, DefaultDeadlines(Now));
+        var followUp = await sut.TryAdmitAsync(otherSession, DefaultCap, CancellationToken.None);
+        Assert.True(followUp.Admitted);
+
+        // Verify the duplicate session was NOT committed.
+        using var verifyDb = CreateContext();
+        var duplicateExists = await verifyDb.VoiceSessions.AsNoTracking()
+            .AnyAsync(e => e.Id == duplicate.Id.Value);
+        Assert.False(duplicateExists);
+
+        // The follow-up IS committed.
+        var followUpExists = await verifyDb.VoiceSessions.AsNoTracking()
+            .AnyAsync(e => e.Id == otherSession.Id.Value);
+        Assert.True(followUpExists);
+    }
+
+    [Fact]
+    public async Task CapReached_denial_leaves_context_clean_for_subsequent_operations()
+    {
+        // Fill cap with one participant, deny another, free the slot, then admit a third.
+        using var sutDb = CreateContext();
+        var sut = new SqlVoiceSessionStore(sutDb);
+
+        var sessionA = VoiceSession.Reserve(SomeParticipant, SomeConversation, SomeOwner, Now, DefaultDeadlines(Now));
+        var admitA = await sut.TryAdmitAsync(sessionA, 1, CancellationToken.None);
+        Assert.True(admitA.Admitted);
+
+        var participantB = new ParticipantId(Guid.NewGuid());
+        var sessionB = VoiceSession.Reserve(participantB, SomeConversation, SomeOwner, Now, DefaultDeadlines(Now));
+        var deniedB = await sut.TryAdmitAsync(sessionB, 1, CancellationToken.None);
+        Assert.False(deniedB.Admitted);
+        Assert.Equal(VoiceAdmissionDenialReason.GlobalCapReached, deniedB.DenialReason);
+
+        // Free the slot by ending A (via a separate context to avoid tracking conflicts).
+        using var endDb = CreateContext();
+        var endStore = new SqlVoiceSessionStore(endDb);
+        sessionA.End(Now + TimeSpan.FromMinutes(1));
+        await endStore.UpdateAsync(sessionA, VoiceSessionStatus.Negotiating, CancellationToken.None);
+
+        // Admit participant C on the SAME original context — must not commit the rejected B.
+        var participantC = new ParticipantId(Guid.NewGuid());
+        var sessionC = VoiceSession.Reserve(participantC, SomeConversation, SomeOwner, Now + TimeSpan.FromMinutes(2), DefaultDeadlines(Now + TimeSpan.FromMinutes(2)));
+        var admitC = await sut.TryAdmitAsync(sessionC, 1, CancellationToken.None);
+        Assert.True(admitC.Admitted);
+
+        using var verifyDb = CreateContext();
+        var bExists = await verifyDb.VoiceSessions.AsNoTracking().AnyAsync(e => e.Id == sessionB.Id.Value);
+        Assert.False(bExists);
+
+        var cExists = await verifyDb.VoiceSessions.AsNoTracking().AnyAsync(e => e.Id == sessionC.Id.Value);
+        Assert.True(cExists);
+    }
+
+    // ── SQL Server locking hint verification ─────────────────────────────────
+
+    [Fact]
+    public void SqlServer_occupied_slot_count_uses_UPDLOCK_and_HOLDLOCK()
+    {
+        var sql = SqlVoiceSessionStore.SqlServerOccupiedSlotCountSql;
+        Assert.Contains("UPDLOCK", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("HOLDLOCK", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("IX_VoiceSessions_OccupiesSlot", sql);
+    }
+
     private MultiChannelAgentDbContext CreateContext()
     {
         var options = new DbContextOptionsBuilder<MultiChannelAgentDbContext>()

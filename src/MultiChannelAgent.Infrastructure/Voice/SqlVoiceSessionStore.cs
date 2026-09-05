@@ -20,6 +20,14 @@ namespace MultiChannelAgent.Infrastructure.Voice;
 /// </summary>
 public sealed class SqlVoiceSessionStore(MultiChannelAgentDbContext db) : IVoiceSessionStore
 {
+    /// <summary>
+    /// SQL Server locking COUNT that takes UPDLOCK+HOLDLOCK on the OccupiesSlot index, preventing
+    /// the shared→exclusive range-lock conversion deadlock that plain SERIALIZABLE COUNT triggers
+    /// when two different-participant admissions race for the final slot.
+    /// </summary>
+    internal const string SqlServerOccupiedSlotCountSql =
+        "SELECT COUNT(*) AS [Value] FROM [VoiceSessions] WITH (UPDLOCK, HOLDLOCK, INDEX([IX_VoiceSessions_OccupiesSlot])) WHERE [OccupiesSlot] = CAST(1 AS bit)";
+
     public async Task<VoiceAdmissionResult> TryAdmitAsync(
         VoiceSession session, int globalCap, CancellationToken cancellationToken)
     {
@@ -36,19 +44,15 @@ public sealed class SqlVoiceSessionStore(MultiChannelAgentDbContext db) : IVoice
 
             if (hasExisting)
             {
-                await transaction.RollbackAsync(cancellationToken);
+                await db.AbandonAsync(transaction);
                 return VoiceAdmissionResult.Denied(VoiceAdmissionDenialReason.AlreadyActive);
             }
 
-            // Count slot-occupying sessions under SERIALIZABLE isolation. On SQL Server the
-            // serializable isolation combined with the IX_VoiceSessions_OccupiesSlot index makes
-            // this COUNT take a key-range lock, preventing phantom inserts by concurrent replicas.
-            var occupyingCount = await db.VoiceSessions
-                .CountAsync(e => e.OccupiesSlot, cancellationToken);
+            var occupyingCount = await CountOccupiedSlotsAsync(cancellationToken);
 
             if (occupyingCount >= globalCap)
             {
-                await transaction.RollbackAsync(cancellationToken);
+                await db.AbandonAsync(transaction);
                 return VoiceAdmissionResult.Denied(VoiceAdmissionDenialReason.GlobalCapReached);
             }
 
@@ -62,7 +66,7 @@ public sealed class SqlVoiceSessionStore(MultiChannelAgentDbContext db) : IVoice
             {
                 // Another replica admitted this same participant between our check and insert.
                 // The filtered unique index on (ParticipantId WHERE OccupiesSlot = 1) caught it.
-                await transaction.RollbackAsync(cancellationToken);
+                await db.AbandonAsync(transaction);
                 return VoiceAdmissionResult.Denied(VoiceAdmissionDenialReason.AlreadyActive);
             }
 
@@ -71,9 +75,27 @@ public sealed class SqlVoiceSessionStore(MultiChannelAgentDbContext db) : IVoice
         }
         catch
         {
-            db.ChangeTracker.Clear();
+            await db.AbandonAsync(transaction);
             throw;
         }
+    }
+
+    /// <summary>
+    /// Counts slot-occupying sessions. On SQL Server, uses <c>UPDLOCK, HOLDLOCK</c> on the
+    /// OccupiesSlot index to acquire an exclusive range lock immediately — preventing the
+    /// shared→exclusive conversion deadlock that plain SERIALIZABLE triggers when two
+    /// different-participant admissions race for the final slot. SQLite uses plain LINQ under
+    /// SERIALIZABLE, which is safe because SQLite serializes writers at the engine level.
+    /// </summary>
+    private async Task<int> CountOccupiedSlotsAsync(CancellationToken cancellationToken)
+    {
+        if (db.Database.IsSqlServer())
+        {
+            return await db.Database.SqlQueryRaw<int>(SqlServerOccupiedSlotCountSql)
+                .FirstAsync(cancellationToken);
+        }
+
+        return await db.VoiceSessions.CountAsync(e => e.OccupiesSlot, cancellationToken);
     }
 
     public async Task<VoiceSession?> FindByIdAsync(VoiceSessionId id, CancellationToken cancellationToken)
