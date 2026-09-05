@@ -1,13 +1,6 @@
-namespace MultiChannelAgent.Application.Voice;
+using MultiChannelAgent.Domain.Voice;
 
-/// <summary>
-/// Immutable deadline timestamps computed from the admission instant.
-/// Config changes never retroactively alter admitted sessions.
-/// </summary>
-/// <param name="ExpiresAt">Absolute session expiry: admission + <see cref="VoiceOptions.MaxSessionDuration"/>.</param>
-/// <param name="WarningAt">Absolute warning instant: admission + <see cref="VoiceOptions.SessionWarningThreshold"/>.</param>
-/// <param name="IdleExpiresAt">Absolute idle-close deadline: admission + <see cref="VoiceOptions.IdleTimeout"/>.</param>
-public sealed record VoiceSessionDeadlines(DateTimeOffset ExpiresAt, DateTimeOffset WarningAt, DateTimeOffset IdleExpiresAt);
+namespace MultiChannelAgent.Application.Voice;
 
 /// <summary>
 /// Voice Live connection and session-lifetime settings.
