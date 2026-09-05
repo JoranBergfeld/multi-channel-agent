@@ -11561,7 +11561,14 @@ describe('App', () => {
     );
 
     expect(readInFlightTurn('web-conversation-1', '11111111-1111-1111-1111-111111111111')).toBeNull();
-    expect(streamsFor(streams, '/api/turns/turn-old/events')).toHaveLength(0);
+
+    // Resuming that stored Turn on the first mount is correct - reconnecting is a pure read, and it is
+    // exactly what the conversation contracts to do for a Turn that was still outstanding. What the
+    // reset must not leave behind is that stream: it belongs to the conversation that just ended, so
+    // it is closed, and the remounted conversation opens no second one for it.
+    const oldTurnStreams = streamsFor(streams, '/api/turns/turn-old/events');
+    expect(oldTurnStreams).toHaveLength(1);
+    expect(oldTurnStreams[0].closed).toBe(true);
   });
 
   it('never offers a control that would change a quantity directly', async () => {
@@ -11592,6 +11599,8 @@ function turnStreamIn(streams: FakeEventSource[]) {
   return streams.find((stream) => stream.url.startsWith('/api/turns/'));
 }
 ```
+
+The new-conversation test asserts one open-then-closed stream for the old Turn rather than none, because the stored record is seeded *before* `render`: Task 17's resume, which Task 20 wired into `TurnTracer`, therefore correctly reconnects `turn-old` on the very first mount, and that reconnect is a pure read this plan deliberately wants. Asserting zero would only ever have been asserting that resume does not work. The corrected pair still bites on both halves of the reset, one assertion each: drop `clearInFlightTurn` and the storage assertion above it fails; drop the `key={conversationEpoch}` remount and `closed` stays `false`, because the stream belonging to the conversation that just ended is still open.
 
 - [ ] **Step 2: Run the test to verify it fails**
 
