@@ -17,6 +17,12 @@ describe('test runtime setup', () => {
     window.localStorage.setItem('leftover', 'from-a-previous-test')
   })
 
+  it('treats an unsupported media query as non-matching instead of defaulting to true', () => {
+    // `(width <= ...)` is neither the supported max-width nor min-width token, so a fail-closed
+    // harness must report no match rather than silently matching every unrecognized query.
+    expect(window.matchMedia(`(width <= ${NARROW_WIDTH}px)`).matches).toBe(false)
+  })
+
   it('starts with empty localStorage even though the previous test wrote to it', () => {
     expect(window.localStorage.length).toBe(0)
     expect(window.localStorage.getItem('leftover')).toBeNull()

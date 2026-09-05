@@ -22,6 +22,11 @@ function matchesWidth(query: string, width: number): boolean {
   const maxWidth = query.match(MAX_WIDTH_QUERY)
   const minWidth = query.match(MIN_WIDTH_QUERY)
 
+  // Fail closed: a query using neither supported token is unsupported, not a match.
+  if (!maxWidth && !minWidth) {
+    return false
+  }
+
   if (maxWidth && width > Number(maxWidth[1])) {
     return false
   }
