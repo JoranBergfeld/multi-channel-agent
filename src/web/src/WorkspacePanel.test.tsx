@@ -225,3 +225,62 @@ describe('WorkspacePanel across a breakpoint transition', () => {
     expect(subscribed!.removeSpy).toHaveBeenCalledWith('change', listener);
   });
 });
+
+describe('WorkspacePanel preserving focus across a narrowing transition', () => {
+  it('keeps a focused element inside the workspace panel visible and focused when narrowing', () => {
+    setViewportWidth(DESKTOP_WIDTH);
+    render(
+      <WorkspacePanel
+        conversation={<p>Conversation content</p>}
+        workspace={<input aria-label="Workspace field" />}
+      />,
+    );
+
+    const input = screen.getByLabelText('Workspace field');
+    input.focus();
+    expect(input).toHaveFocus();
+
+    act(() => {
+      setViewportWidth(NARROW_WIDTH);
+    });
+
+    // `selected` state defaults to 'conversation', so without a focus-aware correction the
+    // workspace panel - the one actually holding focus - is exactly the one that would be hidden.
+    expect(screen.getByRole('tab', { name: 'Inventory' })).toHaveAttribute('aria-selected', 'true');
+    expect(input).toBeVisible();
+    expect(document.activeElement).toBe(input);
+  });
+
+  it('keeps a focused element inside the conversation panel visible and focused when narrowing, even after a prior Inventory selection', async () => {
+    setViewportWidth(NARROW_WIDTH);
+    render(
+      <WorkspacePanel
+        conversation={<input aria-label="Conversation field" />}
+        workspace={<p>Workspace content</p>}
+      />,
+    );
+
+    // Select Inventory once while still narrow, so `selected` state is 'workspace' - stale once
+    // the viewport widens and focus moves elsewhere.
+    await userEvent.click(screen.getByRole('tab', { name: 'Inventory' }));
+    expect(screen.getByRole('tab', { name: 'Inventory' })).toHaveAttribute('aria-selected', 'true');
+
+    act(() => {
+      setViewportWidth(DESKTOP_WIDTH);
+    });
+
+    const input = screen.getByLabelText('Conversation field');
+    input.focus();
+    expect(input).toHaveFocus();
+
+    act(() => {
+      setViewportWidth(NARROW_WIDTH);
+    });
+
+    // The stale 'workspace' selection must not win: focus is in the conversation panel now, so
+    // that is the panel narrowing has to keep visible.
+    expect(screen.getByRole('tab', { name: 'Conversation' })).toHaveAttribute('aria-selected', 'true');
+    expect(input).toBeVisible();
+    expect(document.activeElement).toBe(input);
+  });
+});

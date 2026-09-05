@@ -277,6 +277,7 @@ No migration, no new column, and no change to `IConfirmationProposalStore`, whos
 | `src/web/src/inventoryStream.test.ts` (create) | Snapshot/changed/revoked decoding and close. |
 | `src/web/src/conversationStorage.test.ts` (create) | Persist, read, clear, cross-tab notification. |
 | `src/web/src/WorkspacePanel.test.tsx` (create) | Desktop `<aside>` landmark, narrow tab semantics and keyboard navigation. |
+| `src/web/src/useMediaQuery.test.ts` (create) | Subscription stability across an unrelated rerender, and correct resubscription when the query changes. |
 | `src/web/src/TurnTracer.test.tsx` (create) | Streamed progress and outcome, mount-time resume with no resubmission, live region. |
 | `src/web/src/App.test.tsx` (create) | Conversation-primary DOM order, explicit-only selection, version-driven refetch, New conversation. |
 
@@ -8689,6 +8690,7 @@ git commit -m "feat: add the Participant-level Inventory invalidation stream cli
 - Create: `src/web/src/WorkspacePanel.tsx`
 - Modify: `src/web/src/index.css`
 - Test: `src/web/src/WorkspacePanel.test.tsx`
+- Test: `src/web/src/useMediaQuery.test.ts`
 
 - [ ] **Step 1: Write the failing test**
 
@@ -8922,6 +8924,65 @@ describe('WorkspacePanel across a breakpoint transition', () => {
     expect(subscribed!.removeSpy).toHaveBeenCalledWith('change', listener);
   });
 });
+
+describe('WorkspacePanel preserving focus across a narrowing transition', () => {
+  it('keeps a focused element inside the workspace panel visible and focused when narrowing', () => {
+    setViewportWidth(DESKTOP_WIDTH);
+    render(
+      <WorkspacePanel
+        conversation={<p>Conversation content</p>}
+        workspace={<input aria-label="Workspace field" />}
+      />,
+    );
+
+    const input = screen.getByLabelText('Workspace field');
+    input.focus();
+    expect(input).toHaveFocus();
+
+    act(() => {
+      setViewportWidth(NARROW_WIDTH);
+    });
+
+    // `selected` state defaults to 'conversation', so without a focus-aware correction the
+    // workspace panel - the one actually holding focus - is exactly the one that would be hidden.
+    expect(screen.getByRole('tab', { name: 'Inventory' })).toHaveAttribute('aria-selected', 'true');
+    expect(input).toBeVisible();
+    expect(document.activeElement).toBe(input);
+  });
+
+  it('keeps a focused element inside the conversation panel visible and focused when narrowing, even after a prior Inventory selection', async () => {
+    setViewportWidth(NARROW_WIDTH);
+    render(
+      <WorkspacePanel
+        conversation={<input aria-label="Conversation field" />}
+        workspace={<p>Workspace content</p>}
+      />,
+    );
+
+    // Select Inventory once while still narrow, so `selected` state is 'workspace' - stale once
+    // the viewport widens and focus moves elsewhere.
+    await userEvent.click(screen.getByRole('tab', { name: 'Inventory' }));
+    expect(screen.getByRole('tab', { name: 'Inventory' })).toHaveAttribute('aria-selected', 'true');
+
+    act(() => {
+      setViewportWidth(DESKTOP_WIDTH);
+    });
+
+    const input = screen.getByLabelText('Conversation field');
+    input.focus();
+    expect(input).toHaveFocus();
+
+    act(() => {
+      setViewportWidth(NARROW_WIDTH);
+    });
+
+    // The stale 'workspace' selection must not win: focus is in the conversation panel now, so
+    // that is the panel narrowing has to keep visible.
+    expect(screen.getByRole('tab', { name: 'Conversation' })).toHaveAttribute('aria-selected', 'true');
+    expect(input).toBeVisible();
+    expect(document.activeElement).toBe(input);
+  });
+});
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
@@ -8929,12 +8990,12 @@ describe('WorkspacePanel across a breakpoint transition', () => {
 Run: `cd src/web && npm test`
 Expected: FAIL with `Failed to resolve import "./WorkspacePanel"`.
 
-- [ ] **Step 3: Write the media query hook**
+- [ ] **Step 3: Write the media query hook, and a test for its subscription stability**
 
 Create `src/web/src/useMediaQuery.ts`:
 
 ```ts
-import { useSyncExternalStore } from 'react';
+import { useCallback, useSyncExternalStore } from 'react';
 
 /**
  * Whether the viewport currently matches a CSS media query, kept up to date as it changes.
@@ -8948,17 +9009,27 @@ import { useSyncExternalStore } from 'react';
  * `MediaQueryList` is the external store, and this is its canonical synchronization hook - the first
  * render already reflects the current viewport with no synchronize-after-paint flash, and no lint
  * warning about calling `setState` synchronously inside an effect.
+ *
+ * `subscribe` and `getSnapshot` are each memoized by `query` rather than passed as fresh closures:
+ * `useSyncExternalStore` re-subscribes (tears down the old listener, adds a new one) whenever
+ * `subscribe`'s identity changes, so an inline closure would tear down and recreate the listener on
+ * every render of whatever calls this hook - including one caused by something this hook has
+ * nothing to do with, like WorkspacePanel switching its selected tab.
  */
 export function useMediaQuery(query: string): boolean {
-  return useSyncExternalStore(
-    (onStoreChange) => {
+  const subscribe = useCallback(
+    (onStoreChange: () => void) => {
       const list = window.matchMedia(query);
       list.addEventListener('change', onStoreChange);
 
       return () => list.removeEventListener('change', onStoreChange);
     },
-    () => window.matchMedia(query).matches,
+    [query],
   );
+
+  const getSnapshot = useCallback(() => window.matchMedia(query).matches, [query]);
+
+  return useSyncExternalStore(subscribe, getSnapshot);
 }
 
 /**
@@ -8966,6 +9037,103 @@ export function useMediaQuery(query: string): boolean {
  * be usable at once, so the workspace moves behind a tab.
  */
 export const NARROW_SCREEN_QUERY = '(max-width: 1023px)';
+```
+
+Create `src/web/src/useMediaQuery.test.ts`:
+
+```ts
+import { describe, expect, it, vi } from 'vitest';
+import { renderHook } from '@testing-library/react';
+import { DESKTOP_WIDTH, setViewportWidth } from './testing/setup';
+import { useMediaQuery } from './useMediaQuery';
+
+/**
+ * Spies on every `MediaQueryList` `window.matchMedia` creates for the lifetime of this call, so
+ * `addEventListener`/`removeEventListener` calls on each one can be inspected individually - some
+ * lists are only ever read (`useSyncExternalStore`'s snapshot) and never subscribed to at all.
+ */
+function spyOnMatchMedia() {
+  const originalMatchMedia = window.matchMedia;
+  const lists: { list: MediaQueryList; addSpy: ReturnType<typeof vi.spyOn>; removeSpy: ReturnType<typeof vi.spyOn> }[] =
+    [];
+
+  window.matchMedia = (query: string) => {
+    const list = originalMatchMedia(query);
+    lists.push({
+      list,
+      addSpy: vi.spyOn(list, 'addEventListener'),
+      removeSpy: vi.spyOn(list, 'removeEventListener'),
+    });
+    return list;
+  };
+
+  return {
+    lists,
+    subscribed: () => lists.find(({ addSpy }) => addSpy.mock.calls.length > 0),
+    restore: () => {
+      window.matchMedia = originalMatchMedia;
+    },
+  };
+}
+
+describe('useMediaQuery', () => {
+  it('does not tear down and recreate its subscription on an unrelated rerender', () => {
+    setViewportWidth(DESKTOP_WIDTH);
+    const spy = spyOnMatchMedia();
+
+    const { rerender, unmount } = renderHook(({ query }) => useMediaQuery(query), {
+      initialProps: { query: '(max-width: 1023px)' },
+    });
+
+    const subscribed = spy.subscribed();
+    expect(subscribed).toBeDefined();
+    expect(subscribed!.addSpy).toHaveBeenCalledTimes(1);
+
+    // Rerendering with the very same query string is exactly what an unrelated state change inside
+    // a consumer (WorkspacePanel switching its selected tab, say) looks like from this hook's side -
+    // a stable subscribe/getSnapshot pair must not tear down and recreate the listener for it.
+    rerender({ query: '(max-width: 1023px)' });
+    rerender({ query: '(max-width: 1023px)' });
+
+    expect(subscribed!.addSpy).toHaveBeenCalledTimes(1);
+    expect(subscribed!.removeSpy).not.toHaveBeenCalled();
+
+    unmount();
+    expect(subscribed!.removeSpy).toHaveBeenCalledTimes(1);
+    spy.restore();
+  });
+
+  it('tears down the old subscription and starts a new one when the query changes', () => {
+    setViewportWidth(DESKTOP_WIDTH);
+    const spy = spyOnMatchMedia();
+
+    const { result, rerender, unmount } = renderHook(({ query }) => useMediaQuery(query), {
+      initialProps: { query: '(max-width: 1023px)' },
+    });
+
+    // 1280px (DESKTOP_WIDTH) doesn't match max-width:1023px.
+    expect(result.current).toBe(false);
+    const first = spy.subscribed();
+    expect(first).toBeDefined();
+
+    rerender({ query: '(min-width: 100px)' });
+
+    // The old listener is gone, a new one exists for the new query, and the returned value now
+    // reflects that query instead of the stale one.
+    expect(first!.removeSpy).toHaveBeenCalledTimes(1);
+    const second = spy.lists.find(
+      (entry) => entry !== first && entry.list.media === '(min-width: 100px)' && entry.addSpy.mock.calls.length > 0,
+    );
+    expect(second).toBeDefined();
+    expect(second!.addSpy).toHaveBeenCalledTimes(1);
+    // 1280px matches min-width:100px.
+    expect(result.current).toBe(true);
+
+    unmount();
+    expect(second!.removeSpy).toHaveBeenCalledTimes(1);
+    spy.restore();
+  });
+});
 ```
 
 - [ ] **Step 4: Write the panel**
@@ -9008,6 +9176,38 @@ function WorkspacePanel({ conversation, workspace }: WorkspacePanelProps) {
   const isNarrow = useMediaQuery(NARROW_SCREEN_QUERY);
   const [selected, setSelected] = useState<TabId>('conversation');
   const tabRefs = useRef<Record<TabId, HTMLButtonElement | null>>({ conversation: null, workspace: null });
+  const [wasNarrow, setWasNarrow] = useState(isNarrow);
+
+  /*
+   * Corrected synchronously during render - before this transition ever reaches the DOM - because
+   * once a focused element's container is actually hidden, the browser may already have moved focus
+   * to <body> by the time any effect could run, and there is no reclaiming it after the fact.
+   * Comparing against `wasNarrow` (the *previous* render's viewport, not `selected` state) is what
+   * tells a genuine desktop-to-narrow transition apart from an ordinary rerender while already
+   * narrow, where `selected` alone has to keep governing - otherwise every rerender would re-detect
+   * "just narrowed" and a deliberate tab click could never stick.
+   *
+   * This is the "adjust state while rendering" pattern React's own docs describe for exactly this
+   * "compare against the last render" shape, using state - never a ref's `current` - so the read is
+   * never stale: React discards this render's output and immediately retries with both `wasNarrow`
+   * and `selected` already corrected, so every read of either below already sees the final value.
+   * Looking the panels up by id rather than through a ref to their element keeps the focus check
+   * itself a plain DOM read too - like `useMediaQuery` reading `matchMedia(...).matches` - rather
+   * than a ref access.
+   */
+  if (isNarrow !== wasNarrow) {
+    setWasNarrow(isNarrow);
+
+    if (isNarrow) {
+      const focusedPanel = TABS.map((tab) => tab.id).find((id) =>
+        document.getElementById(`workspace-panel-${id}`)?.contains(document.activeElement),
+      );
+
+      if (focusedPanel && focusedPanel !== selected) {
+        setSelected(focusedPanel);
+      }
+    }
+  }
 
   const select = (id: TabId) => {
     setSelected(id);
@@ -9184,12 +9384,12 @@ Append to `src/web/src/index.css`:
 - [ ] **Step 6: Run the tests to verify they pass**
 
 Run: `cd src/web && npm test`
-Expected: PASS, 13 new tests. (The first pass through this task only writes 10 - the desktop and narrow-viewport describes. A quality review then found that the desktop/narrow trees were structurally incompatible, so a breakpoint change unmounted and remounted `conversation` and `workspace`, discarding whatever state, in-flight stream, or focus they held; and that the old `useEffect`-based `useMediaQuery` was oxlint's only `react(set-state-in-effect)` warning in the web app. Steps 3-5 above already carry the fix - one stable tree shape, `hidden` instead of conditional unmounting, and `useSyncExternalStore` - and the test file above already carries the 3 tests that pin it down: the transition test proving both children's identity and state survive a round trip across the breakpoint, the unmount test proving the media query subscription is cleaned up, and the `aria-controls` test proving both panel ids are always present.)
+Expected: PASS, 17 new tests. (The first pass through this task only writes 10 - the desktop and narrow-viewport describes. A quality review then found that the desktop/narrow trees were structurally incompatible, so a breakpoint change unmounted and remounted `conversation` and `workspace`, discarding whatever state, in-flight stream, or focus they held; and that the old `useEffect`-based `useMediaQuery` was oxlint's only `react(set-state-in-effect)` warning in the web app. Steps 3-5 above already carry that fix - one stable tree shape, `hidden` instead of conditional unmounting, and `useSyncExternalStore` - and the test file above already carries the 3 tests that pin it down: the transition test proving both children's identity and state survive a round trip across the breakpoint, the unmount test proving the media query subscription is cleaned up, and the `aria-controls` test proving both panel ids are always present. A second quality review then found two more issues: `useMediaQuery` passed a fresh inline closure to `useSyncExternalStore` on every render, tearing the listener down and recreating it on every unrelated rerender of whatever calls it; and narrowing could hide whichever panel currently held focus, since `selected` state is not aware of where focus actually is. Step 3 above already carries the first fix - `subscribe` and `getSnapshot` memoized by `query` with `useCallback` - proved by `useMediaQuery.test.ts`'s 2 tests. Step 4 above already carries the second - comparing the viewport against the previous render's `wasNarrow` state and, on a genuine narrowing transition, choosing whichever panel currently contains `document.activeElement` as the selected tab *during render*, before the DOM this render produces is ever committed, with the correction synchronized into `selected` state through React's own "adjust state while rendering" pattern rather than an effect that would run after the browser may already have moved focus to `<body>` - proved by the test file's last 2 tests, which focus an element inside one panel, narrow, and assert that same element is still focused and its panel still visible.)
 
 - [ ] **Step 7: Check types and lint**
 
 Run: `cd src/web && npx tsc -b && npm run lint`
-Expected: no output from `tsc`, and zero warnings or errors from oxlint - including the `react(set-state-in-effect)` warning the old `useEffect`-based hook produced, which `useSyncExternalStore` no longer triggers.
+Expected: no output from `tsc`, and zero warnings or errors from oxlint - including the `react(set-state-in-effect)` warning the original `useEffect`-based hook produced (gone once `useSyncExternalStore` replaced it), and the `react(refs)`, `react(set-state-in-effect)`, and `react-hooks(exhaustive-deps)` warnings a `useLayoutEffect`-based version of the focus fix produced (gone once the correction moved to a plain `if` during render, over state rather than a ref, with the panels looked up by id instead of through a ref to their element).
 
 - [ ] **Step 8: Commit**
 
@@ -10626,7 +10826,7 @@ export default App;
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `cd src/web && npm test`
-Expected: PASS. The whole web suite - roughly 69 tests across seven files (Task 19's `WorkspacePanel.test.tsx` grew from 10 to 13 tests during that task's own quality-review hardening) - is green.
+Expected: PASS. The whole web suite - roughly 73 tests across eight files (Task 19's `WorkspacePanel.test.tsx` grew from 10 to 15 tests and gained a sibling `useMediaQuery.test.ts` with 2 tests, both during that task's own quality-review hardening) - is green.
 
 - [ ] **Step 5: Check types, lint, and build**
 
@@ -10755,7 +10955,7 @@ If Step 6 changed nothing, skip this commit rather than creating an empty one.
 
 | # | Acceptance criterion (issue #35) | Where it is built | Where it is proved |
 | --- | --- | --- | --- |
-| 1 | Desktop and narrow-screen layouts keep conversation primary and expose an accessible live Inventory workspace | Task 19 (`WorkspacePanel`, `useMediaQuery`, `index.css`), Task 21 (`App` shell, always-visible Active Inventory) | `WorkspacePanel.test.tsx` (landmarks, DOM order, tab semantics, arrow-key navigation, panel labelling, both panel ids always present so no tab's `aria-controls` ever dangles, conversation and workspace identity and state preserved - not remounted - across a breakpoint transition and back, media query subscription cleaned up on unmount), `App.test.tsx` (conversation in `main` on desktop, conversation tab first and selected on narrow, header Active Inventory), Task 22 Step 7.1 |
+| 1 | Desktop and narrow-screen layouts keep conversation primary and expose an accessible live Inventory workspace | Task 19 (`WorkspacePanel`, `useMediaQuery`, `index.css`), Task 21 (`App` shell, always-visible Active Inventory) | `WorkspacePanel.test.tsx` (landmarks, DOM order, tab semantics, arrow-key navigation, panel labelling, both panel ids always present so no tab's `aria-controls` ever dangles, conversation and workspace identity and state preserved - not remounted - across a breakpoint transition and back, media query subscription cleaned up on unmount, a focused element inside either panel stays visible and focused when narrowing even against a stale prior tab selection), `useMediaQuery.test.ts` (a stable subscription survives an unrelated rerender, a query change tears it down and starts a new one), `App.test.tsx` (conversation in `main` on desktop, conversation tab first and selected on narrow, header Active Inventory), Task 22 Step 7.1 |
 | 2 | Typed Turns return stable Turn IDs and publish finite resumable SSE progress, semantic parts, and terminal Outcomes with event IDs | Task 1 (fixed sequences), Task 2 (`processing`), Task 3 (`TurnEventReader`), Task 4 (durable progress rows), Task 5 (retention), Task 6 (`GET /api/turns/{id}/events`), Task 16 (client) | `TurnStreamEventTests`, `TurnEventReaderTests` (ordering, replay, terminal, swept log, single-line data), `TurnEventStreamHttpTests` (full order with ids, resume by query and by header, ignored bad resume point, finite terminal, framing, keep-alive heartbeat), `turnStream.test.ts`, `WebConversationContinuitySqlScenarioTests` on real SQL Server. Honest scope: progress is incremental (`accepted`, then `processing`); the semantic parts are projected from the recorded Outcome and therefore arrive with the terminal event - stated in D1 and in Known limits |
 | 3 | A separate Participant-level SSE stream invalidates Inventory projections after changes from any channel | Task 7 (version bump at the persistence seam, no foreign key), Task 8 (`InventoryInvalidationReader`, `GET /api/inventory-events`), Task 18 (client), Task 21 (`App` wiring) | `InventoryVersionBumpTests` (one bump per audited commit, none on denial, none on rollback, independent per Inventory, no foreign key, fallback insertion), `InventoryInvalidationReaderTests`, `InventoryEventStreamHttpTests` (snapshot, change via the conversational worker, change by another Participant over HTTP, revocation, non-disclosure, and a change made while nothing was connected arriving in the reconnect snapshot - the proof that no cursor is needed), `inventoryStream.test.ts`, `App.test.tsx` (version-driven refetch, and a local signal never swallowing the server's next version), `WebConversationContinuitySqlScenarioTests` (a genuinely concurrent pair of commits, asserted from a captured baseline) |
 | 4 | One browser-profile ChannelConversation resumes across refreshes, restarts, and tabs while preserving the shared FIFO queue | Shipped `WebConversationCookie` + `SqlInboxStore` FIFO, Task 17 (`conversationStorage`), Task 20 (mount-time resume, cross-tab `storage` subscription) | `SharedBrowserProfileScenario` (one ChannelConversation across tabs, one shared FIFO order, a second tab watching the first tab's Turn, identical replay on reconnect), `conversationStorage.test.ts`, `TurnTracer.test.tsx` (resume on mount, adopt another tab's Turn), Task 22 Step 7.3 |

@@ -33,6 +33,38 @@ function WorkspacePanel({ conversation, workspace }: WorkspacePanelProps) {
   const isNarrow = useMediaQuery(NARROW_SCREEN_QUERY);
   const [selected, setSelected] = useState<TabId>('conversation');
   const tabRefs = useRef<Record<TabId, HTMLButtonElement | null>>({ conversation: null, workspace: null });
+  const [wasNarrow, setWasNarrow] = useState(isNarrow);
+
+  /*
+   * Corrected synchronously during render - before this transition ever reaches the DOM - because
+   * once a focused element's container is actually hidden, the browser may already have moved focus
+   * to <body> by the time any effect could run, and there is no reclaiming it after the fact.
+   * Comparing against `wasNarrow` (the *previous* render's viewport, not `selected` state) is what
+   * tells a genuine desktop-to-narrow transition apart from an ordinary rerender while already
+   * narrow, where `selected` alone has to keep governing - otherwise every rerender would re-detect
+   * "just narrowed" and a deliberate tab click could never stick.
+   *
+   * This is the "adjust state while rendering" pattern React's own docs describe for exactly this
+   * "compare against the last render" shape, using state - never a ref's `current` - so the read is
+   * never stale: React discards this render's output and immediately retries with both `wasNarrow`
+   * and `selected` already corrected, so every read of either below already sees the final value.
+   * Looking the panels up by id rather than through a ref to their element keeps the focus check
+   * itself a plain DOM read too - like `useMediaQuery` reading `matchMedia(...).matches` - rather
+   * than a ref access.
+   */
+  if (isNarrow !== wasNarrow) {
+    setWasNarrow(isNarrow);
+
+    if (isNarrow) {
+      const focusedPanel = TABS.map((tab) => tab.id).find((id) =>
+        document.getElementById(`workspace-panel-${id}`)?.contains(document.activeElement),
+      );
+
+      if (focusedPanel && focusedPanel !== selected) {
+        setSelected(focusedPanel);
+      }
+    }
+  }
 
   const select = (id: TabId) => {
     setSelected(id);
