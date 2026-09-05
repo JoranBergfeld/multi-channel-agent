@@ -9,7 +9,9 @@ import {
 import { openTurnStream, type EventStreamFactory, type TurnResponsePartEvent } from './turnStream';
 import {
   composeOutcome,
+  isDefinitiveRejection,
   submitTurn,
+  SubmitTurnRejectionError,
   type StockChangeView,
   type StockChangesPayload,
   type StockMutationPayload,
@@ -453,6 +455,13 @@ function TurnTracer({ csrfToken, webConversationId, participantId, onTerminalOut
         return;
       }
 
+      if (err instanceof SubmitTurnRejectionError && isDefinitiveRejection(err.status)) {
+        // This exact resubmission will never succeed by retrying it - clear it so a future mount
+        // does not keep resubmitting a doomed request forever. Compare-based: only if it is still
+        // this exact submission's own record.
+        clearInFlightTurnIfMatches(webConversationId, participantId, { nativeMessageId: stored.nativeMessageId });
+      }
+
       setError(err instanceof Error ? err.message : String(err));
       setProgress('idle');
     }
@@ -536,8 +545,17 @@ function TurnTracer({ csrfToken, webConversationId, participantId, onTerminalOut
     const nativeMessageId = crypto.randomUUID();
 
     // Recorded BEFORE the request leaves, so a response that never arrives still leaves this browser
-    // profile holding the idempotency key it submitted under.
-    rememberSubmission(webConversationId, participantId, { nativeMessageId, contentText });
+    // profile holding the idempotency key it submitted under. If this fails, sending anyway would
+    // leave mutation-capable work in flight with nothing anywhere to recover or de-duplicate it by -
+    // so nothing is sent at all, and the Participant is told plainly rather than left wondering why
+    // nothing happened.
+    if (!rememberSubmission(webConversationId, participantId, { nativeMessageId, contentText })) {
+      setProgress('idle');
+      setError(
+        'Browser storage is unavailable, so this message was not sent - safe recovery cannot be guaranteed without it. Try again once storage is available.',
+      );
+      return;
+    }
 
     try {
       const result = await submitTurn({ nativeMessageId, contentText }, csrfToken);
@@ -564,6 +582,13 @@ function TurnTracer({ csrfToken, webConversationId, participantId, onTerminalOut
     } catch (err) {
       if (!mountedRef.current) {
         return;
+      }
+
+      if (err instanceof SubmitTurnRejectionError && isDefinitiveRejection(err.status)) {
+        // This exact submission will never succeed by retrying it - clear it so a future mount does
+        // not keep resubmitting a doomed request forever. Compare-based: only if it is still this
+        // exact submission's own record.
+        clearInFlightTurnIfMatches(webConversationId, participantId, { nativeMessageId });
       }
 
       setError(err instanceof Error ? err.message : String(err));

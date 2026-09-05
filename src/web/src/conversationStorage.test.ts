@@ -14,6 +14,12 @@ const OTHER_CONVERSATION = 'web-conversation-2'
 const PARTICIPANT = 'participant-1'
 const OTHER_PARTICIPANT = 'participant-2'
 
+/** Exactly the shape of a real `ConfirmationToken` (see
+ * `MultiChannelAgent.Domain.Inventories.ConfirmationToken`: 32 bytes as unpadded base64url, 43
+ * characters of `[A-Za-z0-9_-]`) - obviously fake, but the right length and character set to
+ * exercise the redaction this file tests. */
+const FAKE_TOKEN = 'FAKE-TOKEN-DO-NOT-LOG0000000000000000000000'
+
 /** The literal storage key layout, kept independent of the module's own (private) prefix constant
  * so a test that pokes raw `localStorage` proves the real on-disk shape rather than whatever the
  * module happens to compute internally. */
@@ -119,17 +125,16 @@ describe('rememberSubmission', () => {
   })
 })
 
-describe('rememberSubmission redacting a confirmation command', () => {
-  it('redacts a confirm command\'s content to null, keeping the token out of raw localStorage and the record\'s three approved keys intact', () => {
+describe('rememberSubmission redacting a confirmation token', () => {
+  it('redacts content to null wherever a well-formed 43-character token appears, keeping it out of raw localStorage and the record\'s three approved keys intact', () => {
     rememberSubmission(CONVERSATION, PARTICIPANT, {
       nativeMessageId: 'native-1',
-      contentText: 'confirm FAKE-TOKEN-DO-NOT-LOG',
+      contentText: `confirm ${FAKE_TOKEN}`,
     })
 
     const raw = localStorage.getItem(rawKeyFor(CONVERSATION, PARTICIPANT))
     expect(raw).not.toBeNull()
-    expect(raw).not.toContain('FAKE-TOKEN-DO-NOT-LOG')
-    expect(raw).not.toContain('confirm')
+    expect(raw).not.toContain(FAKE_TOKEN)
 
     const parsed = JSON.parse(raw!) as Record<string, unknown>
     expect(Object.keys(parsed).sort()).toEqual(['contentText', 'nativeMessageId', 'turnId'])
@@ -140,29 +145,62 @@ describe('rememberSubmission redacting a confirmation command', () => {
     })
   })
 
-  it('recognizes the confirm command leniently by case and whitespace, and only that shape', () => {
+  it('redacts regardless of the surrounding words - the server accepts free-form affirmatives, not just "confirm"', () => {
+    rememberSubmission(CONVERSATION, PARTICIPANT, { nativeMessageId: 'native-1', contentText: `${FAKE_TOKEN} please` })
+    expect(readInFlightTurn(CONVERSATION, PARTICIPANT)?.contentText).toBeNull()
+
+    rememberSubmission(CONVERSATION, PARTICIPANT, { nativeMessageId: 'native-2', contentText: `yes ${FAKE_TOKEN}` })
+    expect(readInFlightTurn(CONVERSATION, PARTICIPANT)?.contentText).toBeNull()
+
+    rememberSubmission(CONVERSATION, PARTICIPANT, {
+      nativeMessageId: 'native-3',
+      contentText: `approve ${FAKE_TOKEN} now`,
+    })
+    expect(readInFlightTurn(CONVERSATION, PARTICIPANT)?.contentText).toBeNull()
+
+    rememberSubmission(CONVERSATION, PARTICIPANT, {
+      nativeMessageId: 'native-4',
+      contentText: `go ahead ${FAKE_TOKEN}`,
+    })
+    expect(readInFlightTurn(CONVERSATION, PARTICIPANT)?.contentText).toBeNull()
+  })
+
+  it('redacts a token that appears anywhere in multiline or otherwise longer content, trailing text included', () => {
     rememberSubmission(CONVERSATION, PARTICIPANT, {
       nativeMessageId: 'native-1',
-      contentText: '  CONFIRM   FAKE-TOKEN-DO-NOT-LOG  ',
+      contentText: `confirm\n${FAKE_TOKEN}\nplease apply this today`,
     })
     expect(readInFlightTurn(CONVERSATION, PARTICIPANT)?.contentText).toBeNull()
 
     rememberSubmission(CONVERSATION, PARTICIPANT, {
       nativeMessageId: 'native-2',
-      contentText: 'Confirm fake-token-do-not-log',
+      contentText: `Here is my confirmation: ${FAKE_TOKEN}. Thanks!`,
     })
     expect(readInFlightTurn(CONVERSATION, PARTICIPANT)?.contentText).toBeNull()
+  })
 
-    // Neither carries a token - a bare "confirm" with nothing after it, and a sentence that merely
-    // mentions the word - so neither is secret, and both are stored exactly as typed.
-    rememberSubmission(CONVERSATION, PARTICIPANT, { nativeMessageId: 'native-3', contentText: 'confirm' })
-    expect(readInFlightTurn(CONVERSATION, PARTICIPANT)?.contentText).toBe('confirm')
+  it('leaves anything that is not itself a well-formed standalone token untouched, no matter how close', () => {
+    // One character short of a real token.
+    const shortByOne = FAKE_TOKEN.slice(0, -1)
+    rememberSubmission(CONVERSATION, PARTICIPANT, { nativeMessageId: 'native-1', contentText: `confirm ${shortByOne}` })
+    expect(readInFlightTurn(CONVERSATION, PARTICIPANT)?.contentText).toBe(`confirm ${shortByOne}`)
 
+    // One character too many - the 43-character shape has to stand on its own, not be a substring
+    // of a longer run of the same characters.
     rememberSubmission(CONVERSATION, PARTICIPANT, {
-      nativeMessageId: 'native-4',
-      contentText: 'please confirm this order',
+      nativeMessageId: 'native-2',
+      contentText: `confirm ${FAKE_TOKEN}x`,
     })
-    expect(readInFlightTurn(CONVERSATION, PARTICIPANT)?.contentText).toBe('please confirm this order')
+    expect(readInFlightTurn(CONVERSATION, PARTICIPANT)?.contentText).toBe(`confirm ${FAKE_TOKEN}x`)
+
+    // The right total length, but broken in the middle - two shorter runs, not one contiguous one.
+    const broken = `${FAKE_TOKEN.slice(0, 21)} ${FAKE_TOKEN.slice(22)}`
+    rememberSubmission(CONVERSATION, PARTICIPANT, { nativeMessageId: 'native-3', contentText: broken })
+    expect(readInFlightTurn(CONVERSATION, PARTICIPANT)?.contentText).toBe(broken)
+
+    // No token at all - neither carries a secret, so both are stored exactly as typed.
+    rememberSubmission(CONVERSATION, PARTICIPANT, { nativeMessageId: 'native-4', contentText: 'confirm' })
+    expect(readInFlightTurn(CONVERSATION, PARTICIPANT)?.contentText).toBe('confirm')
 
     rememberSubmission(CONVERSATION, PARTICIPANT, { nativeMessageId: 'native-5', contentText: 'reject' })
     expect(readInFlightTurn(CONVERSATION, PARTICIPANT)?.contentText).toBe('reject')
@@ -334,5 +372,71 @@ describe('subscribeToConversationChanges', () => {
     window.dispatchEvent(new StorageEvent('storage', { key: rawKeyFor(CONVERSATION, PARTICIPANT) }))
 
     expect(onChanged).not.toHaveBeenCalled()
+  })
+})
+
+describe('storage failures', () => {
+  it('returns true from every write/remove operation and null from nothing on the ordinary, non-throwing path', () => {
+    expect(rememberSubmission(CONVERSATION, PARTICIPANT, { nativeMessageId: 'native-1', contentText: 'list stock' })).toBe(
+      true,
+    )
+    expect(rememberTurnId(CONVERSATION, PARTICIPANT, 'native-1', 'turn-1')).toBe(true)
+    expect(clearInFlightTurnIfMatches(CONVERSATION, PARTICIPANT, { turnId: 'turn-1' })).toBe(true)
+    expect(clearInFlightTurn(CONVERSATION, PARTICIPANT)).toBe(true)
+  })
+
+  it('returns null, not a thrown error, when localStorage.getItem itself throws', () => {
+    const spy = vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
+      throw new DOMException('Storage is disabled', 'SecurityError')
+    })
+
+    try {
+      expect(readInFlightTurn(CONVERSATION, PARTICIPANT)).toBeNull()
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  it('returns false, not a thrown error, when localStorage.setItem throws while remembering a submission', () => {
+    const spy = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new DOMException('Quota exceeded', 'QuotaExceededError')
+    })
+
+    try {
+      expect(
+        rememberSubmission(CONVERSATION, PARTICIPANT, { nativeMessageId: 'native-1', contentText: 'list stock' }),
+      ).toBe(false)
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  it('returns false, not a thrown error, when localStorage.setItem throws while filling in a Turn id', () => {
+    rememberSubmission(CONVERSATION, PARTICIPANT, { nativeMessageId: 'native-1', contentText: 'list stock' })
+
+    const spy = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new DOMException('Quota exceeded', 'QuotaExceededError')
+    })
+
+    try {
+      expect(rememberTurnId(CONVERSATION, PARTICIPANT, 'native-1', 'turn-1')).toBe(false)
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  it('returns false, not a thrown error, when localStorage.removeItem throws', () => {
+    rememberSubmission(CONVERSATION, PARTICIPANT, { nativeMessageId: 'native-1', contentText: 'list stock' })
+
+    const spy = vi.spyOn(Storage.prototype, 'removeItem').mockImplementation(() => {
+      throw new DOMException('Storage is disabled', 'SecurityError')
+    })
+
+    try {
+      expect(clearInFlightTurn(CONVERSATION, PARTICIPANT)).toBe(false)
+      expect(clearInFlightTurnIfMatches(CONVERSATION, PARTICIPANT, { nativeMessageId: 'native-1' })).toBe(false)
+    } finally {
+      spy.mockRestore()
+    }
   })
 })

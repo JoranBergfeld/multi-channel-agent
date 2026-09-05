@@ -260,6 +260,38 @@ export interface TurnOutcomeView {
 }
 
 /**
+ * Thrown when submitting a Turn is definitively rejected by the server - any non-2xx HTTP response.
+ * Carries the exact status so a caller can tell a status that will never succeed by retrying the
+ * same content under the same idempotency key (most 4xx - see `isDefinitiveRejection`) apart from
+ * one that might (authentication, a timeout, rate limiting, or any 5xx). A network failure that
+ * never reached the server at all throws a plain `TypeError`, never this - there is no status to
+ * carry, and it is always retryable.
+ */
+export class SubmitTurnRejectionError extends Error {
+  readonly status: number;
+
+  constructor(status: number) {
+    super(`Submitting the Turn failed with status ${status}.`);
+    this.name = 'SubmitTurnRejectionError';
+    this.status = status;
+  }
+}
+
+/**
+ * Whether an HTTP status is a definitive rejection of the exact request that was sent - one where
+ * retrying with the same content, even under the same idempotency key, could never succeed. Every
+ * 4xx qualifies except: 401 (the Participant may re-authenticate and the same request could then
+ * succeed), 408 (a request timeout - transient by definition), and 429 (rate limited - succeeds
+ * later, not never). Every other status - every other 4xx, every 5xx, and no response at all - is
+ * ambiguous or transient and must not be treated as definitive: a caller that cleared its own
+ * resumption breadcrumb on one of those could discard the one way it had left to safely retry, or
+ * to discover that the request had actually succeeded after all.
+ */
+export function isDefinitiveRejection(status: number): boolean {
+  return status >= 400 && status < 500 && status !== 401 && status !== 408 && status !== 429;
+}
+
+/**
  * Submits a normalized Turn to the application boundary. Participant and ChannelConversation are
  * always derived server-side from the authenticated session and the web conversation cookie - the
  * request body never carries either, so a caller cannot claim someone else's identity.
@@ -276,7 +308,7 @@ export async function submitTurn(request: SubmitTurnRequest, csrfToken: string):
   });
 
   if (!response.ok) {
-    throw new Error(`Submitting the Turn failed with status ${response.status}.`);
+    throw new SubmitTurnRejectionError(response.status);
   }
 
   if (response.status === 200) {

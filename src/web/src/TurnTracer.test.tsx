@@ -8,6 +8,10 @@ import TurnTracer from './TurnTracer';
 
 const CONVERSATION = 'web-conversation-1';
 const PARTICIPANT = 'participant-1';
+/** Exactly the shape of a real `ConfirmationToken` (32 bytes as unpadded base64url, 43 characters
+ * of `[A-Za-z0-9_-]`) - obviously fake, but the right length and character set to exercise
+ * redaction. */
+const FAKE_TOKEN = 'FAKE-TOKEN-DO-NOT-LOG0000000000000000000000';
 
 function stubFetch(responder: (url: string, init?: RequestInit) => Response) {
   const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) =>
@@ -206,11 +210,11 @@ describe('TurnTracer', () => {
 
   it('does not resubmit a confirmation whose token was never persisted, and says so plainly', async () => {
     const fetchMock = stubFetch(() => acceptedResponse('turn-should-not-happen'));
-    // rememberSubmission itself redacts a confirm command's content to null - this is exactly the
-    // record a real "confirm <token>" submission whose response was lost would leave behind.
+    // rememberSubmission itself redacts content containing a well-formed token to null - this is
+    // exactly the record a real confirmation submission whose response was lost would leave behind.
     rememberSubmission(CONVERSATION, PARTICIPANT, {
       nativeMessageId: 'native-confirm',
-      contentText: 'confirm FAKE-TOKEN-DO-NOT-LOG',
+      contentText: `confirm ${FAKE_TOKEN}`,
     });
 
     const { opened, factory } = recordingEventStreamFactory();
@@ -225,6 +229,105 @@ describe('TurnTracer', () => {
     expect(fetchMock).not.toHaveBeenCalled();
     expect(opened).toHaveLength(0);
     await waitFor(() => expect(readInFlightTurn(CONVERSATION, PARTICIPANT)).toBeNull());
+  });
+
+  it('clears the in-flight record when a normal submit is definitively rejected (e.g. 400)', async () => {
+    const fetchMock = stubFetch(() => new Response(null, { status: 400 }));
+
+    const { factory } = recordingEventStreamFactory();
+    renderTracer(factory);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Send' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Submitting the Turn failed with status 400.');
+    await waitFor(() => expect(readInFlightTurn(CONVERSATION, PARTICIPANT)).toBeNull());
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('clears a stored lost-response submission when its resubmission is definitively rejected, and does not retry it on a later mount', async () => {
+    const fetchMock = stubFetch(() => new Response(null, { status: 400 }));
+    rememberSubmission(CONVERSATION, PARTICIPANT, { nativeMessageId: 'native-lost', contentText: 'list stock' });
+
+    const { factory } = recordingEventStreamFactory();
+    const { unmount } = render(
+      <TurnTracer
+        csrfToken="csrf-token"
+        webConversationId={CONVERSATION}
+        participantId={PARTICIPANT}
+        onTerminalOutcome={() => {}}
+        createSource={factory}
+      />,
+    );
+
+    await screen.findByRole('alert');
+    await waitFor(() => expect(readInFlightTurn(CONVERSATION, PARTICIPANT)).toBeNull());
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    unmount();
+
+    // A later mount - a refresh, or reopening the tab - is a fresh component instance with nothing
+    // left to resume, so it must not resubmit the very same, permanently rejected content again.
+    const { factory: laterFactory } = recordingEventStreamFactory();
+    render(
+      <TurnTracer
+        csrfToken="csrf-token"
+        webConversationId={CONVERSATION}
+        participantId={PARTICIPANT}
+        onTerminalOutcome={() => {}}
+        createSource={laterFactory}
+      />,
+    );
+    await flushAsyncWork();
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the in-flight record when a normal submit fails at the network level, not the server', async () => {
+    const fetchMock = vi.fn(() => Promise.reject(new TypeError('Failed to fetch')));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const { factory } = recordingEventStreamFactory();
+    renderTracer(factory);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Send' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Failed to fetch');
+    expect(readInFlightTurn(CONVERSATION, PARTICIPANT)).not.toBeNull();
+  });
+
+  it('keeps the in-flight record when a normal submit is rejected with a retryable status (e.g. 429)', async () => {
+    const fetchMock = stubFetch(() => new Response(null, { status: 429 }));
+
+    const { factory } = recordingEventStreamFactory();
+    renderTracer(factory);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Send' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Submitting the Turn failed with status 429.');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(readInFlightTurn(CONVERSATION, PARTICIPANT)).not.toBeNull();
+  });
+
+  it('aborts before sending when browser storage is unavailable, and stays usable', async () => {
+    const fetchMock = stubFetch(() => acceptedResponse('turn-should-not-happen'));
+    const spy = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new DOMException('Storage is disabled', 'SecurityError');
+    });
+
+    try {
+      const { factory } = recordingEventStreamFactory();
+      renderTracer(factory);
+
+      await userEvent.click(screen.getByRole('button', { name: 'Send' }));
+
+      expect(await screen.findByRole('alert')).toHaveTextContent(
+        'Browser storage is unavailable, so this message was not sent - safe recovery cannot be guaranteed without it. Try again once storage is available.',
+      );
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(screen.getByRole('button', { name: 'Send' })).not.toBeDisabled();
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('forgets the in-flight Turn once it has an answer', async () => {
