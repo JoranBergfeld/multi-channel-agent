@@ -53,7 +53,7 @@ describe('openTurnStream', () => {
       'outcome',
       {
         turnId: 'turn-1',
-        status: 'succeeded',
+        status: 'completed',
         category: 'completed',
         code: 'stock_mutation_applied',
         summary: 'Added 2 kg of flour.',
@@ -81,7 +81,7 @@ describe('openTurnStream', () => {
 
     source.emit(
       'outcome',
-      { turnId: 'turn-1', status: 'succeeded', category: 'completed', code: 'ok', summary: '', deliveries: [] },
+      { turnId: 'turn-1', status: 'completed', category: 'completed', code: 'ok', summary: '', deliveries: [] },
       String(TURN_EVENT_SEQUENCE.outcome),
     )
 
@@ -146,7 +146,7 @@ describe('openTurnStream', () => {
     expect(() =>
       source.emit(
         'outcome',
-        { turnId: 'turn-1', status: 'succeeded', category: 'completed', code: 'ok', summary: '', deliveries: [] },
+        { turnId: 'turn-1', status: 'completed', category: 'completed', code: 'ok', summary: '', deliveries: [] },
         String(TURN_EVENT_SEQUENCE.outcome),
       ),
     ).toThrow(boom)

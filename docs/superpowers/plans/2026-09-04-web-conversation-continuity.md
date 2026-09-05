@@ -7725,7 +7725,7 @@ describe('openTurnStream', () => {
       'outcome',
       {
         turnId: 'turn-1',
-        status: 'succeeded',
+        status: 'completed',
         category: 'completed',
         code: 'stock_mutation_applied',
         summary: 'Added 2 kg of flour.',
@@ -7753,7 +7753,7 @@ describe('openTurnStream', () => {
 
     source.emit(
       'outcome',
-      { turnId: 'turn-1', status: 'succeeded', category: 'completed', code: 'ok', summary: '', deliveries: [] },
+      { turnId: 'turn-1', status: 'completed', category: 'completed', code: 'ok', summary: '', deliveries: [] },
       String(TURN_EVENT_SEQUENCE.outcome),
     )
 
@@ -7818,7 +7818,7 @@ describe('openTurnStream', () => {
     expect(() =>
       source.emit(
         'outcome',
-        { turnId: 'turn-1', status: 'succeeded', category: 'completed', code: 'ok', summary: '', deliveries: [] },
+        { turnId: 'turn-1', status: 'completed', category: 'completed', code: 'ok', summary: '', deliveries: [] },
         String(TURN_EVENT_SEQUENCE.outcome),
       ),
     ).toThrow(boom)
@@ -9027,6 +9027,25 @@ describe('TurnTracer', () => {
     expect(await screen.findByRole('status')).toHaveTextContent('Working on it');
   });
 
+  it('shows the fatal error and stops announcing progress when the open stream fails permanently', async () => {
+    stubFetch(() => acceptedResponse('turn-1'));
+    const { opened, factory } = recordingEventStreamFactory();
+
+    renderTracer(factory);
+    await userEvent.click(screen.getByRole('button', { name: 'Send' }));
+    await waitFor(() => expect(opened).toHaveLength(1));
+
+    opened[0].emit('processing', { turnId: 'turn-1', startedAt: '2026-09-04T10:00:01+00:00' }, '2');
+    expect(await screen.findByRole('status')).toHaveTextContent('Working on it');
+
+    opened[0].failFatally();
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Lost the connection to this Turn and cannot resume it automatically. Refresh to try again.',
+    );
+    expect(screen.getByRole('status')).toHaveTextContent('');
+  });
+
   it('renders the streamed parts and the terminal Outcome together', async () => {
     stubFetch(() => acceptedResponse('turn-1'));
     const { opened, factory } = recordingEventStreamFactory();
@@ -9666,7 +9685,7 @@ Delete the now-unused `getTurnOutcome` import if the compiler reports it; the re
 - [ ] **Step 6: Run the tests to verify they pass**
 
 Run: `cd src/web && npm test`
-Expected: PASS, 9 new tests.
+Expected: PASS, 10 new tests.
 
 - [ ] **Step 7: Check types and lint**
 
@@ -10295,7 +10314,7 @@ export default App;
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `cd src/web && npm test`
-Expected: PASS. The whole web suite - roughly 58 tests across seven files - is green.
+Expected: PASS. The whole web suite - roughly 59 tests across seven files - is green.
 
 - [ ] **Step 5: Check types, lint, and build**
 
