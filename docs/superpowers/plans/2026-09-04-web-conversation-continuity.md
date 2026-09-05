@@ -11260,7 +11260,7 @@ Expected: no output from `tsc`, and no errors from oxlint.
 - [ ] **Step 8: Commit**
 
 ```bash
-git add src/web/src/TurnTracer.tsx src/web/src/TurnTracer.test.tsx src/web/src/turnsApi.ts src/web/src/conversationApi.ts src/web/src/App.tsx
+git add src/web/src/TurnTracer.tsx src/web/src/TurnTracer.test.tsx src/web/src/turnsApi.ts src/web/src/turnsApi.test.ts src/web/src/conversationApi.ts src/web/src/App.tsx
 git commit -m "feat: stream the web conversation and resume it across refreshes and tabs"
 ```
 
