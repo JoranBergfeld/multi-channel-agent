@@ -270,6 +270,170 @@ describe('App', () => {
     expect(bootstrapCalls).toBe(2);
   });
 
+  it('retries membership reconciliation until bootstrap reflects the streamed authorized set', async () => {
+    setViewportWidth(DESKTOP_WIDTH);
+    let bootstrapCalls = 0;
+    const grantedInventory = {
+      id: 'inventory-3',
+      shortId: 'cccccccc',
+      name: 'Eventually Granted Warehouse',
+      ownerDisplayName: 'Grace Hopper',
+      role: 'Viewer',
+    };
+    const { streams } = stubApi({
+      '/api/session/bootstrap': () => {
+        bootstrapCalls += 1;
+        if (bootstrapCalls === 2) {
+          return json({}, 503);
+        }
+
+        return json(
+          bootstrapCalls < 4
+            ? BOOTSTRAP
+            : {
+                ...BOOTSTRAP,
+                bootstrap: {
+                  ...BOOTSTRAP.bootstrap,
+                  inventories: [...BOOTSTRAP.bootstrap.inventories, grantedInventory],
+                },
+              },
+        );
+      },
+    });
+
+    render(<App />);
+    await screen.findByRole('banner');
+    await waitFor(() => expect(inventoryStreamIn(streams)).toBeDefined());
+
+    inventoryStreamIn(streams)!.emit('snapshot', {
+      inventories: [
+        { inventoryId: 'inventory-1', version: 0 },
+        { inventoryId: 'inventory-2', version: 0 },
+      ],
+    });
+    inventoryStreamIn(streams)!.emit('changed', { inventoryId: 'inventory-3', version: 0 });
+
+    expect(await screen.findByText(/Eventually Granted Warehouse/, {}, { timeout: 3000 })).toBeInTheDocument();
+    expect(bootstrapCalls).toBeGreaterThanOrEqual(4);
+  });
+
+  it('clears a fatal Inventory-stream warning after a replacement stream resynchronizes', async () => {
+    setViewportWidth(DESKTOP_WIDTH);
+    let bootstrapCalls = 0;
+    const createdInventory = {
+      id: 'inventory-3',
+      shortId: 'cccccccc',
+      name: 'Created Warehouse',
+      ownerDisplayName: 'Ada Lovelace',
+      role: 'Owner',
+    };
+    const { streams } = stubApi({
+      '/api/session/bootstrap': () => {
+        bootstrapCalls += 1;
+        return json(
+          bootstrapCalls === 1
+            ? BOOTSTRAP
+            : {
+                ...BOOTSTRAP,
+                bootstrap: {
+                  ...BOOTSTRAP.bootstrap,
+                  inventories: [...BOOTSTRAP.bootstrap.inventories, createdInventory],
+                },
+              },
+        );
+      },
+    });
+
+    render(<App />);
+    await screen.findByRole('banner');
+    await waitFor(() => expect(inventoryStreamIn(streams)).toBeDefined());
+    inventoryStreamIn(streams)!.failFatally();
+    expect(await screen.findByRole('alert')).toHaveTextContent('Lost the connection to Inventory updates');
+
+    await userEvent.type(screen.getByLabelText('New Inventory name'), 'Created Warehouse');
+    await userEvent.click(screen.getByRole('button', { name: 'Create Inventory' }));
+    await waitFor(() => expect(streamsFor(streams, '/api/inventory-events')).toHaveLength(2));
+
+    streamsFor(streams, '/api/inventory-events')[1].emit('snapshot', {
+      inventories: [
+        { inventoryId: 'inventory-1', version: 0 },
+        { inventoryId: 'inventory-2', version: 0 },
+        { inventoryId: 'inventory-3', version: 0 },
+      ],
+    });
+
+    await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
+  });
+
+  it('ignores an older session response that arrives after a newer Active Inventory refresh', async () => {
+    setViewportWidth(DESKTOP_WIDTH);
+    let bootstrapCalls = 0;
+    let resolveMembershipRefresh: (response: Response) => void = () => {};
+    let resolveSelectionRefresh: (response: Response) => void = () => {};
+    const membershipRefresh = new Promise<Response>((resolve) => {
+      resolveMembershipRefresh = resolve;
+    });
+    const selectionRefresh = new Promise<Response>((resolve) => {
+      resolveSelectionRefresh = resolve;
+    });
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.startsWith('/api/session/bootstrap')) {
+        bootstrapCalls += 1;
+        if (bootstrapCalls === 1) {
+          return Promise.resolve(json(BOOTSTRAP));
+        }
+
+        return bootstrapCalls === 2 ? membershipRefresh : selectionRefresh;
+      }
+
+      if (url === '/api/inventories/inventory-2/select') {
+        return Promise.resolve(json({}));
+      }
+
+      if (url.includes('/stock')) {
+        return Promise.resolve(json({ rows: [], nextCursor: null, hasMore: false }));
+      }
+
+      if (url.includes('/units')) {
+        return Promise.resolve(json({ units: [], nextCursor: null, hasMore: false }));
+      }
+
+      if (url.includes('/locations')) {
+        return Promise.resolve(json({ locations: [], nextCursor: null, hasMore: false }));
+      }
+
+      return Promise.resolve(json({}));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const streams = installFakeEventSource();
+
+    render(<App />);
+    await screen.findByRole('banner');
+    await waitFor(() => expect(inventoryStreamIn(streams)).toBeDefined());
+
+    inventoryStreamIn(streams)!.emit('changed', { inventoryId: 'inventory-3', version: 0 });
+    await waitFor(() => expect(bootstrapCalls).toBe(2));
+
+    await userEvent.click(screen.getByRole('button', { name: 'Use in this conversation' }));
+    await waitFor(() => expect(bootstrapCalls).toBe(3));
+
+    resolveSelectionRefresh(
+      json({
+        ...BOOTSTRAP,
+        bootstrap: { ...BOOTSTRAP.bootstrap, activeInventoryId: 'inventory-2' },
+      }),
+    );
+    await waitFor(() =>
+      expect(within(screen.getByRole('banner')).getByText(/Spare Warehouse/)).toBeInTheDocument(),
+    );
+
+    resolveMembershipRefresh(json(BOOTSTRAP));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(within(screen.getByRole('banner')).getByText(/Spare Warehouse/)).toBeInTheDocument();
+  });
+
   it('does not let a locally signalled refetch swallow the next version the server publishes', async () => {
     setViewportWidth(DESKTOP_WIDTH);
     const { calls, streams } = stubApi({

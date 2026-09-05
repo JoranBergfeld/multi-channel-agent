@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   createInventory,
   fetchBootstrap,
   selectInventory,
   MAX_INVENTORY_NAME_LENGTH,
   type BootstrapResponse,
+  type BootstrapResult,
   type InventoryView,
 } from './sessionApi';
 import { clearInFlightTurn } from './conversationStorage';
@@ -22,6 +23,12 @@ type SessionState =
   | { phase: 'unauthenticated' }
   | { phase: 'forbidden' }
   | { phase: 'ready'; session: BootstrapResponse };
+
+const MEMBERSHIP_RECONCILIATION_RETRY_MS = 250;
+
+function inventoryIdSetKey(ids: Iterable<string>): string {
+  return JSON.stringify([...ids].sort());
+}
 
 /**
  * Signed-in web entry point.
@@ -63,6 +70,7 @@ function App() {
   // behind it would silently never be read.
   const [inventoryVersions, setInventoryVersions] = useState<InventoryVersions>({});
   const [localRefetchNonce, setLocalRefetchNonce] = useState(0);
+  const sessionRequestSequence = useRef(0);
 
   /**
    * A change this tab knows about before the server announces it. Stable across renders, because it
@@ -71,16 +79,26 @@ function App() {
    */
   const invalidateActiveInventory = useCallback(() => setLocalRefetchNonce((nonce) => nonce + 1), []);
 
-  const loadSession = useCallback(async () => {
+  const loadSession = useCallback(async (): Promise<BootstrapResult | null> => {
+    const requestSequence = ++sessionRequestSequence.current;
+
     try {
       const result = await fetchBootstrap();
+      if (requestSequence !== sessionRequestSequence.current) {
+        return null;
+      }
+
       if (result.status === 'ok') {
         setState({ phase: 'ready', session: result.data });
       } else {
         setState({ phase: result.status });
       }
+      return result;
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      if (requestSequence === sessionRequestSequence.current) {
+        setError(err instanceof Error ? err.message : String(err));
+      }
+      return null;
     }
   }, []);
 
@@ -97,7 +115,7 @@ function App() {
   const isReady = state.phase === 'ready';
   const authorizedInventorySetKey =
     state.phase === 'ready'
-      ? JSON.stringify(state.session.bootstrap.inventories.map((inventory) => inventory.id).sort())
+      ? inventoryIdSetKey(state.session.bootstrap.inventories.map((inventory) => inventory.id))
       : '';
 
   useEffect(() => {
@@ -105,15 +123,50 @@ function App() {
       return;
     }
 
-    let lastAuthorizedInventorySetKey = authorizedInventorySetKey;
+    let stopped = false;
+    let reconciliationTarget: string | null = null;
+    let reconciliationRunning = false;
+
+    async function reconcileMemberships(): Promise<void> {
+      if (reconciliationRunning) {
+        return;
+      }
+
+      reconciliationRunning = true;
+      try {
+        while (!stopped && reconciliationTarget !== null) {
+          const target = reconciliationTarget;
+          const result = await loadSession();
+          if (stopped || reconciliationTarget !== target) {
+            continue;
+          }
+
+          if (result?.status === 'ok') {
+            const applied = inventoryIdSetKey(result.data.bootstrap.inventories.map((inventory) => inventory.id));
+            if (applied === target) {
+              reconciliationTarget = null;
+              return;
+            }
+          }
+
+          await new Promise((resolve) => setTimeout(resolve, MEMBERSHIP_RECONCILIATION_RETRY_MS));
+        }
+      } finally {
+        reconciliationRunning = false;
+      }
+    }
+
     const stream = openInventoryStream({
       onVersions: (versions) => {
         setInventoryVersions(versions);
+        setInventoryStreamError(null);
 
-        const nextAuthorizedInventorySetKey = JSON.stringify(Object.keys(versions).sort());
-        if (nextAuthorizedInventorySetKey !== lastAuthorizedInventorySetKey) {
-          lastAuthorizedInventorySetKey = nextAuthorizedInventorySetKey;
-          void loadSession();
+        const nextAuthorizedInventorySetKey = inventoryIdSetKey(Object.keys(versions));
+        if (nextAuthorizedInventorySetKey !== authorizedInventorySetKey) {
+          reconciliationTarget = nextAuthorizedInventorySetKey;
+          void reconcileMemberships();
+        } else {
+          reconciliationTarget = null;
         }
       },
       // Into the dedicated, persistent state - never into `error` - so that no unrelated handler's
@@ -123,7 +176,10 @@ function App() {
           'Lost the connection to Inventory updates and cannot resync automatically. Refresh the page to try again.',
         ),
     });
-    return () => stream.close();
+    return () => {
+      stopped = true;
+      stream.close();
+    };
   }, [authorizedInventorySetKey, isReady, loadSession]);
 
   async function handleCreateInventory(event: React.FormEvent) {

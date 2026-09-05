@@ -8832,7 +8832,7 @@ git commit -m "feat: persist one browser profile's in-flight Turn without storin
 Create `src/web/src/inventoryStream.test.ts`:
 
 ```ts
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { recordingEventStreamFactory } from './testing/fakeEventSource';
 import { openInventoryStream } from './inventoryStream';
 import type { InventoryVersions } from './inventoryStream';
@@ -9850,7 +9850,7 @@ Create `src/web/src/TurnTracer.test.tsx`:
 
 ```tsx
 import { StrictMode } from 'react';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { recordingEventStreamFactory } from './testing/fakeEventSource';
@@ -11308,7 +11308,7 @@ git commit -m "feat: stream the web conversation and resume it across refreshes 
 Create `src/web/src/App.test.tsx`:
 
 ```tsx
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { DESKTOP_WIDTH, NARROW_WIDTH, setViewportWidth } from './testing/setup';
@@ -11568,6 +11568,170 @@ describe('App', () => {
     expect(bootstrapCalls).toBe(2);
   });
 
+  it('retries membership reconciliation until bootstrap reflects the streamed authorized set', async () => {
+    setViewportWidth(DESKTOP_WIDTH);
+    let bootstrapCalls = 0;
+    const grantedInventory = {
+      id: 'inventory-3',
+      shortId: 'cccccccc',
+      name: 'Eventually Granted Warehouse',
+      ownerDisplayName: 'Grace Hopper',
+      role: 'Viewer',
+    };
+    const { streams } = stubApi({
+      '/api/session/bootstrap': () => {
+        bootstrapCalls += 1;
+        if (bootstrapCalls === 2) {
+          return json({}, 503);
+        }
+
+        return json(
+          bootstrapCalls < 4
+            ? BOOTSTRAP
+            : {
+                ...BOOTSTRAP,
+                bootstrap: {
+                  ...BOOTSTRAP.bootstrap,
+                  inventories: [...BOOTSTRAP.bootstrap.inventories, grantedInventory],
+                },
+              },
+        );
+      },
+    });
+
+    render(<App />);
+    await screen.findByRole('banner');
+    await waitFor(() => expect(inventoryStreamIn(streams)).toBeDefined());
+
+    inventoryStreamIn(streams)!.emit('snapshot', {
+      inventories: [
+        { inventoryId: 'inventory-1', version: 0 },
+        { inventoryId: 'inventory-2', version: 0 },
+      ],
+    });
+    inventoryStreamIn(streams)!.emit('changed', { inventoryId: 'inventory-3', version: 0 });
+
+    expect(await screen.findByText(/Eventually Granted Warehouse/, {}, { timeout: 3000 })).toBeInTheDocument();
+    expect(bootstrapCalls).toBeGreaterThanOrEqual(4);
+  });
+
+  it('clears a fatal Inventory-stream warning after a replacement stream resynchronizes', async () => {
+    setViewportWidth(DESKTOP_WIDTH);
+    let bootstrapCalls = 0;
+    const createdInventory = {
+      id: 'inventory-3',
+      shortId: 'cccccccc',
+      name: 'Created Warehouse',
+      ownerDisplayName: 'Ada Lovelace',
+      role: 'Owner',
+    };
+    const { streams } = stubApi({
+      '/api/session/bootstrap': () => {
+        bootstrapCalls += 1;
+        return json(
+          bootstrapCalls === 1
+            ? BOOTSTRAP
+            : {
+                ...BOOTSTRAP,
+                bootstrap: {
+                  ...BOOTSTRAP.bootstrap,
+                  inventories: [...BOOTSTRAP.bootstrap.inventories, createdInventory],
+                },
+              },
+        );
+      },
+    });
+
+    render(<App />);
+    await screen.findByRole('banner');
+    await waitFor(() => expect(inventoryStreamIn(streams)).toBeDefined());
+    inventoryStreamIn(streams)!.failFatally();
+    expect(await screen.findByRole('alert')).toHaveTextContent('Lost the connection to Inventory updates');
+
+    await userEvent.type(screen.getByLabelText('New Inventory name'), 'Created Warehouse');
+    await userEvent.click(screen.getByRole('button', { name: 'Create Inventory' }));
+    await waitFor(() => expect(streamsFor(streams, '/api/inventory-events')).toHaveLength(2));
+
+    streamsFor(streams, '/api/inventory-events')[1].emit('snapshot', {
+      inventories: [
+        { inventoryId: 'inventory-1', version: 0 },
+        { inventoryId: 'inventory-2', version: 0 },
+        { inventoryId: 'inventory-3', version: 0 },
+      ],
+    });
+
+    await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
+  });
+
+  it('ignores an older session response that arrives after a newer Active Inventory refresh', async () => {
+    setViewportWidth(DESKTOP_WIDTH);
+    let bootstrapCalls = 0;
+    let resolveMembershipRefresh: (response: Response) => void = () => {};
+    let resolveSelectionRefresh: (response: Response) => void = () => {};
+    const membershipRefresh = new Promise<Response>((resolve) => {
+      resolveMembershipRefresh = resolve;
+    });
+    const selectionRefresh = new Promise<Response>((resolve) => {
+      resolveSelectionRefresh = resolve;
+    });
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.startsWith('/api/session/bootstrap')) {
+        bootstrapCalls += 1;
+        if (bootstrapCalls === 1) {
+          return Promise.resolve(json(BOOTSTRAP));
+        }
+
+        return bootstrapCalls === 2 ? membershipRefresh : selectionRefresh;
+      }
+
+      if (url === '/api/inventories/inventory-2/select') {
+        return Promise.resolve(json({}));
+      }
+
+      if (url.includes('/stock')) {
+        return Promise.resolve(json({ rows: [], nextCursor: null, hasMore: false }));
+      }
+
+      if (url.includes('/units')) {
+        return Promise.resolve(json({ units: [], nextCursor: null, hasMore: false }));
+      }
+
+      if (url.includes('/locations')) {
+        return Promise.resolve(json({ locations: [], nextCursor: null, hasMore: false }));
+      }
+
+      return Promise.resolve(json({}));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const streams = installFakeEventSource();
+
+    render(<App />);
+    await screen.findByRole('banner');
+    await waitFor(() => expect(inventoryStreamIn(streams)).toBeDefined());
+
+    inventoryStreamIn(streams)!.emit('changed', { inventoryId: 'inventory-3', version: 0 });
+    await waitFor(() => expect(bootstrapCalls).toBe(2));
+
+    await userEvent.click(screen.getByRole('button', { name: 'Use in this conversation' }));
+    await waitFor(() => expect(bootstrapCalls).toBe(3));
+
+    resolveSelectionRefresh(
+      json({
+        ...BOOTSTRAP,
+        bootstrap: { ...BOOTSTRAP.bootstrap, activeInventoryId: 'inventory-2' },
+      }),
+    );
+    await waitFor(() =>
+      expect(within(screen.getByRole('banner')).getByText(/Spare Warehouse/)).toBeInTheDocument(),
+    );
+
+    resolveMembershipRefresh(json(BOOTSTRAP));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(within(screen.getByRole('banner')).getByText(/Spare Warehouse/)).toBeInTheDocument();
+  });
+
   it('does not let a locally signalled refetch swallow the next version the server publishes', async () => {
     setViewportWidth(DESKTOP_WIDTH);
     const { calls, streams } = stubApi({
@@ -11747,13 +11911,14 @@ Expected: FAIL - `screen.findByRole('banner')` times out because `App` currently
 Replace `src/web/src/App.tsx` in full with:
 
 ```tsx
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   createInventory,
   fetchBootstrap,
   selectInventory,
   MAX_INVENTORY_NAME_LENGTH,
   type BootstrapResponse,
+  type BootstrapResult,
   type InventoryView,
 } from './sessionApi';
 import { clearInFlightTurn } from './conversationStorage';
@@ -11771,6 +11936,12 @@ type SessionState =
   | { phase: 'unauthenticated' }
   | { phase: 'forbidden' }
   | { phase: 'ready'; session: BootstrapResponse };
+
+const MEMBERSHIP_RECONCILIATION_RETRY_MS = 250;
+
+function inventoryIdSetKey(ids: Iterable<string>): string {
+  return JSON.stringify([...ids].sort());
+}
 
 /**
  * Signed-in web entry point.
@@ -11812,6 +11983,7 @@ function App() {
   // behind it would silently never be read.
   const [inventoryVersions, setInventoryVersions] = useState<InventoryVersions>({});
   const [localRefetchNonce, setLocalRefetchNonce] = useState(0);
+  const sessionRequestSequence = useRef(0);
 
   /**
    * A change this tab knows about before the server announces it. Stable across renders, because it
@@ -11820,16 +11992,26 @@ function App() {
    */
   const invalidateActiveInventory = useCallback(() => setLocalRefetchNonce((nonce) => nonce + 1), []);
 
-  const loadSession = useCallback(async () => {
+  const loadSession = useCallback(async (): Promise<BootstrapResult | null> => {
+    const requestSequence = ++sessionRequestSequence.current;
+
     try {
       const result = await fetchBootstrap();
+      if (requestSequence !== sessionRequestSequence.current) {
+        return null;
+      }
+
       if (result.status === 'ok') {
         setState({ phase: 'ready', session: result.data });
       } else {
         setState({ phase: result.status });
       }
+      return result;
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      if (requestSequence === sessionRequestSequence.current) {
+        setError(err instanceof Error ? err.message : String(err));
+      }
+      return null;
     }
   }, []);
 
@@ -11846,7 +12028,7 @@ function App() {
   const isReady = state.phase === 'ready';
   const authorizedInventorySetKey =
     state.phase === 'ready'
-      ? JSON.stringify(state.session.bootstrap.inventories.map((inventory) => inventory.id).sort())
+      ? inventoryIdSetKey(state.session.bootstrap.inventories.map((inventory) => inventory.id))
       : '';
 
   useEffect(() => {
@@ -11854,15 +12036,50 @@ function App() {
       return;
     }
 
-    let lastAuthorizedInventorySetKey = authorizedInventorySetKey;
+    let stopped = false;
+    let reconciliationTarget: string | null = null;
+    let reconciliationRunning = false;
+
+    async function reconcileMemberships(): Promise<void> {
+      if (reconciliationRunning) {
+        return;
+      }
+
+      reconciliationRunning = true;
+      try {
+        while (!stopped && reconciliationTarget !== null) {
+          const target = reconciliationTarget;
+          const result = await loadSession();
+          if (stopped || reconciliationTarget !== target) {
+            continue;
+          }
+
+          if (result?.status === 'ok') {
+            const applied = inventoryIdSetKey(result.data.bootstrap.inventories.map((inventory) => inventory.id));
+            if (applied === target) {
+              reconciliationTarget = null;
+              return;
+            }
+          }
+
+          await new Promise((resolve) => setTimeout(resolve, MEMBERSHIP_RECONCILIATION_RETRY_MS));
+        }
+      } finally {
+        reconciliationRunning = false;
+      }
+    }
+
     const stream = openInventoryStream({
       onVersions: (versions) => {
         setInventoryVersions(versions);
+        setInventoryStreamError(null);
 
-        const nextAuthorizedInventorySetKey = JSON.stringify(Object.keys(versions).sort());
-        if (nextAuthorizedInventorySetKey !== lastAuthorizedInventorySetKey) {
-          lastAuthorizedInventorySetKey = nextAuthorizedInventorySetKey;
-          void loadSession();
+        const nextAuthorizedInventorySetKey = inventoryIdSetKey(Object.keys(versions));
+        if (nextAuthorizedInventorySetKey !== authorizedInventorySetKey) {
+          reconciliationTarget = nextAuthorizedInventorySetKey;
+          void reconcileMemberships();
+        } else {
+          reconciliationTarget = null;
         }
       },
       // Into the dedicated, persistent state - never into `error` - so that no unrelated handler's
@@ -11872,7 +12089,10 @@ function App() {
           'Lost the connection to Inventory updates and cannot resync automatically. Refresh the page to try again.',
         ),
     });
-    return () => stream.close();
+    return () => {
+      stopped = true;
+      stream.close();
+    };
   }, [authorizedInventorySetKey, isReady, loadSession]);
 
   async function handleCreateInventory(event: React.FormEvent) {
@@ -12140,11 +12360,13 @@ export default App;
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `cd src/web && npm test`
-Expected: PASS. The whole web suite - roughly 114 tests across nine files (Task 19's `WorkspacePanel.test.tsx` grew from 10 to 15 tests and gained a sibling `useMediaQuery.test.ts` with 2 tests, both during that task's own quality-review hardening; Task 17's `conversationStorage.test.ts` grew from 14 to 24 to 27 to 34 tests; Task 20's `TurnTracer.test.tsx` grew from 10 to 12 to 15 to 17 to 23 to 25 to 26 tests and gained one direct `turnsApi.test.ts` classification test; and Task 21's `App.test.tsx` grew from 10 to 12 to 14 tests during its quality-review and branch-wide specification hardening) - is green.
+Expected: PASS. The whole web suite - roughly 117 tests across nine files (Task 19's `WorkspacePanel.test.tsx` grew from 10 to 15 tests and gained a sibling `useMediaQuery.test.ts` with 2 tests, both during that task's own quality-review hardening; Task 17's `conversationStorage.test.ts` grew from 14 to 24 to 27 to 34 tests; Task 20's `TurnTracer.test.tsx` grew from 10 to 12 to 15 to 17 to 23 to 25 to 26 tests and gained one direct `turnsApi.test.ts` classification test; and Task 21's `App.test.tsx` grew from 10 to 12 to 14 to 17 tests during its quality-review and branch-wide hardening) - is green.
 
 The Task 21 quality review found two reset-boundary defects. First, a successful reset notice survived a later failed reset and could also suppress the live-region announcement for two identical consecutive successes; every operation now clears the old notice as it begins. Second, `clearInFlightTurn`'s boolean result was ignored even though this is the Participant's explicit reset action: if removal failed, remounting `TurnTracer` could immediately recover old work into the already-rotated conversation. The shell now reports that partial failure and keeps the current tracer mounted instead. The two added tests pin both outcomes, including the old stream remaining open and the recovery record remaining present when removal fails.
 
 The branch-wide specification review found that the server and typed stream client reported Membership grants and revocations, but the shell consumed only the Active Inventory's version. The stream callback now compares its authorized Inventory id set with the bootstrap set and refreshes the session whenever that set changes, so granted Inventories appear and revoked Inventories disappear without a page reload. Two tests drive real `changed` and `revoked` events through the fake EventSource. The test file also relies solely on Vitest's configured `unstubGlobals` teardown: manually unstubbing in an `afterEach` raced React's passive-effect cleanup and could intermittently remove `EventSource` before a late effect opened it.
+
+A focused quality review then hardened that reconciliation path against three races: a failed or replica-lagged bootstrap read now retries until it reflects the streamed authorized set; a replacement stream clears the fatal warning once its next event proves resynchronization; and session reads carry a monotonically increasing request sequence so an older response cannot overwrite a newer Active Inventory or Membership view. Three tests pin those paths directly.
 
 - [ ] **Step 5: Check types, lint, and build**
 
