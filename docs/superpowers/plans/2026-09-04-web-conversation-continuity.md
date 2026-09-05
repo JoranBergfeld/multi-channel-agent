@@ -12511,7 +12511,9 @@ grep -n "api/turns\|api/inventories\|polls\|polling\|conversation" README.md
 
 If it does, update those passages to describe the three new routes - `GET /api/turns/{turnId}/events`, `GET /api/inventory-events`, `POST /api/conversation/new` - and to say the web client streams rather than polls. If `README.md` says nothing about either, change nothing: this ticket adds no operational knob, no configuration value, and no deployment step, so there is nothing else to document.
 
-`CONTEXT.md` is the Inventory domain's vocabulary and gains no term here: "Turn", "ChannelConversation", and "Outcome" are Turn-workflow vocabulary that lives in code documentation, exactly as it did before this ticket.
+`CONTEXT.md` is the Inventory domain's vocabulary and now includes the cross-channel conversation
+terms this ticket makes visible in the product: Channel Conversation, Turn, In-flight Turn, Outcome,
+Conversation Generation, New Conversation, and Inventory Version.
 
 - [ ] **Step 7: Walk the acceptance criteria against the running application**
 
