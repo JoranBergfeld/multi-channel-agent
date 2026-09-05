@@ -7651,125 +7651,139 @@ git commit -m "chore: add Vitest and Testing Library for web runtime tests"
 Create `src/web/src/turnStream.test.ts`:
 
 ```ts
-import { describe, expect, it, vi } from 'vitest';
-import { recordingEventStreamFactory } from './testing/fakeEventSource';
-import { openTurnStream, TURN_EVENT_SEQUENCE } from './turnStream';
+import { describe, expect, it, vi } from 'vitest'
+
+import { recordingEventStreamFactory } from './testing/fakeEventSource'
+import { TURN_EVENT_SEQUENCE, openTurnStream } from './turnStream'
+import type { TurnStreamOutcomeEvent } from './turnStream'
 
 describe('openTurnStream', () => {
-  it('opens the Turn event stream without a resume point the first time', () => {
-    const { opened, factory } = recordingEventStreamFactory();
+  it('opens the per-Turn stream endpoint with no resume point on a first connection', () => {
+    const { opened, factory } = recordingEventStreamFactory()
 
-    openTurnStream({ turnId: 'turn-1', handlers: {}, createSource: factory });
+    openTurnStream({ turnId: 'turn-1', factory })
 
-    expect(opened).toHaveLength(1);
-    expect(opened[0].url).toBe('/api/turns/turn-1/events');
-  });
+    expect(opened).toHaveLength(1)
+    expect(opened[0]?.url).toBe('/api/turns/turn-1/events')
+  })
 
-  it('asks the server to resume after the last event it was given', () => {
-    const { opened, factory } = recordingEventStreamFactory();
+  it('resumes from a caller-supplied lastEventId via the query parameter', () => {
+    const { opened, factory } = recordingEventStreamFactory()
 
-    openTurnStream({
-      turnId: 'turn-1',
-      lastEventId: TURN_EVENT_SEQUENCE.processing,
-      handlers: {},
-      createSource: factory,
-    });
+    openTurnStream({ turnId: 'turn-1', lastEventId: TURN_EVENT_SEQUENCE.processing, factory })
 
-    expect(opened[0].url).toBe('/api/turns/turn-1/events?lastEventId=2');
-  });
+    expect(opened[0]?.url).toBe(`/api/turns/turn-1/events?lastEventId=${TURN_EVENT_SEQUENCE.processing}`)
+  })
 
-  it('reports acceptance, progress, parts, and the terminal outcome as typed events', () => {
-    const { opened, factory } = recordingEventStreamFactory();
-    const onAccepted = vi.fn();
-    const onProcessing = vi.fn();
-    const onPart = vi.fn();
-    const onOutcome = vi.fn();
+  it('dispatches each typed event to its own handler, retaining a data part payload and observing the outcome code', () => {
+    const { opened, factory } = recordingEventStreamFactory()
+    const onAccepted = vi.fn()
+    const onProcessing = vi.fn()
+    const onPart = vi.fn()
+    const onOutcome = vi.fn()
 
     openTurnStream({
       turnId: 'turn-1',
+      factory,
       handlers: { onAccepted, onProcessing, onPart, onOutcome },
-      createSource: factory,
-    });
+    })
 
-    const source = opened[0];
-    source.emit('accepted', { turnId: 'turn-1', receivedAt: '2026-09-04T10:00:00+00:00' }, '1');
-    source.emit('processing', { turnId: 'turn-1', startedAt: '2026-09-04T10:00:01+00:00' }, '2');
-    source.emit('part', { turnId: 'turn-1', order: 1, kind: 'text', text: 'Two rows.', payload: null }, '100');
+    const source = opened[0]!
+    source.emit('accepted', { turnId: 'turn-1', receivedAt: '2026-09-05T00:00:00Z' }, String(TURN_EVENT_SEQUENCE.accepted))
+    source.emit('processing', { turnId: 'turn-1', startedAt: '2026-09-05T00:00:01Z' }, String(TURN_EVENT_SEQUENCE.processing))
     source.emit(
       'part',
-      { turnId: 'turn-1', order: 2, kind: 'data', text: null, payload: { version: 1, kind: 'stock_list' } },
-      '101',
-    );
+      { turnId: 'turn-1', order: 1, kind: 'text', text: 'Added 2 kg of flour.', payload: null },
+      String(TURN_EVENT_SEQUENCE.firstPart),
+    )
+    const dataPayload = { version: 1, kind: 'stock_mutation', operation: 'add' }
+    source.emit(
+      'part',
+      { turnId: 'turn-1', order: 2, kind: 'data', text: null, payload: dataPayload },
+      String(TURN_EVENT_SEQUENCE.firstPart + 1),
+    )
     source.emit(
       'outcome',
       {
         turnId: 'turn-1',
-        status: 'completed',
+        status: 'succeeded',
         category: 'completed',
-        code: 'stock.listed',
-        summary: 'Two rows.',
+        code: 'stock_mutation_applied',
+        summary: 'Added 2 kg of flour.',
         deliveries: [],
-      },
-      '1000000',
-    );
+      } satisfies TurnStreamOutcomeEvent,
+      String(TURN_EVENT_SEQUENCE.outcome),
+    )
 
-    expect(onAccepted).toHaveBeenCalledTimes(1);
-    expect(onProcessing).toHaveBeenCalledTimes(1);
-    expect(onPart).toHaveBeenCalledTimes(2);
-    expect(onPart.mock.calls[1][0].payload).toEqual({ version: 1, kind: 'stock_list' });
-    expect(onOutcome).toHaveBeenCalledWith(expect.objectContaining({ code: 'stock.listed' }));
-  });
+    expect(onAccepted).toHaveBeenCalledWith({ turnId: 'turn-1', receivedAt: '2026-09-05T00:00:00Z' })
+    expect(onProcessing).toHaveBeenCalledWith({ turnId: 'turn-1', startedAt: '2026-09-05T00:00:01Z' })
+    expect(onPart).toHaveBeenCalledTimes(2)
+    expect(onPart).toHaveBeenNthCalledWith(2, { turnId: 'turn-1', order: 2, kind: 'data', text: null, payload: dataPayload })
+    expect(onOutcome).toHaveBeenCalledWith(
+      expect.objectContaining({ code: 'stock_mutation_applied', deliveries: [] }),
+    )
+  })
 
-  it('closes itself the moment the terminal outcome arrives, so the browser never reconnects', () => {
-    const { opened, factory } = recordingEventStreamFactory();
+  it('closes the source itself the instant the terminal outcome event arrives', () => {
+    const { opened, factory } = recordingEventStreamFactory()
 
-    openTurnStream({ turnId: 'turn-1', handlers: {}, createSource: factory });
-    opened[0].emit(
+    openTurnStream({ turnId: 'turn-1', factory })
+
+    const source = opened[0]!
+    expect(source.closed).toBe(false)
+
+    source.emit(
       'outcome',
-      { turnId: 'turn-1', status: 'completed', category: 'completed', code: 'echo', summary: 'Hi.', deliveries: [] },
-      '1000000',
-    );
+      { turnId: 'turn-1', status: 'succeeded', category: 'completed', code: 'ok', summary: '', deliveries: [] },
+      String(TURN_EVENT_SEQUENCE.outcome),
+    )
 
-    expect(opened[0].closed).toBe(true);
-  });
+    expect(source.closed).toBe(true)
+  })
 
-  it('remembers the last event it received so a caller can resume from it', () => {
-    const { opened, factory } = recordingEventStreamFactory();
+  it('advances lastEventId() to the greatest valid event identity received so far', () => {
+    const { opened, factory } = recordingEventStreamFactory()
 
-    const stream = openTurnStream({ turnId: 'turn-1', handlers: {}, createSource: factory });
-    opened[0].emit('accepted', { turnId: 'turn-1', receivedAt: '2026-09-04T10:00:00+00:00' }, '1');
-    opened[0].emit('processing', { turnId: 'turn-1', startedAt: '2026-09-04T10:00:01+00:00' }, '2');
+    const stream = openTurnStream({ turnId: 'turn-1', factory })
+    expect(stream.lastEventId()).toBe(0)
 
-    expect(stream.lastEventId()).toBe(TURN_EVENT_SEQUENCE.processing);
-  });
+    const source = opened[0]!
+    source.emit('accepted', { turnId: 'turn-1', receivedAt: '2026-09-05T00:00:00Z' }, String(TURN_EVENT_SEQUENCE.accepted))
+    expect(stream.lastEventId()).toBe(TURN_EVENT_SEQUENCE.accepted)
 
-  it('reports a dropped connection without closing the stream, so the browser reconnects by itself', () => {
-    const { opened, factory } = recordingEventStreamFactory();
-    const onDisconnected = vi.fn();
+    source.emit('processing', { turnId: 'turn-1', startedAt: '2026-09-05T00:00:01Z' }, String(TURN_EVENT_SEQUENCE.processing))
+    expect(stream.lastEventId()).toBe(TURN_EVENT_SEQUENCE.processing)
+  })
 
-    openTurnStream({ turnId: 'turn-1', handlers: { onDisconnected }, createSource: factory });
-    opened[0].fail();
+  it('reports a connection failure through onDisconnected exactly once without closing, so the browser can reconnect on its own', () => {
+    const { opened, factory } = recordingEventStreamFactory()
+    const onDisconnected = vi.fn()
 
-    expect(onDisconnected).toHaveBeenCalledTimes(1);
-    expect(opened[0].closed).toBe(false);
-  });
+    openTurnStream({ turnId: 'turn-1', factory, handlers: { onDisconnected } })
 
-  it('stops reporting anything once the caller closes it', () => {
-    const { opened, factory } = recordingEventStreamFactory();
-    const onOutcome = vi.fn();
+    const source = opened[0]!
+    source.fail()
 
-    const stream = openTurnStream({ turnId: 'turn-1', handlers: { onOutcome }, createSource: factory });
-    stream.close();
-    opened[0].emit(
-      'outcome',
-      { turnId: 'turn-1', status: 'completed', category: 'completed', code: 'echo', summary: 'Hi.', deliveries: [] },
-      '1000000',
-    );
+    expect(onDisconnected).toHaveBeenCalledTimes(1)
+    expect(source.closed).toBe(false)
+  })
 
-    expect(onOutcome).not.toHaveBeenCalled();
-    expect(opened[0].closed).toBe(true);
-  });
-});
+  it('suppresses events observed after the caller closes the stream, and closes the underlying source', () => {
+    const { opened, factory } = recordingEventStreamFactory()
+    const onAccepted = vi.fn()
+
+    const stream = openTurnStream({ turnId: 'turn-1', factory, handlers: { onAccepted } })
+
+    const source = opened[0]!
+    stream.close()
+    expect(source.closed).toBe(true)
+
+    source.emit('accepted', { turnId: 'turn-1', receivedAt: '2026-09-05T00:00:00Z' }, String(TURN_EVENT_SEQUENCE.accepted))
+
+    expect(onAccepted).not.toHaveBeenCalled()
+    expect(stream.lastEventId()).toBe(0)
+  })
+})
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
@@ -7782,164 +7796,164 @@ Expected: FAIL with `Failed to resolve import "./turnStream"`.
 Create `src/web/src/turnStream.ts`:
 
 ```ts
-import type { DeliveryView, TurnOutcomePayload } from './turnsApi';
+import type { DeliveryView, TurnOutcomePayload } from './turnsApi'
 
 /**
- * The event identities the server issues for one Turn. They are fixed constants there, so they are
- * fixed constants here too: a client that knows them can resume from one without having to have seen
- * it, and a test can name one instead of a magic number.
+ * The same fixed sequence identities `TurnEventSequence` issues server-side (see
+ * `MultiChannelAgent.Domain.Turns.TurnEventSequence`). `firstPart` is the lowest of a sparse block
+ * reserved for response parts - a stream never carries more than a couple, but the identities stay
+ * stable even if more are added later.
  */
 export const TURN_EVENT_SEQUENCE = {
   accepted: 1,
   processing: 2,
   firstPart: 100,
   outcome: 1_000_000,
-} as const;
+} as const
 
 export interface TurnAcceptedEvent {
-  turnId: string;
-  receivedAt: string;
+  turnId: string
+  receivedAt: string
 }
 
 export interface TurnProcessingEvent {
-  turnId: string;
-  startedAt: string;
+  turnId: string
+  startedAt: string
 }
 
-/**
- * One channel-neutral piece of the answer. Exactly one of `text` and `payload` is ever present, and
- * neither is ever a raw model token: a text part is the recorded summary and a data part is the
- * recorded typed projection.
- */
+/** One channel-neutral piece of the answer. Exactly one of `text` and `payload` is ever present. */
 export interface TurnResponsePartEvent {
-  turnId: string;
-  order: number;
-  kind: 'text' | 'data';
-  text: string | null;
-  payload: TurnOutcomePayload | null;
+  turnId: string
+  order: number
+  kind: 'text' | 'data'
+  text: string | null
+  payload: TurnOutcomePayload | null
 }
 
-/**
- * The one terminal event. It deliberately carries no payload - that arrived as a data part - so the
- * short-lived confirmation token inside a proposal payload is never sent twice.
- */
 export interface TurnStreamOutcomeEvent {
-  turnId: string;
-  status: string;
-  category: string;
-  code: string;
-  summary: string;
-  deliveries: DeliveryView[];
+  turnId: string
+  status: string
+  category: string
+  code: string
+  summary: string
+  deliveries: DeliveryView[]
 }
 
 export interface TurnStreamHandlers {
-  onAccepted?: (event: TurnAcceptedEvent) => void;
-  onProcessing?: (event: TurnProcessingEvent) => void;
-  onPart?: (event: TurnResponsePartEvent) => void;
-  onOutcome?: (event: TurnStreamOutcomeEvent) => void;
-  /** The connection dropped. The browser reconnects by itself, resuming from the last event it saw. */
-  onDisconnected?: () => void;
+  onAccepted?: (event: TurnAcceptedEvent) => void
+  onProcessing?: (event: TurnProcessingEvent) => void
+  onPart?: (event: TurnResponsePartEvent) => void
+  onOutcome?: (event: TurnStreamOutcomeEvent) => void
+  /**
+   * Called on a transient connection failure. Purely informational: the browser's own EventSource
+   * reconnects by itself with `Last-Event-ID` set to the last identity it observed, so a caller
+   * only ever uses this to reflect connection state, never to react by reconnecting itself.
+   */
+  onDisconnected?: () => void
 }
 
-/**
- * The subset of `EventSource` this client uses, so tests can supply a double instead of a browser.
- * Deliberately three members and no more: the smaller this surface, the less a double has to pretend
- * to be, and the more honestly a passing test predicts the browser.
- */
+/** The minimal shape of the browser's `EventSource` this client depends on. */
 export interface EventStreamSource {
-  addEventListener(type: string, listener: (event: MessageEvent) => void): void;
-  onerror: ((event: Event) => void) | null;
-  close(): void;
+  addEventListener(type: string, listener: (event: MessageEvent<string>) => void): void
+  close(): void
+  onerror: ((event: Event) => void) | null
 }
 
-export type EventStreamFactory = (url: string) => EventStreamSource;
+export type EventStreamFactory = (url: string) => EventStreamSource
 
 export interface TurnStream {
-  /** The identity of the last event this stream received, or 0 when it has received none. */
-  lastEventId: () => number;
-  close: () => void;
+  /** The greatest event identity observed so far - what a caller persists to resume later. */
+  lastEventId(): number
+  close(): void
 }
 
 export interface OpenTurnStreamOptions {
-  turnId: string;
-  /** Where to resume from. Omitted or 0 replays the Turn's whole stream, which is always safe. */
-  lastEventId?: number;
-  handlers: TurnStreamHandlers;
-  createSource?: EventStreamFactory;
+  turnId: string
+  /** The identity to resume from, or 0 (the default) to open the stream from its beginning. */
+  lastEventId?: number
+  handlers?: TurnStreamHandlers
+  /** Defaults to the real `EventSource`; tests supply a fake instead. */
+  factory?: EventStreamFactory
 }
 
 /**
- * Watches one Turn's finite, resumable event stream.
+ * Opens one Turn's finite, resumable event stream and dispatches each named SSE event to its typed
+ * handler.
  *
- * Two details of the browser's `EventSource` shape this. It cannot set request headers, so a resume
- * point for a connection the client opens itself - after a reload, say - travels in the query string;
- * the server reads the header first and this second, so the browser's own automatic reconnect keeps
- * working unchanged. And it reconnects automatically whenever the response ends, which is exactly
- * what should happen when the server closes a stream at its interactive-wait bound, and exactly what
- * must not happen once the answer has arrived - so this closes itself on the terminal event.
+ * A positive `lastEventId` is sent as the `lastEventId` query parameter rather than a header,
+ * because this always represents a deliberate resume (a fresh page load, or a caller reopening
+ * after a gap) - the header is reserved for the browser's own automatic reconnect, which this
+ * function never has to construct by hand. On the very first connection there is nothing to resume,
+ * so the URL carries no query at all.
  */
-export function openTurnStream({
-  turnId,
-  lastEventId = 0,
-  handlers,
-  createSource = defaultEventStreamFactory,
-}: OpenTurnStreamOptions): TurnStream {
-  const url =
-    lastEventId > 0 ? `/api/turns/${turnId}/events?lastEventId=${lastEventId}` : `/api/turns/${turnId}/events`;
+export function openTurnStream(options: OpenTurnStreamOptions): TurnStream {
+  const { turnId, handlers = {} } = options
+  const factory = options.factory ?? ((url: string) => new EventSource(url))
+  let seen = options.lastEventId ?? 0
+  let closed = false
 
-  const source = createSource(url);
-  let seen = lastEventId;
-  let closed = false;
+  const url = seen > 0 ? `/api/turns/${turnId}/events?lastEventId=${seen}` : `/api/turns/${turnId}/events`
+  const source = factory(url)
 
-  const close = () => {
-    closed = true;
-    source.close();
-  };
+  // Only a finite identity greater than what is already recorded ever moves the resume point -
+  // an out-of-order or unparseable id (which should never happen against this server, but a
+  // client should not trust the wire blindly) simply leaves it where it was.
+  function observe(rawId: string): void {
+    const id = Number(rawId)
+    if (Number.isFinite(id) && id > seen) {
+      seen = id
+    }
+  }
 
-  const on = <TEvent>(name: string, handle: ((event: TEvent) => void) | undefined, terminal = false) => {
-    source.addEventListener(name, (event) => {
+  function on<T>(type: string, handler: ((event: T) => void) | undefined, terminal = false): void {
+    source.addEventListener(type, (event) => {
+      // A caller's own close() must suppress anything still in flight - the underlying source's
+      // close() does not stop events already queued for delivery.
       if (closed) {
-        return;
+        return
       }
 
-      const id = Number(event.lastEventId);
-      if (Number.isFinite(id) && id > seen) {
-        seen = id;
-      }
-
-      handle?.(JSON.parse(event.data) as TEvent);
+      observe(event.lastEventId)
+      handler?.(JSON.parse(event.data) as T)
 
       if (terminal) {
-        // Nothing follows the terminal event, and an EventSource left open would reconnect the moment
-        // the server closed the response.
-        close();
+        // The terminal outcome is the last event this stream will ever carry - closing here is
+        // what stops the browser's EventSource from reconnecting to a Turn with nothing left to say.
+        closed = true
+        source.close()
       }
-    });
-  };
+    })
+  }
 
-  on<TurnAcceptedEvent>('accepted', handlers.onAccepted);
-  on<TurnProcessingEvent>('processing', handlers.onProcessing);
-  on<TurnResponsePartEvent>('part', handlers.onPart);
-  on<TurnStreamOutcomeEvent>('outcome', handlers.onOutcome, true);
+  on<TurnAcceptedEvent>('accepted', handlers.onAccepted)
+  on<TurnProcessingEvent>('processing', handlers.onProcessing)
+  on<TurnResponsePartEvent>('part', handlers.onPart)
+  on<TurnStreamOutcomeEvent>('outcome', handlers.onOutcome, true)
 
   source.onerror = () => {
-    if (!closed) {
-      // Deliberately not closed: the browser reconnects by itself and sends Last-Event-ID, so a
-      // dropped connection resumes rather than losing the Turn.
-      handlers.onDisconnected?.();
+    if (closed) {
+      return
     }
-  };
 
-  return { lastEventId: () => seen, close };
+    // Deliberately does not close: a transient failure is exactly what the browser's own
+    // reconnect (using Last-Event-ID) is for, and closing here would defeat that reconnect.
+    handlers.onDisconnected?.()
+  }
+
+  return {
+    lastEventId: () => seen,
+    close: () => {
+      closed = true
+      source.close()
+    },
+  }
 }
-
-const defaultEventStreamFactory: EventStreamFactory = (url) => new EventSource(url);
 ```
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `cd src/web && npm test`
-Expected: PASS, 10 tests.
+Expected: PASS, 10 tests (3 existing plus 7 for `openTurnStream`).
 
 - [ ] **Step 5: Check types and lint**
 
