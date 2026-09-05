@@ -9407,6 +9407,7 @@ git commit -m "feat: make the web layout responsive with an accessible workspace
 - Create: `src/web/src/conversationApi.ts`
 - Modify: `src/web/src/TurnTracer.tsx`
 - Test: `src/web/src/TurnTracer.test.tsx`
+- Modify: `src/web/src/App.tsx` (one line only - see Step 7)
 
 - [ ] **Step 1: Write the failing test**
 
@@ -10147,10 +10148,12 @@ Expected: PASS, 10 new tests.
 Run: `cd src/web && npx tsc -b && npm run lint`
 Expected: no output from `tsc`, and no errors from oxlint.
 
+`webConversationId` is a required prop, and `App.tsx` already renders `<TurnTracer csrfToken={session.csrfToken} onTerminalOutcome={...} />` from before this task (with nothing else in Task 21's wiring done yet). That call site now fails `tsc` with "Property 'webConversationId' is missing" until it is given one - the one piece of Task 21 that cannot wait, since otherwise `npx tsc -b` and `npm run build` do not pass at the end of this task. Fix it minimally, in place, without pulling forward any other part of Task 21: add `webConversationId={bootstrap.webConversationId}` (the session bootstrap already carries it) to that one call and nothing else - `App.tsx` keeps rendering the same tree it always has, and Task 21 still replaces this whole section with `WorkspacePanel`, the banner, and the rest of its own wiring.
+
 - [ ] **Step 8: Commit**
 
 ```bash
-git add src/web/src/TurnTracer.tsx src/web/src/TurnTracer.test.tsx src/web/src/turnsApi.ts src/web/src/conversationApi.ts
+git add src/web/src/TurnTracer.tsx src/web/src/TurnTracer.test.tsx src/web/src/turnsApi.ts src/web/src/conversationApi.ts src/web/src/App.tsx
 git commit -m "feat: stream the web conversation and resume it across refreshes and tabs"
 ```
 

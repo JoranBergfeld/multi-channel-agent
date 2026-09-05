@@ -304,3 +304,31 @@ export async function getTurnOutcome(turnId: string): Promise<TurnOutcomeView | 
 
   return (await response.json()) as TurnOutcomeView;
 }
+
+/**
+ * Rebuilds the `TurnOutcomeView` shape the renderer already understands from the pieces the stream
+ * delivers separately: the typed projection arrives as a data response part, and the terminal event
+ * carries everything else. Keeping one shape is the point - the stream and the recovery endpoint
+ * would otherwise need two renderers that could disagree about the same answer.
+ */
+export function composeOutcome(
+  parts: { kind: 'text' | 'data'; text: string | null; payload: TurnOutcomePayload | null }[],
+  terminal: {
+    turnId: string;
+    status: string;
+    category: string;
+    code: string;
+    summary: string;
+    deliveries: DeliveryView[];
+  },
+): TurnOutcomeView {
+  return {
+    turnId: terminal.turnId,
+    status: terminal.status,
+    category: terminal.category,
+    code: terminal.code,
+    summary: terminal.summary,
+    payload: parts.find((part) => part.kind === 'data')?.payload ?? null,
+    deliveries: terminal.deliveries,
+  };
+}

@@ -206,7 +206,11 @@ function App() {
         exactly when a Participant needs the agent to tell them to select one, and hiding the
         conversation would make that guidance unreachable.
       */}
-      <TurnTracer csrfToken={session.csrfToken} onTerminalOutcome={() => setStockRefetchToken((token) => token + 1)} />
+      <TurnTracer
+        csrfToken={session.csrfToken}
+        webConversationId={bootstrap.webConversationId}
+        onTerminalOutcome={() => setStockRefetchToken((token) => token + 1)}
+      />
 
       {bootstrap.activeInventoryId && (
         <StockWorkspace inventoryId={bootstrap.activeInventoryId} refetchToken={stockRefetchToken} />

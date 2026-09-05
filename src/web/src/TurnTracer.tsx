@@ -1,6 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  getTurnOutcome,
+  clearInFlightTurn,
+  readInFlightTurn,
+  rememberSubmission,
+  rememberTurnId,
+  subscribeToConversationChanges,
+} from './conversationStorage';
+import { openTurnStream, type EventStreamFactory, type TurnResponsePartEvent } from './turnStream';
+import {
+  composeOutcome,
   submitTurn,
   type StockChangeView,
   type StockChangesPayload,
@@ -14,8 +22,6 @@ import {
   type ReferenceSuggestionsPayload,
   type TurnOutcomeView,
 } from './turnsApi';
-
-const POLL_INTERVAL_MS = 1500;
 
 function StockRows({ rows }: { rows: StockRowView[] }) {
   return (
@@ -197,20 +203,6 @@ function StockChanges({ payload }: { payload: StockChangesPayload }) {
   );
 }
 
-interface TurnTracerProps {
-  csrfToken: string;
-  /** Called once a terminal Outcome arrives, so the workspace can refetch its authoritative projection. */
-  onTerminalOutcome: () => void;
-}
-
-/**
- * Submits a Turn to the application boundary and renders its recorded terminal Outcome, including
- * the typed semantic List/Find/mutation/proposal/change-set payload when the Outcome carries one. Every terminal Outcome
- * also signals the parent, which is what invalidates and refetches the authoritative Inventory
- * workspace - so a mutation made in the conversation is visible in the workspace immediately.
- * Participant/ChannelConversation identity is always derived server-side; this component never
- * supplies either.
- */
 function ReferenceChangeRows({ changes }: { changes: ReferenceChangeView[] }) {
   return (
     <table>
@@ -286,66 +278,210 @@ function ReferenceSuggestions({ payload }: { payload: ReferenceSuggestionsPayloa
   );
 }
 
-function TurnTracer({ csrfToken, onTerminalOutcome }: TurnTracerProps) {
+interface TurnTracerProps {
+  csrfToken: string;
+  /** This browser profile's stable web conversation identity, from the session bootstrap. */
+  webConversationId: string;
+  /** Called once a terminal Outcome arrives, so the workspace can refetch its authoritative projection. */
+  onTerminalOutcome: () => void;
+  /** Swapped in tests for a controllable double, since jsdom implements no EventSource. */
+  createSource?: EventStreamFactory;
+}
+
+/** What this conversation is currently doing, for the live region that announces it. */
+type ConversationProgress = 'idle' | 'submitting' | 'accepted' | 'processing';
+
+const PROGRESS_TEXT: Record<Exclude<ConversationProgress, 'idle'>, string> = {
+  submitting: 'Sending your message…',
+  accepted: 'Accepted. Waiting for it to be picked up…',
+  processing: 'Working on it…',
+};
+
+/**
+ * The conversation: submits a Turn, follows its finite resumable event stream, and renders the
+ * semantic parts and terminal Outcome it carries.
+ *
+ * It resumes rather than resubmits. On mount - after a refresh, a restart, or in a second tab - it
+ * looks for this browser profile's unfinished Turn and reconnects that Turn's stream, which is a pure
+ * read. Only in the one case where the browser never learned the Turn id at all does it submit again,
+ * and then with the very same native message id, which the application boundary answers from the
+ * Turn it already recorded rather than by doing the work twice. That is what makes reconnecting to
+ * mutation-capable work safe.
+ *
+ * Participant and ChannelConversation identity are always derived server-side; this component never
+ * supplies either, and it holds no token of any kind.
+ */
+function TurnTracer({ csrfToken, webConversationId, onTerminalOutcome, createSource }: TurnTracerProps) {
   const [contentText, setContentText] = useState('list stock');
-  const [submitting, setSubmitting] = useState(false);
+  const [progress, setProgress] = useState<ConversationProgress>('idle');
   const [turnId, setTurnId] = useState<string | null>(null);
+  const [parts, setParts] = useState<TurnResponsePartEvent[]>([]);
   const [outcome, setOutcome] = useState<TurnOutcomeView | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const pollHandle = useRef<number | undefined>(undefined);
 
-  const stopPolling = useCallback(() => {
-    if (pollHandle.current !== undefined) {
-      window.clearInterval(pollHandle.current);
-      pollHandle.current = undefined;
-    }
-  }, []);
+  const streamRef = useRef<{ close: () => void } | null>(null);
+  const watchedTurnRef = useRef<string | null>(null);
 
-  useEffect(() => stopPolling, [stopPolling]);
+  // Resuming is a once-per-mount decision, not a once-per-render one. In the window where a stored
+  // submission has no Turn id yet, resuming means re-POSTing - safe, because the native message id is
+  // an idempotency key, but pointless work and a second in-flight request. A parent that re-renders
+  // with fresh callback identities would otherwise re-run the effect and do exactly that.
+  const resumeAttemptedRef = useRef(false);
 
-  const pollOutcome = useCallback((id: string) => {
-    stopPolling();
-    pollHandle.current = window.setInterval(async () => {
-      try {
-        const result = await getTurnOutcome(id);
-        if (result) {
-          setOutcome(result);
-          stopPolling();
-          onTerminalOutcome();
-        }
-      } catch (err) {
-        setError(err instanceof Error ? err.message : String(err));
-        stopPolling();
+  // The parts as they arrive, mirrored outside React state so the terminal handler can compose the
+  // Outcome from them without reading state inside a state updater - which React may run twice.
+  const partsRef = useRef<TurnResponsePartEvent[]>([]);
+
+  const watchTurn = useCallback(
+    (id: string) => {
+      if (watchedTurnRef.current === id) {
+        return;
       }
-    }, POLL_INTERVAL_MS);
-  }, [stopPolling, onTerminalOutcome]);
 
-  async function handleSubmit(event: React.FormEvent) {
-    event.preventDefault();
-    setSubmitting(true);
-    setError(null);
-    setOutcome(null);
+      streamRef.current?.close();
+      watchedTurnRef.current = id;
+
+      partsRef.current = [];
+      setTurnId(id);
+      setParts([]);
+      setOutcome(null);
+      setProgress('accepted');
+
+      streamRef.current = openTurnStream({
+        turnId: id,
+        handlers: {
+          onAccepted: () => setProgress('accepted'),
+          onProcessing: () => setProgress('processing'),
+          onPart: (part) => {
+            partsRef.current = [...partsRef.current, part];
+            setParts(partsRef.current);
+          },
+          onOutcome: (terminal) => {
+            setOutcome(composeOutcome(partsRef.current, terminal));
+            setProgress('idle');
+            clearInFlightTurn(webConversationId);
+            onTerminalOutcome();
+          },
+          onFailed: () => {
+            // The connection is permanently gone (a 401/403/404, or a response that was never an
+            // event stream at all) rather than the transient drop the browser recovers from on its
+            // own - the same error state every other failure in this component already renders, so
+            // there is nothing new to build, only this one more way of reaching it.
+            setError('Lost the connection to this Turn and cannot resume it automatically. Refresh to try again.');
+            setProgress('idle');
+          },
+        },
+        factory: createSource,
+      });
+    },
+    [createSource, onTerminalOutcome, webConversationId],
+  );
+
+  const resumeStoredTurn = useCallback(async () => {
+    const stored = readInFlightTurn(webConversationId);
+    if (stored === null) {
+      return;
+    }
+
+    if (stored.turnId !== null) {
+      // A pure read. Reconnecting never resubmits.
+      watchTurn(stored.turnId);
+      return;
+    }
+
+    // The submission's response was never seen, so it is unknown whether the Turn exists. Sending the
+    // same native message id again is the safe way to find out: the boundary is idempotent within
+    // this Participant and conversation, so it either accepts it once or hands back what it recorded.
+    setContentText(stored.contentText);
+    setProgress('submitting');
 
     try {
-      const result = await submitTurn({ nativeMessageId: crypto.randomUUID(), contentText }, csrfToken);
+      const result = await submitTurn(
+        { nativeMessageId: stored.nativeMessageId, contentText: stored.contentText },
+        csrfToken,
+      );
 
       if (result.kind === 'outcome') {
-        // This exact native message was already answered, so its recorded terminal Outcome came
-        // back with the submission itself - there is nothing left to wait for.
         setTurnId(result.outcome.turnId);
         setOutcome(result.outcome);
+        setProgress('idle');
+        clearInFlightTurn(webConversationId);
         onTerminalOutcome();
         return;
       }
 
-      setTurnId(result.acceptance.turnId);
-      pollOutcome(result.acceptance.turnId);
+      rememberTurnId(webConversationId, stored.nativeMessageId, result.acceptance.turnId);
+      watchTurn(result.acceptance.turnId);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setSubmitting(false);
+      setProgress('idle');
+    }
+  }, [csrfToken, onTerminalOutcome, watchTurn, webConversationId]);
+
+  useEffect(() => {
+    if (resumeAttemptedRef.current) {
+      return;
+    }
+
+    resumeAttemptedRef.current = true;
+
+    void (async () => {
+      await resumeStoredTurn();
+    })();
+  }, [resumeStoredTurn]);
+
+  useEffect(
+    () =>
+      subscribeToConversationChanges(webConversationId, () => {
+        // Another tab of this browser profile submitted a Turn, or started a new conversation. Both
+        // are changes to the one conversation they share, so this tab follows.
+        const stored = readInFlightTurn(webConversationId);
+        if (stored?.turnId != null) {
+          watchTurn(stored.turnId);
+        }
+      }),
+    [watchTurn, webConversationId],
+  );
+
+  useEffect(() => () => streamRef.current?.close(), []);
+
+  async function handleSubmit(event: React.FormEvent) {
+    event.preventDefault();
+    setError(null);
+    setOutcome(null);
+    partsRef.current = [];
+    setParts([]);
+    setProgress('submitting');
+
+    const nativeMessageId = crypto.randomUUID();
+
+    // Recorded BEFORE the request leaves, so a response that never arrives still leaves this browser
+    // profile holding the idempotency key it submitted under.
+    rememberSubmission(webConversationId, { nativeMessageId, contentText });
+
+    try {
+      const result = await submitTurn({ nativeMessageId, contentText }, csrfToken);
+
+      if (result.kind === 'outcome') {
+        // This exact native message was already answered, so its recorded terminal Outcome came back
+        // with the submission itself - there is nothing left to wait for.
+        setTurnId(result.outcome.turnId);
+        setOutcome(result.outcome);
+        setProgress('idle');
+        clearInFlightTurn(webConversationId);
+        onTerminalOutcome();
+        return;
+      }
+
+      rememberTurnId(webConversationId, nativeMessageId, result.acceptance.turnId);
+      watchTurn(result.acceptance.turnId);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setProgress('idle');
     }
   }
+
+  const streamedText = parts.filter((part) => part.kind === 'text' && part.text !== null);
 
   return (
     <section>
@@ -375,10 +511,18 @@ function TurnTracer({ csrfToken, onTerminalOutcome }: TurnTracerProps) {
           onChange={(event) => setContentText(event.target.value)}
           rows={3}
         />
-        <button type="submit" disabled={submitting}>
-          {submitting ? 'Submitting…' : 'Send'}
+        <button type="submit" disabled={progress === 'submitting'}>
+          Send
         </button>
       </form>
+
+      {/*
+        Announced rather than only shown: progress that a screen reader never hears is progress a
+        Participant using one does not get.
+      */}
+      <p role="status" aria-live="polite">
+        {progress === 'idle' ? '' : PROGRESS_TEXT[progress]}
+      </p>
 
       {turnId && (
         <section>
@@ -396,7 +540,14 @@ function TurnTracer({ csrfToken, onTerminalOutcome }: TurnTracerProps) {
         </section>
       )}
 
-      {turnId && !outcome && !error && <p>Waiting for the terminal Outcome…</p>}
+      {streamedText.length > 0 && !outcome && (
+        <section>
+          <h2>Answer so far</h2>
+          {streamedText.map((part) => (
+            <p key={part.order}>{part.text}</p>
+          ))}
+        </section>
+      )}
 
       {outcome && (
         <section>
