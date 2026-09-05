@@ -5838,7 +5838,7 @@ The comparison is `>=`, not `==`: anything at or below the current generation is
 - [ ] **Step 8: Run the lifecycle tests to verify they pass**
 
 Run: `dotnet test tests/MultiChannelAgent.Application.Tests --filter FullyQualifiedName~ConfirmationProposalLifecycleTests`
-Expected: PASS, including the five new tests.
+Expected: PASS - fourteen tests, the five this file already had plus the nine Step 5 added.
 
 - [ ] **Step 9: Fix the coordinator harness so a mutation-capable Turn can actually reach a proposal**
 
@@ -6104,12 +6104,21 @@ Then append these four tests to `TurnProcessingCoordinatorTests`:
 
 No new `using` directives are needed: the file already imports `MultiChannelAgent.Application.Inventories` (the services, `StockToolDispatcher` and `ConfirmationProposalLifecycle`), `MultiChannelAgent.Application.Tests.TestDoubles` and `...TestDoubles.Inventories` (every double used above), `MultiChannelAgent.Domain.Inventories` (`InventoryId`, `UnitId`, `MembershipRole`, `ActiveInventorySelection`, `Quantity`, `ProposalStatus`), and `MultiChannelAgent.Domain.Turns` (`ChannelConversationId`, `OutcomeCategory`, `OutcomeStatus`).
 
-- [ ] **Step 10: Run the coordinator tests to verify they fail**
+- [ ] **Step 10: Run the coordinator tests and check each one fails where it should**
 
 Run: `dotnet test tests/MultiChannelAgent.Application.Tests --filter FullyQualifiedName~TurnProcessingCoordinatorTests`
-Expected: FAIL. Both new tests reach their last line and fail there with `Assert.Null() Failure: Value is not null` - the Turn stored a proposal and nothing settled it. Every other test in the file must still pass; if any of them broke, the `CreateCoordinator` replacement was applied wrongly.
+Expected: FAIL - but not uniformly, and *where* each one fails is the thing to read. The four tests Step 9 added drive different orderings, so they have different red signals, and one of them is a control that must already be green. Every other test in the file must still pass; if any of them broke, the `CreateCoordinator` replacement was applied wrongly.
 
-**Check *where* they failed before continuing.** Both tests assert `OutcomeCategory.ConfirmationRequired` *before* the `Assert.Null`, precisely so a seeding mistake cannot masquerade as the behaviour under test. If either fails on that line instead, the fixture is wrong and the `Assert.Null` below it would have passed for the wrong reason. The failure message names the category the Turn actually reached:
+| Test | Expected before Step 11 |
+| --- | --- |
+| `A_mutation_accepted_before_a_reset_leaves_nothing_confirmable_in_the_new_conversation` | **FAIL at the second `Assert.Null(await PendingProposalAsync(harness))`** - the one after the second `ProcessPendingAsync`, because that Turn stored a proposal into the rotated conversation and nothing settled it. The two assertions before it must **pass**: `Assert.Equal(OutcomeCategory.ConfirmationRequired, control!.Category)` is the seeded control that stops the failure being vacuous, and the first `Assert.Null`, taken right after `ResetConversationAsync`, is the reset doing its own job. |
+| `A_reset_that_lands_while_a_turn_is_being_processed_still_settles_what_it_goes_on_to_propose` | **FAIL at `Assert.Equal(ProposalStatus.ConversationReset, await harness.Proposals.FindStatusAsync(created.Id, ...))`**, which reports `Pending`. The `Assert.Null` inside the `try` passes on purpose - it *states the hole*: while the Turn is parked at the model boundary there is nothing for the reset to settle. Everything up to and including `Assert.Single(harness.Proposals.Proposals)` passes too; the proposal really is created, it is simply left confirmable. |
+| `A_reset_that_settles_the_proposal_itself_still_never_answers_with_a_confirmation` | **FAIL at `Assert.NotEqual(OutcomeCategory.ConfirmationRequired, outcome!.Category)`**. This ordering's settlement is done by the reset itself, so the proposal assertions and `Assert.Null` all pass - what is wrong is the *answer*, which still offers a code for a proposal that has already stopped being confirmable. It fails on the truthfulness of the Outcome, not on any leftover pending state. |
+| `A_read_accepted_before_a_reset_still_answers_from_the_conversation_it_was_accepted_under` | **PASS.** It is a control, not a red driver: a read leaves no proposal, so there is nothing for Step 11 to change about it. It is here to fail *later* - if the settlement ever starts reshaping an answer that had nothing to do with confirmation, or if the factory stops processing a Turn in the conversation it was accepted under. |
+
+Do not require all four to fail, and do not require any of them to fail on the same line: only the first has a pending proposal to be surprised by, and a change that made the second or third fail at `Assert.Null` instead would mean the fixture, not the behaviour, is what moved.
+
+**Check the seeded fixture first if the mutation test fails early.** `A_mutation_accepted_before_a_reset_leaves_nothing_confirmable_in_the_new_conversation` asserts `OutcomeCategory.ConfirmationRequired` on its control Turn *before* anything about settlement, precisely so a seeding mistake cannot masquerade as the behaviour under test. If it fails on that line, the fixture is wrong and the `Assert.Null` below it would have passed for the wrong reason. The failure message names the category the Turn actually reached:
 
 | Actual category | What is missing |
 | --- | --- |
@@ -6119,7 +6128,7 @@ Expected: FAIL. Both new tests reach their last line and fail there with `Assert
 | `Conflict` (code `forget_requires_zero_quantity`) | The seeded row has a non-zero quantity |
 | `Completed` (summary starting `Echoed:`) | The content text is not one `ScriptedModelBoundary` recognizes as `forget stock <reference>` |
 
-Fix the fixture until both tests fail on the `Assert.Null` line, and only then implement.
+Fix the fixture until that control assertion passes and the mutation test fails on its `Assert.Null`, and only then implement.
 
 - [ ] **Step 11: Settle it in the coordinator, and answer truthfully**
 
