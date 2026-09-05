@@ -11571,6 +11571,66 @@ describe('App', () => {
     expect(oldTurnStreams[0].closed).toBe(true);
   });
 
+  it('clears an earlier reset notice before reporting a later reset failure', async () => {
+    setViewportWidth(DESKTOP_WIDTH);
+    let resetCount = 0;
+    stubApi({
+      '/api/conversation/new': () => {
+        resetCount += 1;
+        return resetCount === 1
+          ? json({ foundryConversationId: 'foundry-2', generation: 2, clearedPendingConfirmation: false })
+          : json({}, 500);
+      },
+    });
+
+    render(<App />);
+    const banner = await screen.findByRole('banner');
+
+    await userEvent.click(screen.getByRole('button', { name: 'New conversation' }));
+    await waitFor(() => expect(within(banner).getByRole('status')).toHaveTextContent('Started a new conversation.'));
+
+    await userEvent.click(screen.getByRole('button', { name: 'New conversation' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Starting a new conversation failed with status 500.',
+    );
+    expect(within(banner).getByRole('status')).toHaveTextContent('');
+  });
+
+  it('keeps the current conversation mounted when its recovery record cannot be cleared', async () => {
+    setViewportWidth(DESKTOP_WIDTH);
+    const { streams } = stubApi({
+      '/api/conversation/new': () =>
+        json({ foundryConversationId: 'foundry-2', generation: 2, clearedPendingConfirmation: false }),
+    });
+    rememberSubmission('web-conversation-1', '11111111-1111-1111-1111-111111111111', {
+      nativeMessageId: 'native-old',
+      contentText: 'list stock',
+    });
+    rememberTurnId('web-conversation-1', '11111111-1111-1111-1111-111111111111', 'native-old', 'turn-old');
+
+    render(<App />);
+    await screen.findByRole('banner');
+    await waitFor(() => expect(streamsFor(streams, '/api/turns/turn-old/events')).toHaveLength(1));
+    const oldTurnStream = streamsFor(streams, '/api/turns/turn-old/events')[0];
+
+    const spy = vi.spyOn(Storage.prototype, 'removeItem').mockImplementation(() => {
+      throw new DOMException('Storage is disabled', 'SecurityError');
+    });
+
+    try {
+      await userEvent.click(screen.getByRole('button', { name: 'New conversation' }));
+
+      expect(await screen.findByRole('alert')).toHaveTextContent(
+        'The new conversation started, but browser recovery state could not be cleared safely. The current view was kept open to avoid recovering work from the prior conversation. Try again once browser storage is available.',
+      );
+      expect(within(screen.getByRole('banner')).getByRole('status')).toHaveTextContent('');
+      expect(oldTurnStream.closed).toBe(false);
+      expect(readInFlightTurn('web-conversation-1', '11111111-1111-1111-1111-111111111111')).not.toBeNull();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('never offers a control that would change a quantity directly', async () => {
     setViewportWidth(DESKTOP_WIDTH);
     stubApi();
@@ -11605,7 +11665,7 @@ The new-conversation test asserts one open-then-closed stream for the old Turn r
 - [ ] **Step 2: Run the test to verify it fails**
 
 Run: `cd src/web && npm test`
-Expected: FAIL - `screen.findByRole('main')` times out because `App` currently renders one flat `<main>` with no landmarks, no banner, and no New conversation control.
+Expected: FAIL - `screen.findByRole('banner')` times out because `App` currently renders one flat `<main>` with no banner, no responsive workspace landmarks, and no New conversation control.
 
 - [ ] **Step 3: Write the shell**
 
@@ -11735,6 +11795,7 @@ function App() {
 
     setCreating(true);
     setError(null);
+    setNotice(null);
 
     try {
       await createInventory(newInventoryName, crypto.randomUUID(), state.session.csrfToken);
@@ -11754,6 +11815,7 @@ function App() {
 
     setSelectingId(inventory.id);
     setError(null);
+    setNotice(null);
 
     try {
       const authorized = await selectInventory(inventory.id, state.session.csrfToken);
@@ -11777,6 +11839,7 @@ function App() {
 
     setResetting(true);
     setError(null);
+    setNotice(null);
 
     try {
       const rotation = await startNewConversation(state.session.csrfToken);
@@ -11785,7 +11848,16 @@ function App() {
       // record belongs to the conversation that just ended: leaving it would make the remounted
       // TurnTracer immediately reconnect that Turn's stream - or, in the lost-response case, re-POST
       // it - dragging work from the old conversation into the new one on the very first render.
-      clearInFlightTurn(state.session.bootstrap.webConversationId, state.session.bootstrap.participantId);
+      const cleared = clearInFlightTurn(
+        state.session.bootstrap.webConversationId,
+        state.session.bootstrap.participantId,
+      );
+      if (!cleared) {
+        setError(
+          'The new conversation started, but browser recovery state could not be cleared safely. The current view was kept open to avoid recovering work from the prior conversation. Try again once browser storage is available.',
+        );
+        return;
+      }
 
       // Remounts the conversation, which is what drops this tab's transcript. The Inventory the
       // Participant was working in, and every authorization they hold, are deliberately untouched -
@@ -11980,7 +12052,9 @@ export default App;
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `cd src/web && npm test`
-Expected: PASS. The whole web suite - roughly 110 tests across nine files (Task 19's `WorkspacePanel.test.tsx` grew from 10 to 15 tests and gained a sibling `useMediaQuery.test.ts` with 2 tests, both during that task's own quality-review hardening; Task 17's `conversationStorage.test.ts` grew from 14 to 24 to 27 to 34 tests; and Task 20's `TurnTracer.test.tsx` grew from 10 to 12 to 15 to 17 to 23 to 25 to 26 tests, then gained one direct `turnsApi.test.ts` classification test, across Task 20's own six quality-review hardening passes - StrictMode recovery, then Participant scope/superseded-Turn/unmount safety, then keeping a confirmation's token out of storage by shape and proving the stream-close cleanup is actually tested, then drawing the definitive-vs-retryable rejection line and tolerating `localStorage` itself failing without abandoning an already-streaming Turn, then pinning both HTTP 200 replay callers and every rejection carve-out, then preserving one live stream and its rendered parts across parent rerenders) - is green.
+Expected: PASS. The whole web suite - roughly 112 tests across nine files (Task 19's `WorkspacePanel.test.tsx` grew from 10 to 15 tests and gained a sibling `useMediaQuery.test.ts` with 2 tests, both during that task's own quality-review hardening; Task 17's `conversationStorage.test.ts` grew from 14 to 24 to 27 to 34 tests; Task 20's `TurnTracer.test.tsx` grew from 10 to 12 to 15 to 17 to 23 to 25 to 26 tests and gained one direct `turnsApi.test.ts` classification test; and Task 21's `App.test.tsx` grew from 10 to 12 tests during its quality-review hardening) - is green.
+
+The Task 21 quality review found two reset-boundary defects. First, a successful reset notice survived a later failed reset and could also suppress the live-region announcement for two identical consecutive successes; every operation now clears the old notice as it begins. Second, `clearInFlightTurn`'s boolean result was ignored even though this is the Participant's explicit reset action: if removal failed, remounting `TurnTracer` could immediately recover old work into the already-rotated conversation. The shell now reports that partial failure and keeps the current tracer mounted instead. The two added tests pin both outcomes, including the old stream remaining open and the recovery record remaining present when removal fails.
 
 - [ ] **Step 5: Check types, lint, and build**
 

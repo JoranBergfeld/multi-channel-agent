@@ -121,6 +121,7 @@ function App() {
 
     setCreating(true);
     setError(null);
+    setNotice(null);
 
     try {
       await createInventory(newInventoryName, crypto.randomUUID(), state.session.csrfToken);
@@ -140,6 +141,7 @@ function App() {
 
     setSelectingId(inventory.id);
     setError(null);
+    setNotice(null);
 
     try {
       const authorized = await selectInventory(inventory.id, state.session.csrfToken);
@@ -163,6 +165,7 @@ function App() {
 
     setResetting(true);
     setError(null);
+    setNotice(null);
 
     try {
       const rotation = await startNewConversation(state.session.csrfToken);
@@ -171,7 +174,16 @@ function App() {
       // record belongs to the conversation that just ended: leaving it would make the remounted
       // TurnTracer immediately reconnect that Turn's stream - or, in the lost-response case, re-POST
       // it - dragging work from the old conversation into the new one on the very first render.
-      clearInFlightTurn(state.session.bootstrap.webConversationId, state.session.bootstrap.participantId);
+      const cleared = clearInFlightTurn(
+        state.session.bootstrap.webConversationId,
+        state.session.bootstrap.participantId,
+      );
+      if (!cleared) {
+        setError(
+          'The new conversation started, but browser recovery state could not be cleared safely. The current view was kept open to avoid recovering work from the prior conversation. Try again once browser storage is available.',
+        );
+        return;
+      }
 
       // Remounts the conversation, which is what drops this tab's transcript. The Inventory the
       // Participant was working in, and every authorization they hold, are deliberately untouched -

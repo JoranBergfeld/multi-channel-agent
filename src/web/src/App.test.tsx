@@ -273,6 +273,66 @@ describe('App', () => {
     expect(oldTurnStreams[0].closed).toBe(true);
   });
 
+  it('clears an earlier reset notice before reporting a later reset failure', async () => {
+    setViewportWidth(DESKTOP_WIDTH);
+    let resetCount = 0;
+    stubApi({
+      '/api/conversation/new': () => {
+        resetCount += 1;
+        return resetCount === 1
+          ? json({ foundryConversationId: 'foundry-2', generation: 2, clearedPendingConfirmation: false })
+          : json({}, 500);
+      },
+    });
+
+    render(<App />);
+    const banner = await screen.findByRole('banner');
+
+    await userEvent.click(screen.getByRole('button', { name: 'New conversation' }));
+    await waitFor(() => expect(within(banner).getByRole('status')).toHaveTextContent('Started a new conversation.'));
+
+    await userEvent.click(screen.getByRole('button', { name: 'New conversation' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Starting a new conversation failed with status 500.',
+    );
+    expect(within(banner).getByRole('status')).toHaveTextContent('');
+  });
+
+  it('keeps the current conversation mounted when its recovery record cannot be cleared', async () => {
+    setViewportWidth(DESKTOP_WIDTH);
+    const { streams } = stubApi({
+      '/api/conversation/new': () =>
+        json({ foundryConversationId: 'foundry-2', generation: 2, clearedPendingConfirmation: false }),
+    });
+    rememberSubmission('web-conversation-1', '11111111-1111-1111-1111-111111111111', {
+      nativeMessageId: 'native-old',
+      contentText: 'list stock',
+    });
+    rememberTurnId('web-conversation-1', '11111111-1111-1111-1111-111111111111', 'native-old', 'turn-old');
+
+    render(<App />);
+    await screen.findByRole('banner');
+    await waitFor(() => expect(streamsFor(streams, '/api/turns/turn-old/events')).toHaveLength(1));
+    const oldTurnStream = streamsFor(streams, '/api/turns/turn-old/events')[0];
+
+    const spy = vi.spyOn(Storage.prototype, 'removeItem').mockImplementation(() => {
+      throw new DOMException('Storage is disabled', 'SecurityError');
+    });
+
+    try {
+      await userEvent.click(screen.getByRole('button', { name: 'New conversation' }));
+
+      expect(await screen.findByRole('alert')).toHaveTextContent(
+        'The new conversation started, but browser recovery state could not be cleared safely. The current view was kept open to avoid recovering work from the prior conversation. Try again once browser storage is available.',
+      );
+      expect(within(screen.getByRole('banner')).getByRole('status')).toHaveTextContent('');
+      expect(oldTurnStream.closed).toBe(false);
+      expect(readInFlightTurn('web-conversation-1', '11111111-1111-1111-1111-111111111111')).not.toBeNull();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('never offers a control that would change a quantity directly', async () => {
     setViewportWidth(DESKTOP_WIDTH);
     stubApi();
