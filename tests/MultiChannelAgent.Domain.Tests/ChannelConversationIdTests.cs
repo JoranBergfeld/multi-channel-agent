@@ -17,4 +17,12 @@ public class ChannelConversationIdTests
     {
         Assert.Equal(new ChannelConversationId("same"), new ChannelConversationId("same"));
     }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void Constructor_throws_when_value_is_blank(string blank)
+    {
+        Assert.Throws<ArgumentException>(() => new ChannelConversationId(blank));
+    }
 }

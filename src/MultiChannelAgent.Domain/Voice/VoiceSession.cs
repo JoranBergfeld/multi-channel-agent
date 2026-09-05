@@ -1,4 +1,5 @@
 using MultiChannelAgent.Domain.Inventories;
+using MultiChannelAgent.Domain.Turns;
 
 namespace MultiChannelAgent.Domain.Voice;
 
@@ -9,7 +10,7 @@ public sealed class VoiceSession
 {
     public VoiceSessionId Id { get; }
     public ParticipantId ParticipantId { get; }
-    public string ChannelConversationId { get; }
+    public ChannelConversationId ChannelConversationId { get; }
     public string? ControlSessionId { get; private set; }
     public string OwnerInstanceId { get; }
     public VoiceSessionStatus Status { get; private set; }
@@ -25,7 +26,7 @@ public sealed class VoiceSession
     private VoiceSession(
         VoiceSessionId id,
         ParticipantId participantId,
-        string channelConversationId,
+        ChannelConversationId channelConversationId,
         string? controlSessionId,
         string ownerInstanceId,
         VoiceSessionStatus status,
@@ -62,13 +63,11 @@ public sealed class VoiceSession
     /// </summary>
     public static VoiceSession Reserve(
         ParticipantId participantId,
-        string channelConversationId,
+        ChannelConversationId channelConversationId,
         string ownerInstanceId,
         DateTimeOffset now,
         VoiceSessionDeadlines deadlines)
     {
-        if (string.IsNullOrWhiteSpace(channelConversationId))
-            throw new ArgumentException("Channel conversation ID must not be blank.", nameof(channelConversationId));
         if (string.IsNullOrWhiteSpace(ownerInstanceId))
             throw new ArgumentException("Owner instance ID must not be blank.", nameof(ownerInstanceId));
         if (deadlines.ExpiresAt <= now)
@@ -123,6 +122,8 @@ public sealed class VoiceSession
     {
         if (Status != VoiceSessionStatus.Negotiating)
             throw new InvalidOperationException($"Cannot abandon a session in state {Status}.");
+        if (now < StartedAt)
+            throw new ArgumentException("Abandon time must not be before StartedAt.", nameof(now));
 
         Status = VoiceSessionStatus.Ended;
         OccupiesSlot = false;
@@ -131,11 +132,15 @@ public sealed class VoiceSession
 
     /// <summary>
     /// Ends the session from any state. Idempotent — once <see cref="EndedAt"/> is set it is never changed.
+    /// Validates <paramref name="now"/> only when transitioning; the idempotent path is a no-op.
     /// </summary>
     public void End(DateTimeOffset now)
     {
         if (Status == VoiceSessionStatus.Ended)
             return;
+
+        if (now < StartedAt)
+            throw new ArgumentException("End time must not be before StartedAt.", nameof(now));
 
         Status = VoiceSessionStatus.Ended;
         OccupiesSlot = false;
@@ -198,7 +203,7 @@ public sealed class VoiceSession
     public static VoiceSession Reconstitute(
         VoiceSessionId id,
         ParticipantId participantId,
-        string channelConversationId,
+        ChannelConversationId channelConversationId,
         string? controlSessionId,
         string ownerInstanceId,
         VoiceSessionStatus status,
@@ -213,16 +218,20 @@ public sealed class VoiceSession
     {
         if (id.Value == Guid.Empty)
             throw new ArgumentException("Session ID must not be empty.", nameof(id));
-        if (string.IsNullOrWhiteSpace(channelConversationId))
-            throw new ArgumentException("Channel conversation ID must not be blank.", nameof(channelConversationId));
         if (string.IsNullOrWhiteSpace(ownerInstanceId))
             throw new ArgumentException("Owner instance ID must not be blank.", nameof(ownerInstanceId));
         if (status == VoiceSessionStatus.Active && string.IsNullOrWhiteSpace(controlSessionId))
             throw new ArgumentException("Active session must have a control session ID.", nameof(controlSessionId));
         if (status == VoiceSessionStatus.Ended && endedAt is null)
             throw new ArgumentException("Ended session must have an EndedAt timestamp.", nameof(endedAt));
+        if (endedAt.HasValue && endedAt.Value < startedAt)
+            throw new ArgumentException("EndedAt must not be before StartedAt.", nameof(endedAt));
         if (lastHeartbeatAt < startedAt)
             throw new ArgumentException("LastHeartbeatAt must not be before StartedAt.", nameof(lastHeartbeatAt));
+        if ((status == VoiceSessionStatus.Negotiating || status == VoiceSessionStatus.Active) && !occupiesSlot)
+            throw new ArgumentException($"{status} session must occupy a slot.", nameof(occupiesSlot));
+        if (status == VoiceSessionStatus.Ended && occupiesSlot)
+            throw new ArgumentException("Ended session must not occupy a slot.", nameof(occupiesSlot));
 
         return new VoiceSession(
             id: id,
@@ -241,3 +250,4 @@ public sealed class VoiceSession
             warningIssued: warningIssued);
     }
 }
+

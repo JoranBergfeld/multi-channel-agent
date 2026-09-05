@@ -1,4 +1,5 @@
 using MultiChannelAgent.Domain.Inventories;
+using MultiChannelAgent.Domain.Turns;
 using MultiChannelAgent.Domain.Voice;
 
 namespace MultiChannelAgent.Application.Tests.Voice;
@@ -7,7 +8,7 @@ public sealed class VoiceSessionTests
 {
     private static readonly ParticipantId SomeParticipant = new(Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"));
     private static readonly DateTimeOffset Now = new(2026, 9, 5, 12, 0, 0, TimeSpan.Zero);
-    private const string SomeConversation = "conv-abc";
+    private static readonly ChannelConversationId SomeConversation = new("conv-abc");
     private const string SomeOwner = "instance-1";
     private const string SomeControl = "ctrl-xyz";
 
@@ -89,7 +90,7 @@ public sealed class VoiceSessionTests
     public void Reserve_throws_when_conversation_id_is_blank(string blank)
     {
         Assert.Throws<ArgumentException>(() =>
-            VoiceSession.Reserve(SomeParticipant, blank, SomeOwner, Now, DefaultDeadlines(Now)));
+            VoiceSession.Reserve(SomeParticipant, new ChannelConversationId(blank), SomeOwner, Now, DefaultDeadlines(Now)));
     }
 
     [Theory]
@@ -617,7 +618,7 @@ public sealed class VoiceSessionTests
             VoiceSession.Reconstitute(
                 id: new VoiceSessionId(Guid.NewGuid()),
                 participantId: SomeParticipant,
-                channelConversationId: blank,
+                channelConversationId: new ChannelConversationId(blank),
                 controlSessionId: SomeControl,
                 ownerInstanceId: SomeOwner,
                 status: VoiceSessionStatus.Active,
@@ -711,6 +712,134 @@ public sealed class VoiceSessionTests
                 startedAt: Now,
                 lastHeartbeatAt: Now - TimeSpan.FromSeconds(1),
                 endedAt: null,
+                expiresAt: Now + TimeSpan.FromMinutes(30),
+                warningAt: Now + TimeSpan.FromMinutes(25),
+                idleExpiresAt: Now + TimeSpan.FromSeconds(60),
+                warningIssued: false));
+    }
+
+    // ── Reconstitute: OccupiesSlot/Status consistency (Finding 1) ─────────────
+
+    [Fact]
+    public void Reconstitute_throws_when_negotiating_with_occupies_slot_false()
+    {
+        Assert.Throws<ArgumentException>(() =>
+            VoiceSession.Reconstitute(
+                id: new VoiceSessionId(Guid.NewGuid()),
+                participantId: SomeParticipant,
+                channelConversationId: SomeConversation,
+                controlSessionId: null,
+                ownerInstanceId: SomeOwner,
+                status: VoiceSessionStatus.Negotiating,
+                occupiesSlot: false,
+                startedAt: Now,
+                lastHeartbeatAt: Now,
+                endedAt: null,
+                expiresAt: Now + TimeSpan.FromMinutes(30),
+                warningAt: Now + TimeSpan.FromMinutes(25),
+                idleExpiresAt: Now + TimeSpan.FromSeconds(60),
+                warningIssued: false));
+    }
+
+    [Fact]
+    public void Reconstitute_throws_when_active_with_occupies_slot_false()
+    {
+        Assert.Throws<ArgumentException>(() =>
+            VoiceSession.Reconstitute(
+                id: new VoiceSessionId(Guid.NewGuid()),
+                participantId: SomeParticipant,
+                channelConversationId: SomeConversation,
+                controlSessionId: SomeControl,
+                ownerInstanceId: SomeOwner,
+                status: VoiceSessionStatus.Active,
+                occupiesSlot: false,
+                startedAt: Now,
+                lastHeartbeatAt: Now,
+                endedAt: null,
+                expiresAt: Now + TimeSpan.FromMinutes(30),
+                warningAt: Now + TimeSpan.FromMinutes(25),
+                idleExpiresAt: Now + TimeSpan.FromSeconds(60),
+                warningIssued: false));
+    }
+
+    [Fact]
+    public void Reconstitute_throws_when_ended_with_occupies_slot_true()
+    {
+        Assert.Throws<ArgumentException>(() =>
+            VoiceSession.Reconstitute(
+                id: new VoiceSessionId(Guid.NewGuid()),
+                participantId: SomeParticipant,
+                channelConversationId: SomeConversation,
+                controlSessionId: null,
+                ownerInstanceId: SomeOwner,
+                status: VoiceSessionStatus.Ended,
+                occupiesSlot: true,
+                startedAt: Now,
+                lastHeartbeatAt: Now,
+                endedAt: Now + TimeSpan.FromMinutes(5),
+                expiresAt: Now + TimeSpan.FromMinutes(30),
+                warningAt: Now + TimeSpan.FromMinutes(25),
+                idleExpiresAt: Now + TimeSpan.FromSeconds(60),
+                warningIssued: false));
+    }
+
+    // ── Time-ordering guards (Finding 2) ──────────────────────────────────────
+
+    [Fact]
+    public void Abandon_throws_when_now_is_before_started_at()
+    {
+        var session = ReservedSession();
+        var before = Now - TimeSpan.FromSeconds(1);
+
+        Assert.Throws<ArgumentException>(() => session.Abandon(before));
+    }
+
+    [Fact]
+    public void End_throws_when_now_is_before_started_at()
+    {
+        var session = ActiveSession();
+        var before = Now - TimeSpan.FromSeconds(1);
+
+        Assert.Throws<ArgumentException>(() => session.End(before));
+    }
+
+    [Fact]
+    public void End_idempotent_does_not_throw_when_passed_earlier_timestamp()
+    {
+        var session = ActiveSession();
+        session.End(Now);
+        var earlier = Now - TimeSpan.FromSeconds(10);
+
+        var ex = Record.Exception(() => session.End(earlier));
+
+        Assert.Null(ex);
+    }
+
+    [Fact]
+    public void End_retains_original_ended_at_when_called_again_with_earlier_timestamp()
+    {
+        var session = ActiveSession();
+        session.End(Now);
+        session.End(Now - TimeSpan.FromSeconds(10));
+
+        Assert.Equal(Now, session.EndedAt);
+    }
+
+    [Fact]
+    public void Reconstitute_throws_when_ended_at_is_before_started_at()
+    {
+        Assert.Throws<ArgumentException>(() =>
+            VoiceSession.Reconstitute(
+                id: new VoiceSessionId(Guid.NewGuid()),
+                participantId: SomeParticipant,
+                channelConversationId: SomeConversation,
+                controlSessionId: null,
+                ownerInstanceId: SomeOwner,
+                status: VoiceSessionStatus.Ended,
+                occupiesSlot: false,
+                startedAt: Now,
+                lastHeartbeatAt: Now,
+                endedAt: Now - TimeSpan.FromSeconds(1),
                 expiresAt: Now + TimeSpan.FromMinutes(30),
                 warningAt: Now + TimeSpan.FromMinutes(25),
                 idleExpiresAt: Now + TimeSpan.FromSeconds(60),
