@@ -353,6 +353,79 @@ describe('BrowserVoiceTransport', () => {
 
   // ── cancelPlayback ────────────────────────────────────────────────────────
 
+  // ── cancelPlayback wire ordering ──────────────────────────────────────
+
+  it('cancelPlayback sends response.cancel BEFORE conversation.item.truncate in exact order', async () => {
+    const BrowserVoiceTransport = await loadModule()
+    const transport = new BrowserVoiceTransport()
+    await transport.prepare()
+    const callbacks = makeCallbacks()
+    transport.connect('v=0\r\n', callbacks, 'vs-1')
+
+    const dc = mockPeerConnection._dataChannel as ReturnType<typeof makeFakeDataChannel>
+    dc.readyState = 'open'
+    // Track an output item
+    dc.onmessage?.({
+      data: JSON.stringify({ type: 'response.audio.delta', item_id: 'out_item_42', content_index: 0 }),
+    })
+
+    const sendCallsBefore = dc.send.mock.calls.length
+    transport.cancelPlayback(1234)
+
+    const newCalls = dc.send.mock.calls.slice(sendCallsBefore).map((c) => JSON.parse(String(c[0])))
+    expect(newCalls).toHaveLength(2)
+    // First message must be response.cancel
+    expect(newCalls[0]).toEqual({ type: 'response.cancel' })
+    // Second must be truncate with exact fields
+    expect(newCalls[1]).toEqual({
+      type: 'conversation.item.truncate',
+      item_id: 'out_item_42',
+      content_index: 0,
+      audio_end_ms: 1234,
+    })
+  })
+
+  it('cancelPlayback with no tracked output item sends response.cancel only — no invalid truncate', async () => {
+    const BrowserVoiceTransport = await loadModule()
+    const transport = new BrowserVoiceTransport()
+    await transport.prepare()
+    transport.connect('v=0\r\n', makeCallbacks(), 'vs-1')
+
+    const dc = mockPeerConnection._dataChannel as ReturnType<typeof makeFakeDataChannel>
+    dc.readyState = 'open'
+
+    // No response.audio.delta received — _lastOutputItemId is null
+    const sendCallsBefore = dc.send.mock.calls.length
+    transport.cancelPlayback(500)
+
+    const newCalls = dc.send.mock.calls.slice(sendCallsBefore).map((c) => JSON.parse(String(c[0])))
+    expect(newCalls).toHaveLength(1)
+    expect(newCalls[0]).toEqual({ type: 'response.cancel' })
+  })
+
+  it('cancelPlayback truncate carries exact measured audio_end_ms from caller', async () => {
+    const BrowserVoiceTransport = await loadModule()
+    const transport = new BrowserVoiceTransport()
+    await transport.prepare()
+    transport.connect('v=0\r\n', makeCallbacks(), 'vs-1')
+
+    const dc = mockPeerConnection._dataChannel as ReturnType<typeof makeFakeDataChannel>
+    dc.readyState = 'open'
+    dc.onmessage?.({
+      data: JSON.stringify({ type: 'response.audio.delta', item_id: 'out_item_99', content_index: 0 }),
+    })
+
+    transport.cancelPlayback(3750)
+
+    const calls = dc.send.mock.calls.map((c) => JSON.parse(String(c[0])))
+    const truncateMsg = calls.find((c: { type: string }) => c.type === 'conversation.item.truncate')
+    expect(truncateMsg).toMatchObject({
+      item_id: 'out_item_99',
+      content_index: 0,
+      audio_end_ms: 3750,
+    })
+  })
+
   it('cancelPlayback sends response.cancel then conversation.item.truncate on data channel', async () => {
     const BrowserVoiceTransport = await loadModule()
     const transport = new BrowserVoiceTransport()
@@ -369,7 +442,7 @@ describe('BrowserVoiceTransport', () => {
 
     transport.cancelPlayback(1500)
 
-    const calls = dc.send.mock.calls.map((c: [string]) => JSON.parse(c[0]))
+    const calls = dc.send.mock.calls.map((c) => JSON.parse(String(c[0])))
     const cancelMsg = calls.find((c: { type: string }) => c.type === 'response.cancel')
     const truncateMsg = calls.find((c: { type: string }) => c.type === 'conversation.item.truncate')
 
@@ -416,7 +489,7 @@ describe('BrowserVoiceTransport', () => {
     dc.readyState = 'open'
     transport.speakCanonical('5 boxes of Steel Bolts added.')
 
-    const calls = dc.send.mock.calls.map((c: [string]) => JSON.parse(c[0]))
+    const calls = dc.send.mock.calls.map((c) => JSON.parse(String(c[0])))
     const createMsg = calls.find((c: { type: string }) => c.type === 'response.create')
     expect(createMsg).toBeDefined()
     expect(createMsg.response.pre_generated_assistant_message).toBe('5 boxes of Steel Bolts added.')

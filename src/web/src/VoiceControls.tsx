@@ -49,6 +49,8 @@ export default function VoiceControls({
   const prevExternalIdRef = useRef(voiceSessionId)
   const abortRef = useRef<AbortController | null>(null)
   const startingRef = useRef(false)
+  /** Monotonic timestamp (ms) when the current playback started, or null if not playing. */
+  const playbackStartTimeRef = useRef<number | null>(null)
 
   // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -58,6 +60,24 @@ export default function VoiceControls({
       heartbeatTimerRef.current = null
     }
     heartbeatInFlightRef.current = false
+  }
+
+  /** Clear the playback start timestamp so stale timing never affects later barge-in. */
+  function clearPlaybackTimer() {
+    playbackStartTimeRef.current = null
+  }
+
+  /**
+   * Compute elapsed playback ms from the stored start time.
+   * Returns 0 for non-finite, negative, or missing start values.
+   */
+  function measuredPlaybackMs(): number {
+    const start = playbackStartTimeRef.current
+    if (start === null || !Number.isFinite(start)) return 0
+    const now = performance.now()
+    if (!Number.isFinite(now)) return 0
+    const elapsed = now - start
+    return elapsed > 0 ? Math.round(elapsed) : 0
   }
 
   /** Abort any in-flight admission and clear the synchronous start gate. */
@@ -78,6 +98,7 @@ export default function VoiceControls({
     mountedRef.current = false
     generationRef.current++
     clearHeartbeat()
+    clearPlaybackTimer()
     abortAdmission()
     t.disconnect()
   }
@@ -96,6 +117,7 @@ export default function VoiceControls({
     if (generation !== generationRef.current || !mountedRef.current) return
     generationRef.current++
     clearHeartbeat()
+    clearPlaybackTimer()
     dispatch({ type: 'error_occurred', error: errorMessage })
     transport.disconnect()
 
@@ -140,6 +162,7 @@ export default function VoiceControls({
             case 'idle':
             case 'not_found':
               clearHeartbeat()
+              clearPlaybackTimer()
               dispatch({
                 type: 'session_expired',
                 reason: result.lifecycleState === 'not_found'
@@ -238,10 +261,12 @@ export default function VoiceControls({
             onSpeechStarted: () => {
               if (generation !== generationRef.current || !mountedRef.current) return
               const wasPlaying = stateRef.current.phase === 'speaking'
-              dispatch({ type: 'speech_started' })
               if (wasPlaying) {
-                transport.cancelPlayback(0)
+                const elapsed = measuredPlaybackMs()
+                clearPlaybackTimer()
+                transport.cancelPlayback(elapsed)
               }
+              dispatch({ type: 'speech_started' })
             },
             onSpeechStopped: () => {
               // No reducer action; speechActive cleared by final_transcript / speech_interrupted
@@ -257,18 +282,22 @@ export default function VoiceControls({
             },
             onPlaybackStarted: () => {
               if (generation !== generationRef.current || !mountedRef.current) return
+              playbackStartTimeRef.current = performance.now()
               dispatch({ type: 'playback_started' })
             },
             onPlaybackDone: () => {
               if (generation !== generationRef.current || !mountedRef.current) return
+              clearPlaybackTimer()
               dispatch({ type: 'playback_finished' })
             },
             onPlaybackFailed: (error: string) => {
               if (generation !== generationRef.current || !mountedRef.current) return
+              clearPlaybackTimer()
               dispatch({ type: 'playback_failed', error })
             },
             onPlaybackIntegrityError: (requested: string, received: string) => {
               if (generation !== generationRef.current || !mountedRef.current) return
+              clearPlaybackTimer()
               dispatch({
                 type: 'playback_failed',
                 error: `Integrity error: expected "${requested}", got "${received}"`,
@@ -305,6 +334,7 @@ export default function VoiceControls({
 
     dispatch({ type: 'end_requested' })
     abortAdmission()
+    clearPlaybackTimer()
     transport.disconnect()
     clearHeartbeat()
 
@@ -352,6 +382,7 @@ export default function VoiceControls({
     if (prev !== null && voiceSessionId === null && stateRef.current.phase !== 'idle') {
       generationRef.current++
       clearHeartbeat()
+      clearPlaybackTimer()
       abortAdmission()
       transport.disconnect()
       dispatch({ type: 'error_occurred', error: 'Voice session ended externally' })

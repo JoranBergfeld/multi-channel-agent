@@ -370,25 +370,187 @@ describe('VoiceControls', () => {
     })
   })
 
-  // ── Barge-in ─────────────────────────────────────────────────────────────
+  // ── Barge-in with measured playback duration ───────────────────────────
 
-  describe('barge-in', () => {
-    it('speech during speaking dispatches barge-in and calls cancelPlayback(0)', async () => {
+  describe('barge-in (measured duration)', () => {
+    it('speech during speaking sends cancelPlayback with measured elapsed ms', async () => {
       const { transport } = await renderConnected()
 
+      const perfNow = vi.spyOn(performance, 'now')
+      perfNow.mockReturnValue(1000)
       act(() => { transport.simulatePlaybackStarted() })
       expect(screen.getByLabelText('Voice status')).toHaveTextContent('Speaking')
 
+      perfNow.mockReturnValue(2500)
       act(() => { transport.simulateSpeechStarted() })
 
       expect(screen.getByLabelText('Voice status')).toHaveTextContent('Listening')
+      expect(transport.cancelPlaybackCalls).toEqual([1500])
+    })
+
+    it('repeated playback cycles measure fresh duration each time', async () => {
+      const { transport } = await renderConnected()
+      const perfNow = vi.spyOn(performance, 'now')
+
+      // Cycle 1: playback starts at 100, barge-in at 600 → 500ms
+      perfNow.mockReturnValue(100)
+      act(() => { transport.simulatePlaybackStarted() })
+      perfNow.mockReturnValue(600)
+      act(() => { transport.simulateSpeechStarted() })
+      expect(transport.cancelPlaybackCalls).toEqual([500])
+
+      // Cycle 2: new playback starts at 2000, barge-in at 2800 → 800ms
+      perfNow.mockReturnValue(2000)
+      act(() => { transport.simulatePlaybackStarted() })
+      perfNow.mockReturnValue(2800)
+      act(() => { transport.simulateSpeechStarted() })
+      expect(transport.cancelPlaybackCalls).toEqual([500, 800])
+    })
+
+    it('second speech_started during same barge-in does not call cancelPlayback again', async () => {
+      const { transport } = await renderConnected()
+      const perfNow = vi.spyOn(performance, 'now')
+
+      perfNow.mockReturnValue(100)
+      act(() => { transport.simulatePlaybackStarted() })
+      perfNow.mockReturnValue(500)
+      act(() => { transport.simulateSpeechStarted() })
+      // Already listening, second speech_started is just speechActive=true
+      perfNow.mockReturnValue(900)
+      act(() => { transport.simulateSpeechStarted() })
+
+      expect(transport.cancelPlaybackCalls).toEqual([400])
+    })
+
+    it('playback_done then speech_started does not call cancelPlayback', async () => {
+      const { transport } = await renderConnected()
+      const perfNow = vi.spyOn(performance, 'now')
+
+      perfNow.mockReturnValue(100)
+      act(() => { transport.simulatePlaybackStarted() })
+      act(() => { transport.simulatePlaybackDone() })
+
+      // Now listening — speech_started is normal, not barge-in
+      perfNow.mockReturnValue(999)
+      act(() => { transport.simulateSpeechStarted() })
+
+      expect(transport.cancelPlaybackCalls).toEqual([])
+    })
+
+    it('transport error resets playback timer so stale start never affects later barge-in', async () => {
+      const { transport } = await renderConnected()
+      const perfNow = vi.spyOn(performance, 'now')
+
+      perfNow.mockReturnValue(100)
+      act(() => { transport.simulatePlaybackStarted() })
+
+      // Error terminates session — playback timer must be cleared
+      act(() => { transport.simulateError('fatal') })
+
+      // After restart (new session), any playback+barge-in must use fresh timing
+      expect(transport.cancelPlaybackCalls).toEqual([])
+    })
+
+    it('session expiry resets playback timer', async () => {
+      vi.useFakeTimers()
+      const perfNow = vi.spyOn(performance, 'now')
+
+      mockHeartbeatVoice.mockResolvedValue(expiredHb('timeout'))
+      const { transport } = await renderConnectedFake()
+
+      perfNow.mockReturnValue(100)
+      act(() => { transport.simulatePlaybackStarted() })
+
+      // Session expires via heartbeat
+      await act(async () => { await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS) })
+
+      // Timer should be cleared — verify no stale state leaks
+      expect(screen.getByRole('button', { name: 'Start Voice' })).toBeEnabled()
+      vi.useRealTimers()
+    })
+
+    it('playback_failed resets playback timer', async () => {
+      const { transport } = await renderConnected()
+      const perfNow = vi.spyOn(performance, 'now')
+
+      perfNow.mockReturnValue(100)
+      act(() => { transport.simulatePlaybackStarted() })
+      act(() => { transport.simulatePlaybackFailed('decode error') })
+
+      // New playback attempt
+      perfNow.mockReturnValue(200)
+      act(() => { transport.simulatePlaybackStarted() })
+      perfNow.mockReturnValue(700)
+      act(() => { transport.simulateSpeechStarted() })
+
+      // Should measure from 200, not from stale 100
+      expect(transport.cancelPlaybackCalls).toEqual([500])
+    })
+
+    it('playback integrity error resets playback timer', async () => {
+      const { transport } = await renderConnected()
+      const perfNow = vi.spyOn(performance, 'now')
+
+      perfNow.mockReturnValue(100)
+      act(() => { transport.simulatePlaybackStarted() })
+      act(() => { transport.simulatePlaybackIntegrityError('correct', 'wrong') })
+
+      // New playback
+      perfNow.mockReturnValue(300)
+      act(() => { transport.simulatePlaybackStarted() })
+      perfNow.mockReturnValue(1100)
+      act(() => { transport.simulateSpeechStarted() })
+
+      expect(transport.cancelPlaybackCalls).toEqual([800])
+    })
+
+    it('non-finite performance.now falls back to 0 elapsed', async () => {
+      const { transport } = await renderConnected()
+      const perfNow = vi.spyOn(performance, 'now')
+
+      perfNow.mockReturnValue(NaN)
+      act(() => { transport.simulatePlaybackStarted() })
+      perfNow.mockReturnValue(500)
+      act(() => { transport.simulateSpeechStarted() })
+
       expect(transport.cancelPlaybackCalls).toEqual([0])
+    })
+
+    it('backward clock (elapsed negative) clamps to 0', async () => {
+      const { transport } = await renderConnected()
+      const perfNow = vi.spyOn(performance, 'now')
+
+      perfNow.mockReturnValue(1000)
+      act(() => { transport.simulatePlaybackStarted() })
+      perfNow.mockReturnValue(500)
+      act(() => { transport.simulateSpeechStarted() })
+
+      expect(transport.cancelPlaybackCalls).toEqual([0])
+    })
+
+    it('calls cancelPlayback exactly once BEFORE reducer transition', async () => {
+      const { transport } = await renderConnected()
+      const perfNow = vi.spyOn(performance, 'now')
+
+      perfNow.mockReturnValue(0)
+      act(() => { transport.simulatePlaybackStarted() })
+      perfNow.mockReturnValue(750)
+      act(() => { transport.simulateSpeechStarted() })
+
+      // Exactly one cancel call
+      expect(transport.cancelPlaybackCalls).toHaveLength(1)
+      expect(transport.cancelPlaybackCalls[0]).toBe(750)
+      // Reducer transitioned to listening
+      expect(screen.getByLabelText('Voice status')).toHaveTextContent('Listening')
     })
 
     it('does not mark the final utterance as interrupted', async () => {
       const { transport, onFinalizedUtterance } = await renderConnected()
+      const perfNow = vi.spyOn(performance, 'now')
 
+      perfNow.mockReturnValue(0)
       act(() => { transport.simulatePlaybackStarted() })
+      perfNow.mockReturnValue(500)
       act(() => { transport.simulateSpeechStarted() })
       act(() => { transport.simulateFinalTranscript('hello', 'voice:vs-test-001:item_2') })
 
@@ -396,6 +558,24 @@ describe('VoiceControls', () => {
         text: 'hello',
         nativeMessageId: 'voice:vs-test-001:item_2',
       })
+      // Exactly text + nativeMessageId, no wasInterrupted
+      const arg = onFinalizedUtterance.mock.calls[0][0]
+      expect(Object.keys(arg)).toEqual(['text', 'nativeMessageId'])
+    })
+
+    it('finalized utterance from barge-in omits wasInterrupted in submission shape', async () => {
+      const { transport, onFinalizedUtterance } = await renderConnected()
+      const perfNow = vi.spyOn(performance, 'now')
+
+      perfNow.mockReturnValue(0)
+      act(() => { transport.simulatePlaybackStarted() })
+      perfNow.mockReturnValue(200)
+      act(() => { transport.simulateSpeechStarted() })
+      act(() => { transport.simulateFinalTranscript('add five', 'voice:vs-test-001:item_3') })
+
+      const utterance = onFinalizedUtterance.mock.calls[0][0]
+      expect(utterance).not.toHaveProperty('wasInterrupted')
+      expect(utterance).not.toHaveProperty('interrupted')
     })
   })
 
