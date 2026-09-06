@@ -15,7 +15,7 @@ public sealed class DisabledVoiceLiveGateway : IVoiceLiveGateway
         throw new InvalidOperationException("Voice Live gateway is disabled.");
 
     public Task TerminateAsync(string controlSessionId, CancellationToken cancellationToken) =>
-        throw new InvalidOperationException("Voice Live gateway is disabled.");
+        Task.CompletedTask;
 
     public bool OwnsSession(string controlSessionId) => false;
 }
