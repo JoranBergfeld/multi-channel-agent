@@ -17,6 +17,8 @@ public sealed class GraphMailboxClient(
     ILogger<GraphMailboxClient> logger) : IGraphMailboxClient
 {
     private static readonly string[] GraphDefaultScope = ["https://graph.microsoft.com/.default"];
+    private const string ImmutableIdPreference = "IdType=\"ImmutableId\"";
+    private const string TextBodyPreference = "outlook.body-content-type=\"text\"";
 
     public async Task<GraphInboundMessage?> GetMessageAsync(string messageId, CancellationToken cancellationToken)
     {
@@ -29,7 +31,11 @@ public sealed class GraphMailboxClient(
         using var response = await SendAsync(
             HttpMethod.Get,
             path,
-            request => request.Headers.TryAddWithoutValidation("Prefer", "IdType=\"ImmutableId\""),
+            request =>
+            {
+                request.Headers.TryAddWithoutValidation("Prefer", ImmutableIdPreference);
+                request.Headers.TryAddWithoutValidation("Prefer", TextBodyPreference);
+            },
             cancellationToken);
 
         if (response.StatusCode == HttpStatusCode.NotFound)
@@ -124,6 +130,10 @@ public sealed class GraphMailboxClient(
             return;
         }
 
+        // Unlike the tenant-member directory seam, this mailbox seam has no caller that branches on
+        // "Graph outage" versus other application-owned failures: inbound processing logs and
+        // continues per notification entry, and outbound delivery converts any exception into a
+        // retryable false. A typed outage exception would therefore add no distinct behavior here.
         logger.LogWarning("Microsoft Graph request failed with status {StatusCode}.", (int)response.StatusCode);
         throw new InvalidOperationException($"Microsoft Graph request failed with status {(int)response.StatusCode}.");
     }

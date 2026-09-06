@@ -1,5 +1,4 @@
 using MultiChannelAgent.Application.Inventories;
-using MultiChannelAgent.Domain.Inventories;
 
 namespace MultiChannelAgent.Application.Channels.Email;
 
@@ -15,11 +14,5 @@ public sealed class EmailSenderResolutionService(ITenantMemberDirectory tenantMe
         return identifier is null
             ? null
             : await tenantMemberDirectory.ResolveAsync(identifier, cancellationToken);
-    }
-
-    public async Task<ParticipantId?> ResolveAsync(string senderAddress, CancellationToken cancellationToken)
-    {
-        var resolved = await ResolveMemberAsync(senderAddress, cancellationToken);
-        return resolved?.ParticipantId;
     }
 }
