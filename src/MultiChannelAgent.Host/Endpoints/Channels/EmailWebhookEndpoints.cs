@@ -78,8 +78,15 @@ public static class EmailWebhookEndpoints
 
         var actualBytes = Encoding.UTF8.GetBytes(actual);
         var expectedBytes = Encoding.UTF8.GetBytes(expected);
-        return actualBytes.Length == expectedBytes.Length
-            && CryptographicOperations.FixedTimeEquals(actualBytes, expectedBytes);
+        var maxLength = Math.Max(actualBytes.Length, expectedBytes.Length);
+        var paddedActual = new byte[maxLength];
+        var paddedExpected = new byte[maxLength];
+
+        actualBytes.CopyTo(paddedActual, 0);
+        expectedBytes.CopyTo(paddedExpected, 0);
+
+        var contentMatches = CryptographicOperations.FixedTimeEquals(paddedActual, paddedExpected);
+        return contentMatches && actualBytes.Length == expectedBytes.Length;
     }
 
     private sealed record EmailNotificationEnvelope(IReadOnlyList<EmailNotificationEntry>? Value);
