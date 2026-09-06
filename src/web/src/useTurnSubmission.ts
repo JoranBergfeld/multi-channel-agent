@@ -40,6 +40,8 @@ export interface UseTurnSubmissionOptions {
   participantId: string;
   onTerminalOutcome: () => void;
   createSource?: EventStreamFactory;
+  /** When false, the hook is dormant — no resume, no subscription, no streams. Default true. */
+  enabled?: boolean;
 }
 
 /**
@@ -49,7 +51,7 @@ export interface UseTurnSubmissionOptions {
  * retains its own rendering/form responsibilities.
  */
 export function useTurnSubmission(options: UseTurnSubmissionOptions): UseTurnSubmissionResult {
-  const { csrfToken, webConversationId, participantId, onTerminalOutcome, createSource } = options;
+  const { csrfToken, webConversationId, participantId, onTerminalOutcome, createSource, enabled = true } = options;
 
   const [progress, setProgress] = useState<TurnSubmissionProgress>('idle');
   const [turnId, setTurnId] = useState<string | null>(null);
@@ -170,6 +172,8 @@ export function useTurnSubmission(options: UseTurnSubmissionOptions): UseTurnSub
 
   // Resume on mount — once-per-mount decision guarded by resumeAttemptedRef.
   useEffect(() => {
+    if (!enabled) return;
+
     if (resumeAttemptedRef.current) {
       const stored = readInFlightTurn(webConversationId, participantId);
       if (stored?.turnId != null) {
@@ -183,18 +187,20 @@ export function useTurnSubmission(options: UseTurnSubmissionOptions): UseTurnSub
     void (async () => {
       await resumeStoredTurn();
     })();
-  }, [participantId, resumeStoredTurn, watchTurn, webConversationId]);
+  }, [enabled, participantId, resumeStoredTurn, watchTurn, webConversationId]);
 
   // Cross-tab storage subscription.
   useEffect(
-    () =>
-      subscribeToConversationChanges(webConversationId, participantId, () => {
+    () => {
+      if (!enabled) return;
+      return subscribeToConversationChanges(webConversationId, participantId, () => {
         const stored = readInFlightTurn(webConversationId, participantId);
         if (stored?.turnId != null) {
           watchTurn(stored.turnId);
         }
-      }),
-    [participantId, watchTurn, webConversationId],
+      });
+    },
+    [enabled, participantId, watchTurn, webConversationId],
   );
 
   // Stream cleanup on unmount.

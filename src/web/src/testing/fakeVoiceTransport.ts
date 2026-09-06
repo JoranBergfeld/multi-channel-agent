@@ -40,7 +40,7 @@ export class FakeVoiceTransport implements VoiceTransport {
     return 'v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=fake\r\nt=0 0\r\n'
   }
 
-  connect(sdpAnswer: string, callbacks: VoiceTransportCallbacks): void {
+  connect(sdpAnswer: string, callbacks: VoiceTransportCallbacks, _voiceSessionId: string): void {
     this._callbacks = callbacks
     this._disconnected = false
     this.connectCount++

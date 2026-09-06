@@ -55,8 +55,11 @@ export interface VoiceTransport {
    * Calling connect() again without an intervening disconnect() starts a fresh session;
    * previous callbacks are discarded and become unreachable — only the new callbacks
    * receive events. disconnectCount is not incremented by an implicit replacement.
+   *
+   * voiceSessionId is the server-attested session identity used to derive nativeMessageId
+   * for final transcription events as `voice:${voiceSessionId}:${itemId}`.
    */
-  connect(sdpAnswer: string, callbacks: VoiceTransportCallbacks): void
+  connect(sdpAnswer: string, callbacks: VoiceTransportCallbacks, voiceSessionId: string): void
 
   /**
    * Tears down the session. Subsequent callbacks are suppressed and callback references

@@ -28,7 +28,7 @@ function makeCallbacks(overrides: Partial<VoiceTransportCallbacks> = {}): VoiceT
 function connected(): [FakeVoiceTransport, VoiceTransportCallbacks] {
   const transport = new FakeVoiceTransport()
   const callbacks = makeCallbacks()
-  transport.connect('v=0\r\n', callbacks)
+  transport.connect('v=0\r\n', callbacks, 'vs-test')
   return [transport, callbacks]
 }
 
@@ -44,7 +44,7 @@ describe('FakeVoiceTransport', () => {
   it('connect dispatches connected callback', () => {
     const transport = new FakeVoiceTransport()
     const onConnected = vi.fn()
-    transport.connect('v=0\r\n', makeCallbacks({ onConnected }))
+    transport.connect('v=0\r\n', makeCallbacks({ onConnected }), 'vs-test')
     transport.simulateConnected()
     expect(onConnected).toHaveBeenCalledOnce()
   })
@@ -52,7 +52,7 @@ describe('FakeVoiceTransport', () => {
   it('simulateFinalTranscript dispatches with text and nativeMessageId only', () => {
     const transport = new FakeVoiceTransport()
     const onFinalTranscript = vi.fn()
-    transport.connect('v=0\r\n', makeCallbacks({ onFinalTranscript }))
+    transport.connect('v=0\r\n', makeCallbacks({ onFinalTranscript }), 'vs-test')
     transport.simulateFinalTranscript('add five', 'voice:vs-1:item_1')
     expect(onFinalTranscript).toHaveBeenCalledWith('add five', 'voice:vs-1:item_1')
   })
@@ -159,7 +159,7 @@ describe('FakeVoiceTransport', () => {
     transport.disconnect()
 
     const secondCallbacks = makeCallbacks()
-    transport.connect('v=0\r\nanswer2\r\n', secondCallbacks)
+    transport.connect('v=0\r\nanswer2\r\n', secondCallbacks, 'vs-test')
     transport.simulateConnected()
     transport.simulateSpeechStarted()
 
@@ -175,16 +175,16 @@ describe('FakeVoiceTransport', () => {
   it('connect increments connectCount', () => {
     const transport = new FakeVoiceTransport()
     expect(transport.connectCount).toBe(0)
-    transport.connect('v=0\r\n', makeCallbacks())
+    transport.connect('v=0\r\n', makeCallbacks(), 'vs-test')
     expect(transport.connectCount).toBe(1)
     transport.disconnect()
-    transport.connect('v=0\r\n', makeCallbacks())
+    transport.connect('v=0\r\n', makeCallbacks(), 'vs-test')
     expect(transport.connectCount).toBe(2)
   })
 
   it('connect stores the sdpAnswer', () => {
     const transport = new FakeVoiceTransport()
-    transport.connect('v=0\r\nsdp=answer\r\n', makeCallbacks())
+    transport.connect('v=0\r\nsdp=answer\r\n', makeCallbacks(), 'vs-test')
     expect(transport.lastConnectSdpAnswer).toBe('v=0\r\nsdp=answer\r\n')
   })
 
@@ -327,11 +327,11 @@ describe('FakeVoiceTransport', () => {
   it('connect-over-connect discards old callbacks; only new callbacks receive events', () => {
     const transport = new FakeVoiceTransport()
     const firstCallbacks = makeCallbacks()
-    transport.connect('v=0\r\nfirst\r\n', firstCallbacks)
+    transport.connect('v=0\r\nfirst\r\n', firstCallbacks, 'vs-test')
     transport.simulateConnected() // goes to firstCallbacks
 
     const secondCallbacks = makeCallbacks()
-    transport.connect('v=0\r\nsecond\r\n', secondCallbacks)
+    transport.connect('v=0\r\nsecond\r\n', secondCallbacks, 'vs-test')
     transport.simulateConnected()
     transport.simulateSpeechStarted()
 
@@ -346,15 +346,15 @@ describe('FakeVoiceTransport', () => {
 
   it('connect-over-connect increments connectCount', () => {
     const transport = new FakeVoiceTransport()
-    transport.connect('v=0\r\nfirst\r\n', makeCallbacks())
-    transport.connect('v=0\r\nsecond\r\n', makeCallbacks())
+    transport.connect('v=0\r\nfirst\r\n', makeCallbacks(), 'vs-test')
+    transport.connect('v=0\r\nsecond\r\n', makeCallbacks(), 'vs-test')
     expect(transport.connectCount).toBe(2)
   })
 
   it('connect-over-connect does not increment disconnectCount', () => {
     const transport = new FakeVoiceTransport()
-    transport.connect('v=0\r\nfirst\r\n', makeCallbacks())
-    transport.connect('v=0\r\nsecond\r\n', makeCallbacks())
+    transport.connect('v=0\r\nfirst\r\n', makeCallbacks(), 'vs-test')
+    transport.connect('v=0\r\nsecond\r\n', makeCallbacks(), 'vs-test')
     expect(transport.disconnectCount).toBe(0)
   })
 

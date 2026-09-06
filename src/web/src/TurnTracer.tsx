@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { EventStreamFactory } from './turnStream';
 import {
   type StockChangeView,
@@ -12,7 +12,7 @@ import {
   type ReferenceProposalPayload,
   type ReferenceSuggestionsPayload,
 } from './turnsApi';
-import { useTurnSubmission, type TurnSubmissionProgress } from './useTurnSubmission';
+import { useTurnSubmission, type TurnSubmissionInput, type TurnSubmissionProgress } from './useTurnSubmission';
 
 function StockRows({ rows }: { rows: StockRowView[] }) {
   return (
@@ -279,6 +279,9 @@ interface TurnTracerProps {
   onTerminalOutcome: () => void;
   /** Swapped in tests for a controllable double, since jsdom implements no EventSource. */
   createSource?: EventStreamFactory;
+  /** When provided, TurnTracer writes its submit function to this ref so voice (or other callers
+   * at the App level) can submit through the same controller. Cleared on unmount. */
+  submitRef?: React.MutableRefObject<((input: TurnSubmissionInput) => boolean) | null>;
 }
 
 const PROGRESS_TEXT: Record<Exclude<TurnSubmissionProgress, 'idle'>, string> = {
@@ -301,7 +304,7 @@ const PROGRESS_TEXT: Record<Exclude<TurnSubmissionProgress, 'idle'>, string> = {
  * Participant and ChannelConversation identity are always derived server-side; this component never
  * supplies either, and it holds no token of any kind.
  */
-function TurnTracer({ csrfToken, webConversationId, participantId, onTerminalOutcome, createSource }: TurnTracerProps) {
+function TurnTracer({ csrfToken, webConversationId, participantId, onTerminalOutcome, createSource, submitRef }: TurnTracerProps) {
   const [contentText, setContentText] = useState('list stock');
   const { submit, progress, turnId, parts, outcome, error } = useTurnSubmission({
     csrfToken,
@@ -310,6 +313,12 @@ function TurnTracer({ csrfToken, webConversationId, participantId, onTerminalOut
     onTerminalOutcome,
     createSource,
   });
+
+  // Expose the submit handle so App-level voice can call the same controller.
+  useEffect(() => {
+    if (submitRef) submitRef.current = submit;
+    return () => { if (submitRef) submitRef.current = null; };
+  }, [submit, submitRef]);
 
   function handleSubmit(event: React.FormEvent) {
     event.preventDefault();

@@ -265,7 +265,7 @@ export default function VoiceControls({
             transport.disconnect()
             onSessionChangedRef.current(null)
           },
-        })
+        }, result.voiceSessionId!)
       } finally {
         startingRef.current = false
         if (abortRef.current === controller) {

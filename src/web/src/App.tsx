@@ -11,11 +11,17 @@ import {
 import { clearInFlightTurn } from './conversationStorage';
 import { startNewConversation } from './conversationApi';
 import { openInventoryStream, type InventoryVersions } from './inventoryStream';
+import { releaseVoice } from './voiceApi';
+import { type TurnSubmissionInput } from './useTurnSubmission';
+import { BrowserVoiceTransport } from './browserVoiceTransport';
+import type { VoiceTransport } from './voiceTransport';
+import type { FinalizedUtterance } from './voiceReducer';
 import InitialImport from './InitialImport';
 import InventoryGovernance from './InventoryGovernance';
 import ReferenceWorkspace from './ReferenceWorkspace';
 import StockWorkspace from './StockWorkspace';
 import TurnTracer from './TurnTracer';
+import VoiceControls from './VoiceControls';
 import WorkspacePanel from './WorkspacePanel';
 
 type SessionState =
@@ -29,6 +35,11 @@ const MEMBERSHIP_RECONCILIATION_RETRY_MS = 100;
 
 function inventoryIdSetKey(ids: Iterable<string>): string {
   return JSON.stringify([...ids].sort());
+}
+
+interface AppProps {
+  /** Injected in tests; production creates a BrowserVoiceTransport. */
+  testTransport?: VoiceTransport;
 }
 
 /**
@@ -46,7 +57,7 @@ function inventoryIdSetKey(ids: Iterable<string>): string {
  * before the server has published anything, is counted separately, so a local signal can never make
  * the server's next version look like one already seen.
  */
-function App() {
+function App({ testTransport }: AppProps = {}) {
   const [state, setState] = useState<SessionState>({ phase: 'loading' });
   const [error, setError] = useState<string | null>(null);
 
@@ -74,12 +85,60 @@ function App() {
   const [localRefetchNonce, setLocalRefetchNonce] = useState(0);
   const sessionRequestSequence = useRef(0);
 
+  // ── Voice state ──────────────────────────────────────────────────────────────
+
+  // Stable transport reference — never recreated across renders.
+  const transportRef = useRef<VoiceTransport>(testTransport ?? new BrowserVoiceTransport());
+
+  // Tracked outside React state so unmount cleanup and async callbacks can read the current value
+  // without triggering re-renders or stale closures.
+  const voiceSessionIdRef = useRef<string | null>(null);
+
+  // Generation token for fencing late voice callbacks. Incremented on every admission end and
+  // new-conversation teardown. Callbacks captured at a prior generation are ignored.
+  const voiceGenerationRef = useRef(0);
+
+  // Ref to always-current CSRF token for unmount cleanup (effect with [] deps can't see state).
+  const csrfTokenRef = useRef('');
+
   /**
    * A change this tab knows about before the server announces it. Stable across renders, because it
    * is passed to children whose effects depend on it - an identity that changed every render would
    * make them re-run for no reason, and would make a mid-flight resume look like a fresh mount.
    */
   const invalidateActiveInventory = useCallback(() => setLocalRefetchNonce((nonce) => nonce + 1), []);
+
+  // ── Shared turn submission handle ────────────────────────────────────────────
+
+  // TurnTracer writes its submit function here so voice finalized utterances can use the same
+  // controller. Cleared on TurnTracer unmount (key change / conversation reset).
+  const submitTurnRef = useRef<((input: TurnSubmissionInput) => boolean) | null>(null);
+
+  // The session values for voice callbacks and unmount cleanup.
+  const csrfToken = state.phase === 'ready' ? state.session.csrfToken : '';
+
+  // Keep CSRF ref current for unmount cleanup (effects with [] deps can't see render-time values).
+  csrfTokenRef.current = csrfToken;
+
+  // ── Voice callbacks ──────────────────────────────────────────────────────────
+
+  const handleVoiceSessionChanged = useCallback((id: string | null) => {
+    voiceSessionIdRef.current = id;
+  }, []);
+
+  const handleFinalizedUtterance = useCallback(
+    (utterance: FinalizedUtterance) => {
+      const sessionId = voiceSessionIdRef.current;
+      if (!sessionId) return;
+
+      submitTurnRef.current?.({
+        nativeMessageId: utterance.nativeMessageId,
+        contentText: utterance.text,
+        voiceSessionId: sessionId,
+      });
+    },
+    [],
+  );
 
   const loadSession = useCallback(
     async (reportError: (message: string) => void = setError): Promise<BootstrapResult | null> => {
@@ -116,6 +175,35 @@ function App() {
       await loadSession();
     })();
   }, [loadSession]);
+
+  // ── Unmount voice cleanup ──────────────────────────────────────────────────
+  // Uses refs so the cleanup reads the values at teardown time, not at effect creation time.
+  useEffect(() => {
+    const transport = transportRef.current;
+    return () => {
+      voiceGenerationRef.current += 1;
+      transport.disconnect();
+
+      const sessionId = voiceSessionIdRef.current;
+      const token = csrfTokenRef.current;
+      if (sessionId && token) {
+        // Best-effort: keepalive + custom CSRF header is not dependable during page unload.
+        // SQL idle/expiry is the authoritative cleanup mechanism.
+        fetch('/api/voice/release', {
+          method: 'POST',
+          keepalive: true,
+          credentials: 'include',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-CSRF-TOKEN': token,
+          },
+          body: JSON.stringify({ voiceSessionId: sessionId }),
+        }).catch(() => {});
+      }
+      voiceSessionIdRef.current = null;
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const isReady = state.phase === 'ready';
   const authorizedInventorySetKey =
@@ -258,13 +346,21 @@ function App() {
     setError(null);
     setNotice(null);
 
+    // 1. Capture the current voice session ID before clearing any state.
+    const capturedVoiceSessionId = voiceSessionIdRef.current;
+
+    // 2. Fence voice callbacks — increment generation so late callbacks are ignored.
+    voiceGenerationRef.current += 1;
+    voiceSessionIdRef.current = null;
+
+    // 3. Disconnect transport locally — stops mic/playback/data channel.
+    transportRef.current.disconnect();
+
     try {
+      // 4. Execute existing server rotation (unchanged — #35 safety ordering).
       const rotation = await startNewConversation(state.session.csrfToken);
 
-      // Forgotten BEFORE the conversation remounts, and only after the rotation succeeded. The stored
-      // record belongs to the conversation that just ended: leaving it would make the remounted
-      // TurnTracer immediately reconnect that Turn's stream - or, in the lost-response case, re-POST
-      // it - dragging work from the old conversation into the new one on the very first render.
+      // 5. Clear recovery storage (unchanged — only after successful rotation).
       const cleared = clearInFlightTurn(
         state.session.bootstrap.webConversationId,
         state.session.bootstrap.participantId,
@@ -273,12 +369,28 @@ function App() {
         setError(
           'The new conversation started, but browser recovery state could not be cleared safely. The current view was kept open to avoid recovering work from the prior conversation. Try again once browser storage is available.',
         );
+
+        // Still release voice session best-effort even on storage clear failure
+        if (capturedVoiceSessionId) {
+          try {
+            await releaseVoice(capturedVoiceSessionId, state.session.csrfToken);
+          } catch {
+            /* best-effort — SQL idle/expiry is authoritative */
+          }
+        }
         return;
       }
 
-      // Remounts the conversation, which is what drops this tab's transcript. The Inventory the
-      // Participant was working in, and every authorization they hold, are deliberately untouched -
-      // starting a new conversation is not signing out.
+      // 6. Release voice session (best-effort — SQL idle/expiry is authoritative).
+      if (capturedVoiceSessionId) {
+        try {
+          await releaseVoice(capturedVoiceSessionId, state.session.csrfToken);
+        } catch {
+          /* best-effort — SQL idle/expiry is authoritative */
+        }
+      }
+
+      // 7. Remount conversation + reset voice.
       setConversationEpoch((epoch) => epoch + 1);
       setNotice(
         rotation.clearedPendingConfirmation
@@ -286,6 +398,15 @@ function App() {
           : 'Started a new conversation.',
       );
     } catch (err) {
+      // Even on rotation failure, voice transport is already disconnected locally.
+      // Best-effort release the server session.
+      if (capturedVoiceSessionId) {
+        try {
+          await releaseVoice(capturedVoiceSessionId, state.session.csrfToken);
+        } catch {
+          /* best-effort — SQL idle/expiry is authoritative */
+        }
+      }
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setResetting(false);
@@ -354,6 +475,15 @@ function App() {
         webConversationId={bootstrap.webConversationId}
         participantId={bootstrap.participantId}
         onTerminalOutcome={invalidateActiveInventory}
+        submitRef={submitTurnRef}
+      />
+      <VoiceControls
+        key={`voice-${conversationEpoch}`}
+        transport={transportRef.current}
+        csrfToken={session.csrfToken}
+        voiceSessionId={voiceSessionIdRef.current}
+        onFinalizedUtterance={handleFinalizedUtterance}
+        onVoiceSessionChanged={handleVoiceSessionChanged}
       />
     </>
   );
