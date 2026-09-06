@@ -172,7 +172,7 @@ export function reduce(state: VoiceState, action: VoiceAction): VoiceState {
 
     case 'session_warning':
       if (state.warningDelivered) return state
-      return { ...state, warning: action.message }
+      return { ...state, warning: action.message, warningDelivered: true }
 
     case 'session_expired':
       return {
@@ -205,5 +205,10 @@ export function reduce(state: VoiceState, action: VoiceAction): VoiceState {
 
     case 'utterance_submitted':
       return { ...state, finalizedUtterance: null, bargeIn: false }
+
+    default: {
+      const exhaustive: never = action
+      throw new Error(`Unhandled voice action: ${(exhaustive as VoiceAction).type}`)
+    }
   }
 }

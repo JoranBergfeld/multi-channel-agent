@@ -313,16 +313,17 @@ describe('playback_failed', () => {
 // ── 11. session_warning ───────────────────────────────────────────────────────
 
 describe('session_warning', () => {
-  it('sets warning and marks it undelivered on first warning', () => {
+  it('sets warning and marks warningDelivered true on first warning', () => {
     const s = reduce(activeState(), { type: 'session_warning', message: 'nearing limit' })
     expect(s.warning).toBe('nearing limit')
-    expect(s.warningDelivered).toBe(false)
+    expect(s.warningDelivered).toBe(true)
   })
 
-  it('ignores subsequent warnings once warningDelivered is true', () => {
-    const pre: VoiceState = { ...activeState(), warning: 'first', warningDelivered: true }
-    const s = reduce(pre, { type: 'session_warning', message: 'second' })
-    expect(s.warning).toBe('first')
+  it('ignores subsequent warnings, preserving the first message', () => {
+    const afterFirst = reduce(activeState(), { type: 'session_warning', message: 'first warning' })
+    const afterSecond = reduce(afterFirst, { type: 'session_warning', message: 'second warning' })
+    expect(afterSecond.warning).toBe('first warning')
+    expect(afterSecond.warningDelivered).toBe(true)
   })
 })
 
