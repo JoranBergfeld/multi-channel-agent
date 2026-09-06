@@ -79,4 +79,13 @@ public sealed class VoiceModalityConfirmationTests
         var turn = CreateTurn("add five boxes of gloves", InputModality.Text);
         Assert.Equal(DirectConfirmationEvidence.None, DirectConfirmationEvidenceReader.Read(turn));
     }
+
+    // Pins the interaction: Voice already yields None and WasInterrupted also yields None, so the
+    // combined case cannot accidentally change order or accidentally become non-None.
+    [Fact]
+    public void Voice_modality_and_interrupted_returns_None()
+    {
+        var turn = CreateTurn("confirm ABC_token_placeholder_43chars_here1234567", InputModality.Voice, wasInterrupted: true);
+        Assert.Equal(DirectConfirmationEvidence.None, DirectConfirmationEvidenceReader.Read(turn));
+    }
 }

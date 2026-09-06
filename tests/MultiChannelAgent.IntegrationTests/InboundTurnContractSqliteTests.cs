@@ -231,4 +231,39 @@ public sealed class InboundTurnContractSqliteTests : IDisposable
             .Options;
         return new MultiChannelAgentDbContext(options);
     }
+
+    // A row with an unrecognised InputModality string must not silently materialise as Text: a
+    // corrupted or future-schema row is a broken invariant, not an acceptable Text fallback.
+    [Fact]
+    public async Task A_corrupted_InputModality_string_in_the_database_fails_on_reconstitution()
+    {
+        var accepted = InboundTurn.Create(InboundTurnDraft.DirectText(
+            "native-modality-corrupt",
+            SomeParticipant,
+            "conversation-modality-corrupt",
+            "web",
+            ChannelPrincipal.EntraUser("11111111-1111-1111-1111-111111111111", null),
+            ChannelCapabilities.Text,
+            "hello",
+            null,
+            DateTimeOffset.UtcNow,
+            null));
+
+        using (var writeDb = CreateContext())
+        {
+            await new SqlInboxStore(writeDb).AcceptAsync(accepted, Binding(accepted), CancellationToken.None);
+        }
+
+        // Bypass domain validation by injecting an unknown value directly into the database row.
+        using (var corruptDb = CreateContext())
+        {
+            var turnId = accepted.TurnId.Value;
+            await corruptDb.Database.ExecuteSqlAsync(
+                $"UPDATE InboxEntries SET InputModality = '42' WHERE TurnId = {turnId}");
+        }
+
+        using var readDb = CreateContext();
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            new SqlInboxStore(readDb).FindByTurnIdAsync(accepted.TurnId, CancellationToken.None));
+    }
 }

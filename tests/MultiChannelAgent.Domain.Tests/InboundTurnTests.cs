@@ -243,6 +243,16 @@ public class InboundTurnTests
     [Fact]
     public void Content_past_its_maximum_length_is_rejected() =>
         Assert.Throws<ArgumentException>(() => InboundTurn.Create(Draft(contentText: new string('a', TurnContentPart.MaxTextLength + 1))));
+
+    // An enum with no defined member for the numeric value it carries is a contract violation: the
+    // Host must never produce or accept one, and a caller constructing a draft with an arbitrary cast
+    // cannot sneak it past the factory.
+    [Fact]
+    public void Create_rejects_an_undefined_input_modality() =>
+        Assert.Throws<ArgumentOutOfRangeException>(() => InboundTurn.Create(Draft() with
+        {
+            InputModality = (InputModality)42,
+        }));
     [Fact]
     public void A_Turn_is_not_interrupted_unless_its_channel_says_so()
     {
