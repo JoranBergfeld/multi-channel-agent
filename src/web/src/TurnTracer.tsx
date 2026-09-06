@@ -276,7 +276,7 @@ interface TurnTracerProps {
   /** The signed-in Participant's stable identity, from the session bootstrap. */
   participantId: string;
   /** Called once a terminal Outcome arrives, so the workspace can refetch its authoritative projection. */
-  onTerminalOutcome: () => void;
+  onTerminalOutcome: (outcome: import('./turnsApi').TurnOutcomeView) => void;
   /** Swapped in tests for a controllable double, since jsdom implements no EventSource. */
   createSource?: EventStreamFactory;
   /** When provided, TurnTracer writes its submit function to this ref so voice (or other callers

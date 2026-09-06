@@ -13,6 +13,7 @@ import { startNewConversation } from './conversationApi';
 import { openInventoryStream, type InventoryVersions } from './inventoryStream';
 import { releaseVoice } from './voiceApi';
 import { type TurnSubmissionInput } from './useTurnSubmission';
+import type { TurnOutcomeView } from './turnsApi';
 import { BrowserVoiceTransport } from './browserVoiceTransport';
 import type { VoiceTransport } from './voiceTransport';
 import type { FinalizedUtterance } from './voiceReducer';
@@ -101,12 +102,46 @@ function App({ testTransport }: AppProps = {}) {
   // Ref to always-current CSRF token for unmount cleanup (effect with [] deps can't see state).
   const csrfTokenRef = useRef('');
 
+  // ── Canonical speech and voice deduplication ─────────────────────────────────
+
+  // TurnIds already spoken via speakCanonical in this conversation epoch. Prevents duplicate speech
+  // from rerenders, duplicate outcome events, StrictMode, or reconnect. Cleared on new conversation.
+  const spokenTurnIdsRef = useRef(new Set<string>());
+
+  // NativeMessageIds of finalized utterances already submitted in the current voice session. Prevents
+  // duplicate provider final-transcript delivery from creating multiple HTTP submissions. Bounded per
+  // session; cleared on session end or new conversation.
+  const finalizedNativeIdsRef = useRef(new Set<string>());
+
   /**
    * A change this tab knows about before the server announces it. Stable across renders, because it
    * is passed to children whose effects depend on it - an identity that changed every render would
    * make them re-run for no reason, and would make a mid-flight resume look like a fresh mount.
    */
   const invalidateActiveInventory = useCallback(() => setLocalRefetchNonce((nonce) => nonce + 1), []);
+
+  /**
+   * Called on every terminal Outcome. Invalidates the workspace and, when a voice session is active
+   * and the transport is connected, speaks the canonical summary text exactly once per TurnId.
+   */
+  const handleTerminalOutcome = useCallback((outcome: TurnOutcomeView) => {
+    setLocalRefetchNonce((nonce) => nonce + 1);
+
+    // Canonical speech: only when voice is active and this Turn has not been spoken yet.
+    const sessionId = voiceSessionIdRef.current;
+    if (!sessionId) return;
+    if (spokenTurnIdsRef.current.has(outcome.turnId)) return;
+
+    const transport = transportRef.current;
+    if (!transport) return;
+
+    try {
+      transport.speakCanonical(outcome.summary);
+      spokenTurnIdsRef.current.add(outcome.turnId);
+    } catch {
+      // Transport disconnected or speak failed — canonical text remains visible in TurnTracer.
+    }
+  }, []);
 
   // ── Shared turn submission handle ────────────────────────────────────────────
 
@@ -124,12 +159,21 @@ function App({ testTransport }: AppProps = {}) {
 
   const handleVoiceSessionChanged = useCallback((id: string | null) => {
     voiceSessionIdRef.current = id;
+    // Clear per-session finalized item dedupe when session ends.
+    if (id === null) {
+      finalizedNativeIdsRef.current.clear();
+    }
   }, []);
 
   const handleFinalizedUtterance = useCallback(
     (utterance: FinalizedUtterance) => {
       const sessionId = voiceSessionIdRef.current;
       if (!sessionId) return;
+
+      // Per-session dedupe: duplicate provider final-transcript delivery with the same nativeMessageId
+      // must not create a second HTTP submission.
+      if (finalizedNativeIdsRef.current.has(utterance.nativeMessageId)) return;
+      finalizedNativeIdsRef.current.add(utterance.nativeMessageId);
 
       submitTurnRef.current?.({
         nativeMessageId: utterance.nativeMessageId,
@@ -353,14 +397,18 @@ function App({ testTransport }: AppProps = {}) {
     voiceGenerationRef.current += 1;
     voiceSessionIdRef.current = null;
 
-    // 3. Disconnect transport locally — stops mic/playback/data channel.
+    // 3. Clear deduplication state for the new conversation.
+    spokenTurnIdsRef.current.clear();
+    finalizedNativeIdsRef.current.clear();
+
+    // 4. Disconnect transport locally — stops mic/playback/data channel.
     transportRef.current.disconnect();
 
     try {
-      // 4. Execute existing server rotation (unchanged — #35 safety ordering).
+      // 5. Execute existing server rotation (unchanged — #35 safety ordering).
       const rotation = await startNewConversation(state.session.csrfToken);
 
-      // 5. Clear recovery storage (unchanged — only after successful rotation).
+      // 6. Clear recovery storage (unchanged — only after successful rotation).
       const cleared = clearInFlightTurn(
         state.session.bootstrap.webConversationId,
         state.session.bootstrap.participantId,
@@ -381,7 +429,7 @@ function App({ testTransport }: AppProps = {}) {
         return;
       }
 
-      // 6. Release voice session (best-effort — SQL idle/expiry is authoritative).
+      // 7. Release voice session (best-effort — SQL idle/expiry is authoritative).
       if (capturedVoiceSessionId) {
         try {
           await releaseVoice(capturedVoiceSessionId, state.session.csrfToken);
@@ -390,7 +438,7 @@ function App({ testTransport }: AppProps = {}) {
         }
       }
 
-      // 7. Remount conversation + reset voice.
+      // 8. Remount conversation + reset voice.
       setConversationEpoch((epoch) => epoch + 1);
       setNotice(
         rotation.clearedPendingConfirmation
@@ -474,7 +522,7 @@ function App({ testTransport }: AppProps = {}) {
         csrfToken={session.csrfToken}
         webConversationId={bootstrap.webConversationId}
         participantId={bootstrap.participantId}
-        onTerminalOutcome={invalidateActiveInventory}
+        onTerminalOutcome={handleTerminalOutcome}
         submitRef={submitTurnRef}
       />
       <VoiceControls

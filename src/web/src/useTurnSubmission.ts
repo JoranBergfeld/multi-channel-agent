@@ -38,7 +38,7 @@ export interface UseTurnSubmissionOptions {
   csrfToken: string;
   webConversationId: string;
   participantId: string;
-  onTerminalOutcome: () => void;
+  onTerminalOutcome: (outcome: TurnOutcomeView) => void;
   createSource?: EventStreamFactory;
   /** When false, the hook is dormant — no resume, no subscription, no streams. Default true. */
   enabled?: boolean;
@@ -91,10 +91,11 @@ export function useTurnSubmission(options: UseTurnSubmissionOptions): UseTurnSub
             setParts(partsRef.current);
           },
           onOutcome: (terminal) => {
-            setOutcome(composeOutcome(partsRef.current, terminal));
+            const composed = composeOutcome(partsRef.current, terminal);
+            setOutcome(composed);
             setProgress('idle');
             clearInFlightTurnIfMatches(webConversationId, participantId, { turnId: id });
-            onTerminalOutcome();
+            onTerminalOutcome(composed);
           },
           onFailed: () => {
             setError('Lost the connection to this Turn and cannot resume it automatically. Refresh to try again.');
@@ -147,7 +148,7 @@ export function useTurnSubmission(options: UseTurnSubmissionOptions): UseTurnSub
         setOutcome(result.outcome);
         setProgress('idle');
         clearInFlightTurnIfMatches(webConversationId, participantId, { nativeMessageId: stored.nativeMessageId });
-        onTerminalOutcome();
+        onTerminalOutcome(result.outcome);
         return;
       }
 
@@ -272,7 +273,7 @@ export function useTurnSubmission(options: UseTurnSubmissionOptions): UseTurnSub
             setOutcome(result.outcome);
             setProgress('idle');
             clearInFlightTurnIfMatches(webConversationId, participantId, { nativeMessageId });
-            onTerminalOutcome();
+            onTerminalOutcome(result.outcome);
             return;
           }
 
