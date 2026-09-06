@@ -107,16 +107,18 @@ public sealed class AzureVoiceLiveGatewayTests
     // ── Auth ──────────────────────────────────────────────────────────────
 
     [Fact]
-    public async Task Token_is_acquired_with_ai_azure_scope()
+    public async Task Token_is_acquired_with_exactly_ai_azure_scope_and_request_cancellation_token()
     {
         var socket = CreateSocketWithSuccessfulNegotiation();
         var credential = new FakeTokenCredential(TestToken);
         var gateway = CreateGateway(socket, credential: credential);
+        using var cts = new CancellationTokenSource();
 
-        await gateway.NegotiateAsync(new VoiceLiveNegotiationRequest(TestSdpOffer), CancellationToken.None);
+        await gateway.NegotiateAsync(new VoiceLiveNegotiationRequest(TestSdpOffer), cts.Token);
 
         Assert.NotNull(credential.LastRequestContext);
-        Assert.Contains("https://ai.azure.com/.default", credential.LastRequestContext.Value.Scopes);
+        Assert.Equal(["https://ai.azure.com/.default"], credential.LastRequestContext.Value.Scopes);
+        Assert.Equal(cts.Token, credential.LastCancellationToken);
     }
 
     [Fact]
@@ -128,7 +130,14 @@ public sealed class AzureVoiceLiveGatewayTests
         await gateway.NegotiateAsync(new VoiceLiveNegotiationRequest(TestSdpOffer), CancellationToken.None);
 
         Assert.True(socket.Headers.ContainsKey("Authorization"));
-        Assert.Equal($"Bearer {TestToken}", socket.Headers["Authorization"]);
+        var authHeader = socket.Headers["Authorization"];
+        // Regression: must not be placeholder, empty, or API-key form
+        Assert.NotEqual("******", authHeader);
+        Assert.False(string.IsNullOrWhiteSpace(authHeader));
+        Assert.DoesNotMatch(@"^\*+$", authHeader);
+        Assert.DoesNotMatch(@"(?i)^api[-_]?key", authHeader);
+        // Must be standard HTTP Bearer scheme with the test token
+        Assert.Equal($"Bearer {TestToken}", authHeader);
     }
 
     // ── Protocol messages ─────────────────────────────────────────────────
@@ -514,16 +523,19 @@ public sealed class AzureVoiceLiveGatewayTests
     private sealed class FakeTokenCredential(string token) : TokenCredential
     {
         public TokenRequestContext? LastRequestContext { get; private set; }
+        public CancellationToken LastCancellationToken { get; private set; }
 
         public override AccessToken GetToken(TokenRequestContext requestContext, CancellationToken cancellationToken)
         {
             LastRequestContext = requestContext;
+            LastCancellationToken = cancellationToken;
             return new AccessToken(token, DateTimeOffset.UtcNow.AddHours(1));
         }
 
         public override ValueTask<AccessToken> GetTokenAsync(TokenRequestContext requestContext, CancellationToken cancellationToken)
         {
             LastRequestContext = requestContext;
+            LastCancellationToken = cancellationToken;
             return new(new AccessToken(token, DateTimeOffset.UtcNow.AddHours(1)));
         }
     }
