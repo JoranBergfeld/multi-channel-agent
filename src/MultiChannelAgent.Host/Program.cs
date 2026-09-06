@@ -102,6 +102,31 @@ builder.Services
 
 var app = builder.Build();
 
+// Explicit exception handler suppresses the auto-registered developer exception page in all
+// environments (ASP.NET Core skips the auto-registration when UseExceptionHandler is already
+// present). Unhandled exceptions are mapped to clean problem responses without stack traces,
+// exception type names, or framework-internal paths that could aid an attacker.
+// BadHttpRequestException carries the HTTP status ASP.NET Core intends (typically 400), so its
+// status code is preserved; all other exceptions become 500.
+app.UseExceptionHandler(errorApp =>
+{
+    errorApp.Run(async context =>
+    {
+        var feature = context.Features.Get<Microsoft.AspNetCore.Diagnostics.IExceptionHandlerFeature>();
+        var (statusCode, type, title) = feature?.Error is BadHttpRequestException badRequest
+            ? ((int)badRequest.StatusCode,
+               "https://tools.ietf.org/html/rfc9110#section-15.5.1",
+               "The request was invalid.")
+            : (StatusCodes.Status500InternalServerError,
+               "https://tools.ietf.org/html/rfc9110#section-15.6.1",
+               "An unexpected error occurred.");
+
+        context.Response.StatusCode = statusCode;
+        context.Response.ContentType = "application/problem+json";
+        await context.Response.WriteAsJsonAsync(new { type, title, status = statusCode });
+    });
+});
+
 app.MapHealthChecks("/health/live", new HealthCheckOptions
 {
     Predicate = check => check.Tags.Contains("live"),
