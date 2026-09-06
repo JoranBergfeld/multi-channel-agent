@@ -29,7 +29,7 @@ Every file created or modified, grouped by responsibility. Tasks reference these
 | Modify | `src/MultiChannelAgent.Domain/Turns/ChannelPrincipal.cs` | Add `ExchangeMailbox(string subject, string? tenantId)` factory |
 | Create | `src/MultiChannelAgent.Infrastructure/Turns/ChannelRoutingDeliverySender.cs` | Resolves origin Turn's `Channel` via `IInboxStore.FindByTurnIdAsync`, dispatches to keyed `IDeliverySender` |
 | Modify | `src/MultiChannelAgent.Infrastructure/ServiceCollectionExtensions.cs` | Replace unconditional `IDeliverySender` registration with keyed registrations + `ChannelRoutingDeliverySender` as the resolved `IDeliverySender` |
-| Create | `test/MultiChannelAgent.Infrastructure.Tests/Turns/ChannelRoutingDeliverySenderTests.cs` | Routes by origin-Turn channel; falls back safely when Turn/channel unknown |
+| Create | `tests/MultiChannelAgent.IntegrationTests/Turns/ChannelRoutingDeliverySenderTests.cs` | Routes by origin-Turn channel; falls back safely when Turn/channel unknown |
 
 ### Part A — Email (#39)
 
@@ -45,8 +45,8 @@ Every file created or modified, grouped by responsibility. Tasks reference these
 | Create | `src/MultiChannelAgent.Infrastructure/Channels/Email/GraphEmailDeliverySender.cs` | `IDeliverySender` keyed `"email"`; calls `IGraphMailboxClient.SendReplyAsync` |
 | Modify | `src/MultiChannelAgent.Infrastructure/ServiceCollectionExtensions.cs` | Register `IGraphMailboxClient`, `EmailSenderResolutionService`, `EmailInboundProcessingService`, keyed `"email"` sender |
 | Modify | `src/MultiChannelAgent.Host/Program.cs` | Map `EmailWebhookEndpoints` |
-| Create | `test/MultiChannelAgent.Application.Tests/Channels/Email/EmailInboundProcessingServiceTests.cs` | Fixture Graph payloads → correct `InboundTurnDraft` shaping (direct/quoted split, sender resolution failure path) |
-| Create | `test/MultiChannelAgent.Host.Tests/Channels/EmailWebhookEndpointsTests.cs` | Handshake echo, `clientState` mismatch → 202 no-op, valid notification → accepted Turn end-to-end via `SqliteWebApplicationFactory` |
+| Create | `tests/MultiChannelAgent.Application.Tests/Channels/Email/EmailInboundProcessingServiceTests.cs` | Fixture Graph payloads → correct `InboundTurnDraft` shaping (direct/quoted split, sender resolution failure path) |
+| Create | `tests/MultiChannelAgent.IntegrationTests/Channels/EmailWebhookEndpointsTests.cs` | Handshake echo, `clientState` mismatch → 202 no-op, valid notification → accepted Turn end-to-end via `SqliteWebApplicationFactory` |
 
 ### Part B — Teams personal chat (#37)
 
@@ -58,14 +58,14 @@ Every file created or modified, grouped by responsibility. Tasks reference these
 | Create | `src/MultiChannelAgent.Infrastructure/Channels/Teams/SqlTeamsConversationReferenceStore.cs` | EF Core implementation |
 | Create | `src/MultiChannelAgent.Infrastructure/Persistence/Entities/TeamsConversationReferenceEntity.cs` | EF entity |
 | Create | `src/MultiChannelAgent.Infrastructure/Persistence/Migrations/<timestamp>_AddTeamsConversationReferences.cs` | EF migration |
-| Modify | `src/MultiChannelAgent.Infrastructure/Persistence/AppDbContext.cs` | Register `DbSet<TeamsConversationReferenceEntity>` + configuration |
+| Modify | `src/MultiChannelAgent.Infrastructure/Persistence/MultiChannelAgentDbContext.cs` | Register `DbSet<TeamsConversationReferenceEntity>` + configuration |
 | Create | `src/MultiChannelAgent.Host/Channels/Teams/InventoryAgentTeamsHandler.cs` | Activity handler: personal-chat guard, principal + draft shaping, `AcceptAsync` call, reference persistence |
 | Create | `src/MultiChannelAgent.Host/Endpoints/Channels/TeamsActivityEndpoints.cs` | Maps `POST /api/messages` to the Agents SDK adapter/handler |
 | Create | `src/MultiChannelAgent.Infrastructure/Channels/Teams/TeamsDeliverySender.cs` | `IDeliverySender` keyed `"teams"`; loads stored reference, proactively continues conversation, sends reply |
 | Modify | `src/MultiChannelAgent.Infrastructure/ServiceCollectionExtensions.cs` | Register `ITeamsConversationReferenceStore`, Agents SDK adapter/auth services, keyed `"teams"` sender |
 | Modify | `src/MultiChannelAgent.Host/Program.cs` | Map `TeamsActivityEndpoints`, wire Agents SDK middleware |
-| Create | `test/MultiChannelAgent.Host.Tests/Channels/InventoryAgentTeamsHandlerTests.cs` | Personal-chat activity → accepted Turn; non-personal `conversationType` → no-op; missing `AadObjectId` → rejected |
-| Create | `test/MultiChannelAgent.Infrastructure.Tests/Channels/Teams/TeamsDeliverySenderTests.cs` | Stored reference → send invoked with correct text; missing reference → safe no-op/false |
+| Create | `tests/MultiChannelAgent.IntegrationTests/Channels/InventoryAgentTeamsHandlerTests.cs` | Personal-chat activity → accepted Turn; non-personal `conversationType` → no-op; missing `AadObjectId` → rejected |
+| Create | `tests/MultiChannelAgent.IntegrationTests/Channels/Teams/TeamsDeliverySenderTests.cs` | Stored reference → send invoked with correct text; missing reference → safe no-op/false |
 
 ---
 
@@ -147,7 +147,7 @@ Every file created or modified, grouped by responsibility. Tasks reference these
 
 - [ ] **0.4 Tests for `ChannelRoutingDeliverySender`**
 
-  `test/MultiChannelAgent.Infrastructure.Tests/Turns/ChannelRoutingDeliverySenderTests.cs`: fake `IInboxStore` returning a Turn with `Channel = "web"` routes to the keyed `"web"` fake sender; a Turn with no match / null channel returns `false` without throwing; an unregistered channel key returns `false`.
+  `tests/MultiChannelAgent.IntegrationTests/Turns/ChannelRoutingDeliverySenderTests.cs`: fake `IInboxStore` returning a Turn with `Channel = "web"` routes to the keyed `"web"` fake sender; a Turn with no match / null channel returns `false` without throwing; an unregistered channel key returns `false`.
 
 ## Part A — Email adapter (#39)
 
