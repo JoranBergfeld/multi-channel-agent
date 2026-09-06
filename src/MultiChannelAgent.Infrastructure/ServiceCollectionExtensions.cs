@@ -1,8 +1,12 @@
 using Azure.Core;
+using Microsoft.Agents.Authentication;
+using Microsoft.Agents.Authentication.Msal;
+using Microsoft.Agents.Hosting.AspNetCore;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using MultiChannelAgent.Application.Channels.Email;
+using MultiChannelAgent.Application.Channels.Teams;
 using MultiChannelAgent.Application.Authentication;
 using MultiChannelAgent.Application.Inventories;
 using MultiChannelAgent.Application.Turns;
@@ -10,6 +14,7 @@ using MultiChannelAgent.Application.Voice;
 using MultiChannelAgent.Domain.Turns;
 using MultiChannelAgent.Infrastructure.Authentication;
 using MultiChannelAgent.Infrastructure.Channels.Email;
+using MultiChannelAgent.Infrastructure.Channels.Teams;
 using MultiChannelAgent.Infrastructure.Inventories;
 using MultiChannelAgent.Infrastructure.Persistence;
 using MultiChannelAgent.Infrastructure.Turns;
@@ -37,6 +42,7 @@ public static class ServiceCollectionExtensions
         services.AddScoped<ILeaseCoordinator, SqlLeaseCoordinator>();
         services.AddKeyedScoped<IDeliverySender, LoggingDeliverySender>("web");
         services.AddKeyedScoped<IDeliverySender, GraphEmailDeliverySender>(EmailChannel.Name);
+        services.AddKeyedScoped<IDeliverySender, TeamsDeliverySender>(TeamsChannel.Name);
         services.AddScoped<IDeliverySender, ChannelRoutingDeliverySender>();
         services.AddSingleton(TimeProvider.System);
         services.AddScoped<IModelBoundary, ScriptedModelBoundary>();
@@ -44,6 +50,10 @@ public static class ServiceCollectionExtensions
             .Bind(configuration.GetSection("EmailChannel"));
         services.AddScoped<EmailSenderResolutionService>();
         services.AddScoped<EmailInboundProcessingService>();
+        services.AddScoped<ITeamsConversationReferenceStore, SqlTeamsConversationReferenceStore>();
+        services.AddAgentCore<CloudAdapter>();
+        services.AddDefaultMsalAuth(configuration);
+        services.AddSingleton<IConnections>(sp => new ConfigurationConnections(sp, configuration, "Connections", "ConnectionsMap"));
 
         // Voice infrastructure — the store is always available (it is just SQL); the gateway is
         // conditionally resolved: enabled voice gets the real Azure adapter with Entra TokenCredential,

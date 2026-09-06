@@ -1076,6 +1076,24 @@ namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
                     b.ToTable("StockOperations", (string)null);
                 });
 
+            modelBuilder.Entity("MultiChannelAgent.Infrastructure.Persistence.Entities.TeamsConversationReferenceEntity", b =>
+                {
+                    b.Property<string>("ChannelConversationId")
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)");
+
+                    b.Property<string>("SerializedReference")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .HasColumnType("datetimeoffset");
+
+                    b.HasKey("ChannelConversationId");
+
+                    b.ToTable("TeamsConversationReferences", (string)null);
+                });
+
             modelBuilder.Entity("MultiChannelAgent.Infrastructure.Persistence.Entities.TurnProgressEventEntity", b =>
                 {
                     b.Property<Guid>("TurnId")

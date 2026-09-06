@@ -17,6 +17,7 @@ var connectionString = builder.Configuration.GetConnectionString("MultiChannelAg
     ?? throw new InvalidOperationException("Missing required 'ConnectionStrings:MultiChannelAgent' configuration value.");
 
 builder.Services.AddMultiChannelAgentInfrastructure(connectionString, builder.Configuration);
+builder.Services.AddTransient<MultiChannelAgent.Host.Channels.Teams.InventoryAgentTeamsHandler>();
 
 var authenticationProvider = builder.Configuration["Authentication:Provider"] ?? "Entra";
 var challengeScheme = string.Equals(authenticationProvider, "Test", StringComparison.OrdinalIgnoreCase)
@@ -143,6 +144,7 @@ app.UseAuthentication();
 app.UseAuthorization();
 
 app.MapTurnEndpoints();
+app.MapTeamsActivityEndpoints();
 app.MapEmailWebhookEndpoints();
 app.MapSessionEndpoints();
 app.MapVoiceEndpoints();

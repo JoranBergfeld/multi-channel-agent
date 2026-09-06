@@ -67,6 +67,8 @@ public sealed class MultiChannelAgentDbContext(DbContextOptions<MultiChannelAgen
 
     public DbSet<FoundryConversationBindingEntity> FoundryConversationBindings => Set<FoundryConversationBindingEntity>();
 
+    public DbSet<TeamsConversationReferenceEntity> TeamsConversationReferences => Set<TeamsConversationReferenceEntity>();
+
     public DbSet<VoiceSessionEntity> VoiceSessions => Set<VoiceSessionEntity>();
 
     /// <summary>
