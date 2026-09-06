@@ -23,12 +23,27 @@ public sealed class SqlTeamsConversationReferenceStore(MultiChannelAgentDbContex
                 SerializedReference = serializedReference,
                 UpdatedAt = now,
             });
+
+            try
+            {
+                await db.SaveChangesAsync(cancellationToken);
+                return;
+            }
+            catch (DbUpdateException)
+            {
+                db.ChangeTracker.Clear();
+
+                existing = await db.TeamsConversationReferences
+                    .FirstOrDefaultAsync(x => x.ChannelConversationId == channelConversationId, cancellationToken);
+                if (existing is null)
+                {
+                    throw;
+                }
+            }
         }
-        else
-        {
-            existing.SerializedReference = serializedReference;
-            existing.UpdatedAt = now;
-        }
+
+        existing.SerializedReference = serializedReference;
+        existing.UpdatedAt = now;
 
         await db.SaveChangesAsync(cancellationToken);
     }
