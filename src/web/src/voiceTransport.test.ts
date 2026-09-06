@@ -410,8 +410,8 @@ describe('FakeVoiceTransport', () => {
     const transportB = new FakeVoiceTransport()
     const cbA = makeCallbacks()
     const cbB = makeCallbacks()
-    transportA.connect('v=0\r\n', cbA)
-    transportB.connect('v=0\r\n', cbB)
+    transportA.connect('v=0\r\n', cbA, 'vs-a')
+    transportB.connect('v=0\r\n', cbB, 'vs-b')
 
     transportA.simulateConnected()
     transportA.simulateError('only A')

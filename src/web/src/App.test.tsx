@@ -29,7 +29,7 @@ function json(body: unknown, status = 200) {
 function stubApi(overrides: Record<string, () => Response> = {}) {
   const calls: string[] = [];
 
-  const fetchMock = vi.fn((input: RequestInfo | URL) => {
+  const fetchMock = vi.fn((input: RequestInfo | URL, _init?: RequestInit) => {
     const url = String(input);
     calls.push(url);
 
