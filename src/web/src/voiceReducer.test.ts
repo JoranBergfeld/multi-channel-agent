@@ -533,6 +533,63 @@ describe('immutability', () => {
   })
 })
 
+// ── 18. terminal reset clears all ephemeral flags (Task 15 finding #2) ────────
+
+describe('terminal reset clears ephemeral flags', () => {
+  it('error_occurred after playback_failed resets playbackFailed', () => {
+    const failed = apply(
+      activeState(),
+      { type: 'playback_started' },
+      { type: 'playback_failed', error: 'decode error' },
+    )
+    expect(failed.playbackFailed).toBe(true)
+
+    const errored = reduce(failed, { type: 'error_occurred', error: 'connection lost' })
+    expect(errored.phase).toBe('idle')
+    expect(errored.playbackFailed).toBe(false)
+  })
+
+  it('session_expired after playback_failed resets playbackFailed', () => {
+    const failed = apply(
+      activeState(),
+      { type: 'playback_started' },
+      { type: 'playback_failed', error: 'decode error' },
+    )
+    expect(failed.playbackFailed).toBe(true)
+
+    const expired = reduce(failed, { type: 'session_expired', reason: 'timeout' })
+    expect(expired.phase).toBe('idle')
+    expect(expired.playbackFailed).toBe(false)
+  })
+
+  it('error_occurred after warning resets warning and warningDelivered', () => {
+    const warned = reduce(activeState(), { type: 'session_warning', message: 'expiring' })
+    expect(warned.warning).toBe('expiring')
+    expect(warned.warningDelivered).toBe(true)
+
+    const errored = reduce(warned, { type: 'error_occurred', error: 'boom' })
+    expect(errored.warning).toBeNull()
+    expect(errored.warningDelivered).toBe(false)
+  })
+
+  it('session_expired after warning resets warning and warningDelivered', () => {
+    const warned = apply(
+      activeState(),
+      { type: 'session_warning', message: 'expiring' },
+      { type: 'playback_started' },
+      { type: 'playback_failed', error: 'tts error' },
+    )
+    expect(warned.playbackFailed).toBe(true)
+    expect(warned.warning).toBe('expiring')
+    expect(warned.warningDelivered).toBe(true)
+
+    const expired = reduce(warned, { type: 'session_expired', reason: 'timeout' })
+    expect(expired.playbackFailed).toBe(false)
+    expect(expired.warning).toBeNull()
+    expect(expired.warningDelivered).toBe(false)
+  })
+})
+
 describe('stale async events after terminal state', () => {
   it('admitted after ended does not reactivate a session', () => {
     const ended = apply(activeState(), { type: 'end_requested' }, { type: 'ended' })

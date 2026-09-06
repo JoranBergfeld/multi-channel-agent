@@ -616,6 +616,151 @@ describe('VoiceControls', () => {
     })
   })
 
+  // ── In-flight admission cleanup (Task 15 finding #1) ──────────────────
+
+  describe('in-flight admission cleanup', () => {
+    it('unmount during admission passes AbortSignal to admitVoice and aborts it', async () => {
+      let capturedSignal: AbortSignal | undefined
+      mockAdmitVoice.mockImplementation((_offer, _csrf, signal) => {
+        capturedSignal = signal
+        return new Promise(() => {})
+      })
+      const props = makeProps()
+      const { unmount } = render(<VoiceControls {...props} />)
+
+      await userEvent.click(screen.getByRole('button', { name: 'Start Voice' }))
+      await waitFor(() => expect(mockAdmitVoice).toHaveBeenCalledOnce())
+
+      expect(capturedSignal).toBeInstanceOf(AbortSignal)
+      expect(capturedSignal!.aborted).toBe(false)
+
+      unmount()
+
+      expect(capturedSignal!.aborted).toBe(true)
+    })
+
+    it('late successful admission after unmount triggers release and never connects/notifies', async () => {
+      let resolveAdmit!: (value: VoiceAdmissionResponse) => void
+      mockAdmitVoice.mockImplementation(
+        () => new Promise<VoiceAdmissionResponse>((resolve) => { resolveAdmit = resolve }),
+      )
+      const props = makeProps()
+      const { unmount } = render(<VoiceControls {...props} />)
+
+      await userEvent.click(screen.getByRole('button', { name: 'Start Voice' }))
+      await waitFor(() => expect(mockAdmitVoice).toHaveBeenCalledOnce())
+
+      unmount()
+
+      // Server committed the session before abort was processed
+      await act(async () => { resolveAdmit(admitted()) })
+
+      // Best-effort release must be called to reclaim server-side session
+      expect(mockReleaseVoice).toHaveBeenCalledWith(SESSION_ID, CSRF)
+      // Never connected or notified parent after unmount
+      expect(props.transport.connectCount).toBe(0)
+      expect(props.onVoiceSessionChanged).not.toHaveBeenCalled()
+    })
+
+    it('abort rejection after unmount does not trigger state callbacks or unhandled rejection', async () => {
+      mockAdmitVoice.mockImplementation((_offer, _csrf, signal) => {
+        return new Promise<VoiceAdmissionResponse>((_resolve, reject) => {
+          signal?.addEventListener('abort', () => {
+            reject(new DOMException('The operation was aborted.', 'AbortError'))
+          })
+        })
+      })
+      const props = makeProps()
+      const { unmount } = render(<VoiceControls {...props} />)
+
+      await userEvent.click(screen.getByRole('button', { name: 'Start Voice' }))
+      await waitFor(() => expect(mockAdmitVoice).toHaveBeenCalledOnce())
+
+      unmount()
+
+      // Flush microtask queue — AbortError should be silently handled
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+
+      // No parent notification after unmount
+      expect(props.onVoiceSessionChanged).not.toHaveBeenCalled()
+      // No release call because abort prevented admission from completing
+      expect(mockReleaseVoice).not.toHaveBeenCalled()
+    })
+  })
+
+  // ── Double start gate (Task 15 finding #3) ──────────────────────────────
+
+  describe('double start gate', () => {
+    it('synchronous double-start invokes prepare/admit exactly once', async () => {
+      const props = makeProps()
+      const prepareSpy = vi.spyOn(props.transport, 'prepare')
+      prepareSpy.mockReturnValue(new Promise(() => {}))
+      render(<VoiceControls {...props} />)
+
+      const button = screen.getByRole('button', { name: 'Start Voice' })
+      // Two synchronous clicks before React re-renders the disabled state
+      fireEvent.click(button)
+      fireEvent.click(button)
+
+      expect(prepareSpy).toHaveBeenCalledOnce()
+    })
+  })
+
+  // ── Heartbeat stale response (Task 15 finding #5) ───────────────────────
+
+  describe('heartbeat stale response', () => {
+    beforeEach(() => { vi.useFakeTimers() })
+    afterEach(() => { vi.useRealTimers() })
+
+    it('heartbeat response resolving after end does not affect idle state', async () => {
+      let resolveHeartbeat!: (value: HeartbeatResponse) => void
+      mockHeartbeatVoice.mockImplementationOnce(
+        () => new Promise<HeartbeatResponse>((resolve) => { resolveHeartbeat = resolve }),
+      )
+      const { onVoiceSessionChanged } = await renderConnectedFake()
+
+      // Trigger heartbeat (starts in-flight)
+      await act(async () => { await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS) })
+      expect(mockHeartbeatVoice).toHaveBeenCalledOnce()
+
+      // End session (bumps generation) — flush release promise with fake timer tick
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: 'End Voice' }))
+        await vi.advanceTimersByTimeAsync(0)
+      })
+      expect(screen.getByRole('button', { name: 'Start Voice' })).toBeEnabled()
+      onVoiceSessionChanged.mockClear()
+
+      // Late expired heartbeat resolves — must be ignored
+      await act(async () => { resolveHeartbeat(expiredHb('timeout')) })
+
+      // Still idle, no expired error surfaced, no parent notification
+      expect(screen.getByRole('button', { name: 'Start Voice' })).toBeEnabled()
+      expect(screen.queryByText(/Session expired/)).not.toBeInTheDocument()
+      expect(onVoiceSessionChanged).not.toHaveBeenCalled()
+    })
+  })
+
+  // ── Reducer terminal reset at UI level (Task 15 finding #2) ─────────────
+
+  describe('terminal reset clears playback failure at UI level', () => {
+    it('playback failure alert disappears after transport error returns to idle', async () => {
+      const { transport } = await renderConnected()
+
+      // Enter speaking, then playback fails
+      act(() => { transport.simulatePlaybackStarted() })
+      act(() => { transport.simulatePlaybackFailed('decode error') })
+      expect(screen.getByRole('alert', { name: 'Playback failure' })).toBeInTheDocument()
+
+      // Transport error terminates session
+      act(() => { transport.simulateError('connection lost') })
+
+      // Back to idle — playback failure alert should be gone
+      expect(screen.getByRole('button', { name: 'Start Voice' })).toBeEnabled()
+      expect(screen.queryByRole('alert', { name: 'Playback failure' })).not.toBeInTheDocument()
+    })
+  })
+
   // ── Exported constant ────────────────────────────────────────────────────
 
   it('exports HEARTBEAT_INTERVAL_MS as 30000', () => {

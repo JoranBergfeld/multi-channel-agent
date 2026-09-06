@@ -28,24 +28,27 @@ export default function VoiceControls({
 }: VoiceControlsProps) {
   const [state, dispatch] = useReducer(reduce, initialState)
 
-  // Always-current refs — avoids stale closures in async / interval callbacks
+  // Always-current refs — synced in useEffect to avoid reading/writing .current during render.
+  // All consumers (event handlers, async callbacks, intervals) fire after effects.
   const stateRef = useRef(state)
-  stateRef.current = state
-
   const csrfRef = useRef(csrfToken)
-  csrfRef.current = csrfToken
-
   const onFinalizedRef = useRef(onFinalizedUtterance)
-  onFinalizedRef.current = onFinalizedUtterance
-
   const onSessionChangedRef = useRef(onVoiceSessionChanged)
-  onSessionChangedRef.current = onVoiceSessionChanged
+
+  useEffect(() => {
+    stateRef.current = state
+    csrfRef.current = csrfToken
+    onFinalizedRef.current = onFinalizedUtterance
+    onSessionChangedRef.current = onVoiceSessionChanged
+  })
 
   const generationRef = useRef(0)
   const heartbeatTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const heartbeatInFlightRef = useRef(false)
   const mountedRef = useRef(true)
   const prevExternalIdRef = useRef(voiceSessionId)
+  const abortRef = useRef<AbortController | null>(null)
+  const startingRef = useRef(false)
 
   // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -55,6 +58,28 @@ export default function VoiceControls({
       heartbeatTimerRef.current = null
     }
     heartbeatInFlightRef.current = false
+  }
+
+  /** Abort any in-flight admission and clear the synchronous start gate. */
+  function abortAdmission() {
+    if (abortRef.current) {
+      abortRef.current.abort()
+      abortRef.current = null
+    }
+    startingRef.current = false
+  }
+
+  /**
+   * Invalidate the current generation, cancel heartbeats and in-flight admission,
+   * and disconnect a given transport instance. Extracted so the effect cleanup
+   * function does not access .current on refs directly (satisfies exhaustive-deps).
+   */
+  function invalidateSession(t: VoiceTransport) {
+    mountedRef.current = false
+    generationRef.current++
+    clearHeartbeat()
+    abortAdmission()
+    t.disconnect()
   }
 
   function startHeartbeat(generation: number) {
@@ -117,116 +142,136 @@ export default function VoiceControls({
 
   function handleStart() {
     if (stateRef.current.phase !== 'idle') return
+    if (startingRef.current) return
 
+    startingRef.current = true
     const generation = ++generationRef.current
+    const controller = new AbortController()
+    abortRef.current = controller
     dispatch({ type: 'start_requested' })
 
     void (async () => {
-      let sdpOffer: string
       try {
-        sdpOffer = await transport.prepare()
-      } catch (err) {
-        if (generation !== generationRef.current || !mountedRef.current) return
-        dispatch({
-          type: 'error_occurred',
-          error: `Microphone access failed: ${err instanceof Error ? err.message : String(err)}`,
-        })
-        onSessionChangedRef.current(null)
-        return
-      }
-
-      if (generation !== generationRef.current || !mountedRef.current) return
-
-      let result: Awaited<ReturnType<typeof admitVoice>>
-      try {
-        result = await admitVoice(sdpOffer, csrfRef.current)
-      } catch (err) {
-        if (generation !== generationRef.current || !mountedRef.current) return
-        dispatch({
-          type: 'error_occurred',
-          error: err instanceof Error ? err.message : String(err),
-        })
-        transport.disconnect()
-        onSessionChangedRef.current(null)
-        return
-      }
-
-      if (generation !== generationRef.current || !mountedRef.current) return
-
-      if (!result.admitted) {
-        dispatch({ type: 'denied', reason: result.denialReason! })
-        transport.disconnect()
-        onSessionChangedRef.current(null)
-        return
-      }
-
-      dispatch({
-        type: 'admitted',
-        voiceSessionId: result.voiceSessionId!,
-        sdpAnswer: result.sdpAnswer!,
-      })
-      onSessionChangedRef.current(result.voiceSessionId!)
-
-      transport.connect(result.sdpAnswer!, {
-        onConnected: () => {
-          if (generation !== generationRef.current || !mountedRef.current) return
-          dispatch({ type: 'connected' })
-          startHeartbeat(generation)
-        },
-        onSpeechStarted: () => {
-          if (generation !== generationRef.current || !mountedRef.current) return
-          const wasPlaying = stateRef.current.phase === 'speaking'
-          dispatch({ type: 'speech_started' })
-          if (wasPlaying) {
-            transport.cancelPlayback(0)
-          }
-        },
-        onSpeechStopped: () => {
-          // No reducer action; speechActive cleared by final_transcript / speech_interrupted
-        },
-        onPartialTranscript: (text: string) => {
-          if (generation !== generationRef.current || !mountedRef.current) return
-          dispatch({ type: 'partial_transcript', text })
-        },
-        onFinalTranscript: (text: string, nativeMessageId: string) => {
-          if (generation !== generationRef.current || !mountedRef.current) return
-          dispatch({ type: 'final_transcript', text, nativeMessageId })
-          onFinalizedRef.current({ text, nativeMessageId })
-        },
-        onPlaybackStarted: () => {
-          if (generation !== generationRef.current || !mountedRef.current) return
-          dispatch({ type: 'playback_started' })
-        },
-        onPlaybackDone: () => {
-          if (generation !== generationRef.current || !mountedRef.current) return
-          dispatch({ type: 'playback_finished' })
-        },
-        onPlaybackFailed: (error: string) => {
-          if (generation !== generationRef.current || !mountedRef.current) return
-          dispatch({ type: 'playback_failed', error })
-        },
-        onPlaybackIntegrityError: (requested: string, received: string) => {
+        let sdpOffer: string
+        try {
+          sdpOffer = await transport.prepare()
+        } catch (err) {
           if (generation !== generationRef.current || !mountedRef.current) return
           dispatch({
-            type: 'playback_failed',
-            error: `Integrity error: expected "${requested}", got "${received}"`,
+            type: 'error_occurred',
+            error: `Microphone access failed: ${err instanceof Error ? err.message : String(err)}`,
           })
-        },
-        onError: (error: string) => {
+          onSessionChangedRef.current(null)
+          return
+        }
+
+        if (generation !== generationRef.current || !mountedRef.current) return
+
+        let result: Awaited<ReturnType<typeof admitVoice>>
+        try {
+          result = await admitVoice(sdpOffer, csrfRef.current, controller.signal)
+        } catch (err) {
           if (generation !== generationRef.current || !mountedRef.current) return
-          clearHeartbeat()
-          dispatch({ type: 'error_occurred', error })
+          dispatch({
+            type: 'error_occurred',
+            error: err instanceof Error ? err.message : String(err),
+          })
           transport.disconnect()
           onSessionChangedRef.current(null)
-        },
-        onMicrophoneFailed: (error: string) => {
-          if (generation !== generationRef.current || !mountedRef.current) return
-          clearHeartbeat()
-          dispatch({ type: 'error_occurred', error: `Microphone error: ${error}` })
+          return
+        }
+
+        if (generation !== generationRef.current || !mountedRef.current) {
+          // Server may have committed the session before the abort signal was processed.
+          // Best-effort release: SQL expiry is authoritative (Task 16) so cleanup failure
+          // is intentionally swallowed — it cannot resurrect component state.
+          if (result.admitted && result.voiceSessionId) {
+            void releaseVoice(result.voiceSessionId, csrfRef.current).catch(() => {})
+          }
+          transport.disconnect()
+          return
+        }
+
+        if (!result.admitted) {
+          dispatch({ type: 'denied', reason: result.denialReason! })
           transport.disconnect()
           onSessionChangedRef.current(null)
-        },
-      })
+          return
+        }
+
+        dispatch({
+          type: 'admitted',
+          voiceSessionId: result.voiceSessionId!,
+          sdpAnswer: result.sdpAnswer!,
+        })
+        onSessionChangedRef.current(result.voiceSessionId!)
+
+        transport.connect(result.sdpAnswer!, {
+          onConnected: () => {
+            if (generation !== generationRef.current || !mountedRef.current) return
+            dispatch({ type: 'connected' })
+            startHeartbeat(generation)
+          },
+          onSpeechStarted: () => {
+            if (generation !== generationRef.current || !mountedRef.current) return
+            const wasPlaying = stateRef.current.phase === 'speaking'
+            dispatch({ type: 'speech_started' })
+            if (wasPlaying) {
+              transport.cancelPlayback(0)
+            }
+          },
+          onSpeechStopped: () => {
+            // No reducer action; speechActive cleared by final_transcript / speech_interrupted
+          },
+          onPartialTranscript: (text: string) => {
+            if (generation !== generationRef.current || !mountedRef.current) return
+            dispatch({ type: 'partial_transcript', text })
+          },
+          onFinalTranscript: (text: string, nativeMessageId: string) => {
+            if (generation !== generationRef.current || !mountedRef.current) return
+            dispatch({ type: 'final_transcript', text, nativeMessageId })
+            onFinalizedRef.current({ text, nativeMessageId })
+          },
+          onPlaybackStarted: () => {
+            if (generation !== generationRef.current || !mountedRef.current) return
+            dispatch({ type: 'playback_started' })
+          },
+          onPlaybackDone: () => {
+            if (generation !== generationRef.current || !mountedRef.current) return
+            dispatch({ type: 'playback_finished' })
+          },
+          onPlaybackFailed: (error: string) => {
+            if (generation !== generationRef.current || !mountedRef.current) return
+            dispatch({ type: 'playback_failed', error })
+          },
+          onPlaybackIntegrityError: (requested: string, received: string) => {
+            if (generation !== generationRef.current || !mountedRef.current) return
+            dispatch({
+              type: 'playback_failed',
+              error: `Integrity error: expected "${requested}", got "${received}"`,
+            })
+          },
+          onError: (error: string) => {
+            if (generation !== generationRef.current || !mountedRef.current) return
+            clearHeartbeat()
+            dispatch({ type: 'error_occurred', error })
+            transport.disconnect()
+            onSessionChangedRef.current(null)
+          },
+          onMicrophoneFailed: (error: string) => {
+            if (generation !== generationRef.current || !mountedRef.current) return
+            clearHeartbeat()
+            dispatch({ type: 'error_occurred', error: `Microphone error: ${error}` })
+            transport.disconnect()
+            onSessionChangedRef.current(null)
+          },
+        })
+      } finally {
+        startingRef.current = false
+        if (abortRef.current === controller) {
+          abortRef.current = null
+        }
+      }
     })()
   }
 
@@ -238,6 +283,7 @@ export default function VoiceControls({
     const sessionId = stateRef.current.voiceSessionId
 
     dispatch({ type: 'end_requested' })
+    abortAdmission()
     transport.disconnect()
     clearHeartbeat()
 
@@ -274,13 +320,8 @@ export default function VoiceControls({
 
   useEffect(() => {
     mountedRef.current = true
-    return () => {
-      mountedRef.current = false
-      generationRef.current++
-      clearHeartbeat()
-      transport.disconnect()
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    const currentTransport = transport
+    return () => { invalidateSession(currentTransport) }
   }, [transport])
 
   // Detect external clearing of voiceSessionId
@@ -290,10 +331,10 @@ export default function VoiceControls({
     if (prev !== null && voiceSessionId === null && stateRef.current.phase !== 'idle') {
       generationRef.current++
       clearHeartbeat()
+      abortAdmission()
       transport.disconnect()
       dispatch({ type: 'error_occurred', error: 'Voice session ended externally' })
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [voiceSessionId, transport])
 
   // ── Render ─────────────────────────────────────────────────────────────────

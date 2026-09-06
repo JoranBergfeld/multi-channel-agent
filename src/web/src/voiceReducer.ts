@@ -80,6 +80,9 @@ function clearEphemeral(s: VoiceState): VoiceState {
     bargeIn: false,
     partialTranscript: null,
     finalizedUtterance: null,
+    warning: null,
+    warningDelivered: false,
+    playbackFailed: false,
   }
 }
 
