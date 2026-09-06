@@ -395,7 +395,7 @@ run. They are not monetary budget, spend, or quota controls.
 | `Voice:MaxSessionDuration` | `00:30:00` | Maximum session lifetime after admission. Immutable once computed. |
 | `Voice:SessionWarningThreshold` | `00:25:00` | Warning issued at `admission + threshold`; must be greater than zero and strictly less than `MaxSessionDuration`. |
 | `Voice:IdleTimeout` | `00:01:00` | Inactivity duration before a session is closed automatically. |
-| `Voice:HeartbeatInterval` | `00:00:30` | Browser heartbeat interval; must be less than `IdleTimeout`. |
+| `Voice:HeartbeatInterval` | `00:00:30` | Browser heartbeat interval; must be greater than zero and strictly less than `IdleTimeout`. |
 
 **Authentication:** voice reuses the same Entra `TokenCredential` registered for the Microsoft
 Graph integration — either `ClientSecretCredential` (with `Authentication:Entra:TenantId`,
