@@ -32,7 +32,8 @@ public static class ServiceCollectionExtensions
         services.AddScoped<ITurnResultStore, SqlTurnResultStore>();
         services.AddScoped<ITurnProgressEventStore, SqlTurnProgressEventStore>();
         services.AddScoped<ILeaseCoordinator, SqlLeaseCoordinator>();
-        services.AddScoped<IDeliverySender, LoggingDeliverySender>();
+        services.AddKeyedScoped<IDeliverySender, LoggingDeliverySender>("web");
+        services.AddScoped<IDeliverySender, ChannelRoutingDeliverySender>();
         services.AddSingleton(TimeProvider.System);
         services.AddScoped<IModelBoundary, ScriptedModelBoundary>();
 

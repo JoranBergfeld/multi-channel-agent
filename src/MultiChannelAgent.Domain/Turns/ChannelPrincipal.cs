@@ -39,6 +39,14 @@ public sealed record ChannelPrincipal
         TenantId = string.IsNullOrWhiteSpace(tenantId) ? null : tenantId.Trim(),
     };
 
+    /// <summary>An authenticated internal Exchange mailbox address, resolved through the verified directory.</summary>
+    public static ChannelPrincipal ExchangeMailbox(string subject, string? tenantId) => new()
+    {
+        Kind = ChannelPrincipalKind.ExchangeMailbox,
+        Subject = RequireNonBlank(subject, nameof(subject)),
+        TenantId = string.IsNullOrWhiteSpace(tenantId) ? null : tenantId.Trim(),
+    };
+
     private static string RequireNonBlank(string? value, string parameterName)
     {
         if (string.IsNullOrWhiteSpace(value))
