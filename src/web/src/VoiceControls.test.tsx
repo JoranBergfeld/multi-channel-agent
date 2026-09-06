@@ -273,13 +273,31 @@ describe('VoiceControls', () => {
       expect(screen.getByRole('alert', { name: 'Playback failure' })).toBeInTheDocument()
     })
 
-    it('playback integrity error shows alert with integrity message', async () => {
+    it('playback integrity error while speaking shows generic error and cancels playback', async () => {
       const { transport } = await renderConnected()
+      const perfNow = vi.spyOn(performance, 'now')
+
+      perfNow.mockReturnValue(1000)
       act(() => { transport.simulatePlaybackStarted() })
+      perfNow.mockReturnValue(1400)
       act(() => { transport.simulatePlaybackIntegrityError('correct', 'wrong') })
 
-      expect(screen.getByRole('alert', { name: 'Voice error' })).toHaveTextContent('Integrity')
+      expect(screen.getByRole('alert', { name: 'Voice error' })).toHaveTextContent('Playback integrity check failed.')
       expect(screen.getByRole('alert', { name: 'Playback failure' })).toBeInTheDocument()
+      expect(transport.cancelPlaybackCalls).toEqual([400])
+      expect(screen.getByLabelText('Voice status')).toHaveTextContent('Listening')
+    })
+
+    it('playback integrity error after playback_done shows alerts without cancel', async () => {
+      const { transport } = await renderConnected()
+      act(() => { transport.simulatePlaybackStarted() })
+      act(() => { transport.simulatePlaybackDone() })
+      act(() => { transport.simulatePlaybackIntegrityError('correct', 'wrong') })
+
+      expect(screen.getByRole('alert', { name: 'Voice error' })).toHaveTextContent('Playback integrity check failed.')
+      expect(screen.getByRole('alert', { name: 'Playback failure' })).toBeInTheDocument()
+      expect(transport.cancelPlaybackCalls).toEqual([])
+      expect(screen.getByLabelText('Voice status')).toHaveTextContent('Listening')
     })
 
     it('transport error ends session, disconnects, notifies parent null', async () => {
@@ -493,6 +511,7 @@ describe('VoiceControls', () => {
 
       perfNow.mockReturnValue(100)
       act(() => { transport.simulatePlaybackStarted() })
+      perfNow.mockReturnValue(250)
       act(() => { transport.simulatePlaybackIntegrityError('correct', 'wrong') })
 
       // New playback
@@ -501,7 +520,8 @@ describe('VoiceControls', () => {
       perfNow.mockReturnValue(1100)
       act(() => { transport.simulateSpeechStarted() })
 
-      expect(transport.cancelPlaybackCalls).toEqual([800])
+      // First cancel is the integrity error while speaking (250-100=150ms), second is barge-in
+      expect(transport.cancelPlaybackCalls).toEqual([150, 800])
     })
 
     it('non-finite performance.now falls back to 0 elapsed', async () => {

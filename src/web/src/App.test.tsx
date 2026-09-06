@@ -1061,14 +1061,16 @@ describe('App', () => {
 
     expect(await screen.findByText(CANONICAL_SUMMARY)).toBeInTheDocument();
 
-    // Simulate playback_started then an integrity error (dispatches playback_failed internally)
+    // Real transport order: playback_started → playback_done → integrity error
     transport.simulatePlaybackStarted();
+    transport.simulatePlaybackDone();
     transport.simulatePlaybackIntegrityError('Four brass rivets are unlocated.', 'Unexpected item X.');
 
-    // Accessible playback failure alert appears
+    // Accessible playback failure alert appears with generic sanitized message
     await waitFor(() =>
       expect(screen.getByRole('alert', { name: 'Playback failure' })).toBeInTheDocument(),
     );
+    expect(screen.getByRole('alert', { name: 'Voice error' })).toHaveTextContent('Playback integrity check failed.');
 
     // The exact canonical summary is still visible in TurnTracer, unchanged
     expect(screen.getByText(CANONICAL_SUMMARY)).toBeInTheDocument();

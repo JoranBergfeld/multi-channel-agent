@@ -171,7 +171,7 @@ export function reduce(state: VoiceState, action: VoiceAction): VoiceState {
       return { ...state, phase: 'listening' }
 
     case 'playback_failed':
-      if (state.phase !== 'speaking') return state
+      if (state.phase !== 'speaking' && state.phase !== 'listening') return state
       return { ...state, phase: 'listening', playbackFailed: true, error: action.error }
 
     case 'session_warning': {

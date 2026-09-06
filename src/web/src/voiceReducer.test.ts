@@ -323,8 +323,74 @@ describe('playback_failed', () => {
     expect(s.error).toBe('decode error')
   })
 
-  it('is ignored when not speaking', () => {
-    const s = reduce(activeState(), { type: 'playback_failed', error: 'decode error' })
+  it('accepted in listening (delayed integrity error after playback_done)', () => {
+    const listening = activeState()
+    expect(listening.phase).toBe('listening')
+    const s = reduce(listening, { type: 'playback_failed', error: 'integrity mismatch' })
+    expect(s.phase).toBe('listening')
+    expect(s.playbackFailed).toBe(true)
+    expect(s.error).toBe('integrity mismatch')
+  })
+
+  it('playback_started → playback_done → playback_failed stays listening with failure', () => {
+    const s = apply(
+      activeState(),
+      { type: 'playback_started' },
+      { type: 'playback_finished' },
+      { type: 'playback_failed', error: 'late integrity error' },
+    )
+    expect(s.phase).toBe('listening')
+    expect(s.playbackFailed).toBe(true)
+    expect(s.error).toBe('late integrity error')
+  })
+
+  it('is ignored in idle', () => {
+    const s = reduce(initialState, { type: 'playback_failed', error: 'stale' })
+    expect(s.playbackFailed).toBe(false)
+    expect(s.error).toBeNull()
+  })
+
+  it('is ignored in requesting', () => {
+    const requesting = reduce(initialState, { type: 'start_requested' })
+    const s = reduce(requesting, { type: 'playback_failed', error: 'stale' })
+    expect(s.playbackFailed).toBe(false)
+  })
+
+  it('is ignored in connecting', () => {
+    const connecting = apply(
+      initialState,
+      { type: 'start_requested' },
+      { type: 'admitted', voiceSessionId: 'vs-1', sdpAnswer: 'v=0\r\n...' },
+    )
+    const s = reduce(connecting, { type: 'playback_failed', error: 'stale' })
+    expect(s.playbackFailed).toBe(false)
+  })
+
+  it('is ignored in ending', () => {
+    const ending = apply(activeState(), { type: 'end_requested' })
+    const s = reduce(ending, { type: 'playback_failed', error: 'stale' })
+    expect(s.playbackFailed).toBe(false)
+  })
+
+  it('is ignored after terminal error_occurred reset', () => {
+    const errored = reduce(activeState(), { type: 'error_occurred', error: 'boom' })
+    expect(errored.phase).toBe('idle')
+    const s = reduce(errored, { type: 'playback_failed', error: 'stale' })
+    expect(s.playbackFailed).toBe(false)
+    expect(s.error).toBe('boom')
+  })
+
+  it('is ignored after terminal session_expired reset', () => {
+    const expired = reduce(activeState(), { type: 'session_expired', reason: 'timeout' })
+    expect(expired.phase).toBe('idle')
+    const s = reduce(expired, { type: 'playback_failed', error: 'stale' })
+    expect(s.playbackFailed).toBe(false)
+  })
+
+  it('is ignored after ended (terminal idle)', () => {
+    const ended = apply(activeState(), { type: 'end_requested' }, { type: 'ended' })
+    expect(ended.phase).toBe('idle')
+    const s = reduce(ended, { type: 'playback_failed', error: 'stale' })
     expect(s.playbackFailed).toBe(false)
   })
 })

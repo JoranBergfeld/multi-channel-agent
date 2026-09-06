@@ -296,11 +296,17 @@ export default function VoiceControls({
               dispatch({ type: 'playback_failed', error })
             },
             onPlaybackIntegrityError: (requested: string, received: string) => {
+              void requested; void received
               if (generation !== generationRef.current || !mountedRef.current) return
+              const wasPlaying = stateRef.current.phase === 'speaking'
+              if (wasPlaying) {
+                const elapsed = measuredPlaybackMs()
+                transport.cancelPlayback(elapsed)
+              }
               clearPlaybackTimer()
               dispatch({
                 type: 'playback_failed',
-                error: `Integrity error: expected "${requested}", got "${received}"`,
+                error: 'Playback integrity check failed.',
               })
             },
             onError: (error: string) => {
