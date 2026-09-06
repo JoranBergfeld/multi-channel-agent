@@ -34,6 +34,11 @@ public sealed class VoiceSessionReleaseService(
         if (session is null || session.ParticipantId != participantId)
             return NotFound;
 
+        // A trailing heartbeat after release finds the session Ended. Task 6 lifecycle
+        // vocabulary has no "ended" state — treat it as unavailable, identical to not_found.
+        if (session.Status == VoiceSessionStatus.Ended)
+            return NotFound;
+
         var now = timeProvider.GetUtcNow();
 
         if (session.IsExpired(now))

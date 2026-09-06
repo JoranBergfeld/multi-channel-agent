@@ -164,6 +164,47 @@ public sealed class VoiceSessionReleaseServiceTests
         Assert.Equal(missing.ForcedCloseReason, wrongParticipant.ForcedCloseReason);
     }
 
+    // ── Heartbeat: ended session before expiry treated as not_found ──────────
+
+    [Fact]
+    public async Task Heartbeat_after_release_before_expiry_returns_not_found_with_no_side_effects()
+    {
+        var session = await AdmitAndActivateAlice();
+
+        // Directly persist the Ended state (simulating a prior release) without
+        // going through ReleaseAsync so gateway state is clean and assertions
+        // isolate heartbeat-only behaviour.
+        var active = (await _store.FindByIdAsync(session.Id, CancellationToken.None))!;
+        active.End(_time.GetUtcNow());
+        var persisted = await _store.UpdateAsync(active, VoiceSessionStatus.Active, CancellationToken.None);
+        Assert.True(persisted); // store update succeeded
+
+        var ended = await _store.FindByIdAsync(session.Id, CancellationToken.None);
+        Assert.NotNull(ended);
+        Assert.Equal(VoiceSessionStatus.Ended, ended.Status);
+        Assert.True(_time.GetUtcNow() < ended.ExpiresAt); // before ExpiresAt — expiry path cannot explain not_found
+
+        var terminationsBefore = _gateway.TerminationAttemptCount;
+        var heartbeatAtBefore = ended.LastHeartbeatAt;
+
+        var r = await CreateService().HeartbeatAsync(session.Id, Alice, CancellationToken.None);
+
+        // Ended session is unavailable — identical to missing/wrong-participant
+        Assert.False(r.Renewed);
+        Assert.Equal("not_found", r.LifecycleState);
+        Assert.Null(r.RemainingSeconds);
+        Assert.Null(r.ForcedCloseReason);
+
+        // No provider side effects
+        Assert.Equal(terminationsBefore, _gateway.TerminationAttemptCount);
+
+        // Session not mutated in store
+        var afterHeartbeat = await _store.FindByIdAsync(session.Id, CancellationToken.None);
+        Assert.NotNull(afterHeartbeat);
+        Assert.Equal(VoiceSessionStatus.Ended, afterHeartbeat.Status);
+        Assert.Equal(heartbeatAtBefore, afterHeartbeat.LastHeartbeatAt);
+    }
+
     // ── Heartbeat: optimistic update conflict ────────────────────────────────
 
     [Fact]
