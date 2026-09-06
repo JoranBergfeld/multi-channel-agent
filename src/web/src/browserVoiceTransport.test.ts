@@ -503,6 +503,173 @@ describe('BrowserVoiceTransport', () => {
     expect(callbacks.onError).toHaveBeenCalledWith(expect.stringContaining('failed'))
   })
 
+  // ── Error event schema and redaction ───────────────────────────────────────
+
+  it('parses nested error.message envelope and surfaces a sanitized message', async () => {
+    const BrowserVoiceTransport = await loadModule()
+    const transport = new BrowserVoiceTransport()
+    await transport.prepare()
+    const callbacks = makeCallbacks()
+    transport.connect('v=0\r\n', callbacks, 'vs-1')
+
+    const dc = mockPeerConnection._dataChannel as ReturnType<typeof makeFakeDataChannel>
+    dc.onmessage?.({
+      data: JSON.stringify({
+        type: 'error',
+        error: { message: 'Connection to wss://provider.example.com failed', type: 'transport_error', code: 'media_error' },
+      }),
+    })
+
+    expect(callbacks.onError).toHaveBeenCalledOnce()
+    const errorArg = (callbacks.onError as ReturnType<typeof vi.fn>).mock.calls[0][0]
+    expect(errorArg).not.toContain('provider.example.com')
+    expect(errorArg).toMatch(/voice provider/i)
+  })
+
+  it('does not leak bearer tokens or endpoints from nested error.message to callbacks', async () => {
+    const BrowserVoiceTransport = await loadModule()
+    const transport = new BrowserVoiceTransport()
+    await transport.prepare()
+    const callbacks = makeCallbacks()
+    transport.connect('v=0\r\n', callbacks, 'vs-1')
+
+    const dc = mockPeerConnection._dataChannel as ReturnType<typeof makeFakeDataChannel>
+    dc.onmessage?.({
+      data: JSON.stringify({
+        type: 'error',
+        error: {
+          message: 'Auth failed: Bearer sk-SECRETTOKEN123 at https://api.provider.example.com/v1/realtime',
+          type: 'auth_error',
+          code: 'unauthorized',
+        },
+      }),
+    })
+
+    expect(callbacks.onError).toHaveBeenCalledOnce()
+    const errorArg = (callbacks.onError as ReturnType<typeof vi.fn>).mock.calls[0][0]
+    expect(errorArg).not.toContain('Bearer')
+    expect(errorArg).not.toContain('sk-SECRETTOKEN123')
+    expect(errorArg).not.toContain('api.provider.example.com')
+    expect(errorArg).toMatch(/voice provider/i)
+  })
+
+  it('top-level message error is also sanitized', async () => {
+    const BrowserVoiceTransport = await loadModule()
+    const transport = new BrowserVoiceTransport()
+    await transport.prepare()
+    const callbacks = makeCallbacks()
+    transport.connect('v=0\r\n', callbacks, 'vs-1')
+
+    const dc = mockPeerConnection._dataChannel as ReturnType<typeof makeFakeDataChannel>
+    dc.onmessage?.({
+      data: JSON.stringify({
+        type: 'error',
+        message: 'Something went wrong at https://secret-endpoint.example.com',
+      }),
+    })
+
+    expect(callbacks.onError).toHaveBeenCalledOnce()
+    const errorArg = (callbacks.onError as ReturnType<typeof vi.fn>).mock.calls[0][0]
+    expect(errorArg).not.toContain('secret-endpoint')
+    expect(errorArg).toMatch(/voice provider/i)
+  })
+
+  it('malformed error event (no message or error field) surfaces generic message', async () => {
+    const BrowserVoiceTransport = await loadModule()
+    const transport = new BrowserVoiceTransport()
+    await transport.prepare()
+    const callbacks = makeCallbacks()
+    transport.connect('v=0\r\n', callbacks, 'vs-1')
+
+    const dc = mockPeerConnection._dataChannel as ReturnType<typeof makeFakeDataChannel>
+    dc.onmessage?.({ data: JSON.stringify({ type: 'error' }) })
+
+    expect(callbacks.onError).toHaveBeenCalledOnce()
+    const errorArg = (callbacks.onError as ReturnType<typeof vi.fn>).mock.calls[0][0]
+    expect(errorArg).toMatch(/voice provider/i)
+  })
+
+  // ── setRemoteDescription error handling ───────────────────────────────────
+
+  it('synchronous RTCSessionDescription construction throw calls onError with sanitized message', async () => {
+    globalThis.RTCSessionDescription = function RTCSessionDescription() {
+      throw new Error('Invalid SDP syntax at line 42')
+    } as unknown as typeof globalThis.RTCSessionDescription
+
+    const BrowserVoiceTransport = await loadModule()
+    const transport = new BrowserVoiceTransport()
+    await transport.prepare()
+    const callbacks = makeCallbacks()
+    transport.connect('v=0\r\n', callbacks, 'vs-1')
+
+    expect(callbacks.onError).toHaveBeenCalledOnce()
+    const errorArg = (callbacks.onError as ReturnType<typeof vi.fn>).mock.calls[0][0]
+    expect(errorArg).not.toContain('line 42')
+  })
+
+  it('async setRemoteDescription rejection calls onError with sanitized message', async () => {
+    ;(mockPeerConnection.setRemoteDescription as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new Error('Failed to set remote answer sdp: Called in wrong state: kStable'),
+    )
+
+    const BrowserVoiceTransport = await loadModule()
+    const transport = new BrowserVoiceTransport()
+    await transport.prepare()
+    const callbacks = makeCallbacks()
+    transport.connect('v=0\r\n', callbacks, 'vs-1')
+
+    // Wait for async rejection to propagate
+    await vi.waitFor(() => {
+      expect(callbacks.onError).toHaveBeenCalledOnce()
+    })
+    const errorArg = (callbacks.onError as ReturnType<typeof vi.fn>).mock.calls[0][0]
+    expect(errorArg).not.toContain('kStable')
+  })
+
+  it('stale async setRemoteDescription rejection after disconnect does not call callbacks', async () => {
+    let rejectSrd!: (err: Error) => void
+    ;(mockPeerConnection.setRemoteDescription as ReturnType<typeof vi.fn>).mockImplementation(
+      () => new Promise<void>((_resolve, reject) => { rejectSrd = reject }),
+    )
+
+    const BrowserVoiceTransport = await loadModule()
+    const transport = new BrowserVoiceTransport()
+    await transport.prepare()
+    const callbacks = makeCallbacks()
+    transport.connect('v=0\r\n', callbacks, 'vs-1')
+
+    transport.disconnect()
+    rejectSrd(new Error('SRD failed'))
+
+    // Flush microtask queue
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(callbacks.onError).not.toHaveBeenCalled()
+  })
+
+  it('setRemoteDescription rejection does not produce unhandled promise rejection', async () => {
+    ;(mockPeerConnection.setRemoteDescription as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new Error('SRD failure'),
+    )
+
+    const unhandled = vi.fn()
+    const handler = (event: PromiseRejectionEvent) => { event.preventDefault(); unhandled() }
+    globalThis.addEventListener('unhandledrejection', handler)
+
+    try {
+      const BrowserVoiceTransport = await loadModule()
+      const transport = new BrowserVoiceTransport()
+      await transport.prepare()
+      transport.connect('v=0\r\n', makeCallbacks(), 'vs-1')
+
+      await new Promise((resolve) => setTimeout(resolve, 50))
+
+      expect(unhandled).not.toHaveBeenCalled()
+    } finally {
+      globalThis.removeEventListener('unhandledrejection', handler)
+    }
+  })
+
   // ── Never embeds Azure endpoint/token ─────────────────────────────────────
 
   it('does not embed any Azure endpoint or token in its source', async () => {

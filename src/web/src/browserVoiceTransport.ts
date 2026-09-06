@@ -12,6 +12,16 @@ import type { VoiceTransport, VoiceTransportCallbacks } from './voiceTransport'
  */
 const ICE_GATHERING_TIMEOUT_MS = 10_000
 
+/**
+ * Sanitized error surfaced to callbacks when the voice provider reports an error.
+ * Raw provider messages may contain credentials, endpoints, or tokens and must never
+ * reach callbacks or UI.
+ */
+const SANITIZED_PROVIDER_ERROR = 'Voice provider error.'
+
+/** Sanitized error for SDP negotiation failures. */
+const SDP_NEGOTIATION_ERROR = 'Voice connection failed.'
+
 export class BrowserVoiceTransport implements VoiceTransport {
   private _peer: RTCPeerConnection | null = null
   private _dataChannel: RTCDataChannel | null = null
@@ -92,9 +102,22 @@ export class BrowserVoiceTransport implements VoiceTransport {
     const peer = this._peer
     const dc = this._dataChannel
 
-    // Set remote SDP answer
-    const desc = new RTCSessionDescription({ type: 'answer', sdp: sdpAnswer })
-    void peer.setRemoteDescription(desc)
+    // Set remote SDP answer — wrap both synchronous construction errors and async rejection
+    try {
+      const desc = new RTCSessionDescription({ type: 'answer', sdp: sdpAnswer })
+      peer.setRemoteDescription(desc).catch((err: unknown) => {
+        // Stale rejection after disconnect/reconnect: silently ignore
+        if (this._disconnected || this._callbacks !== callbacks) return
+        void err // consumed — raw SDP detail never forwarded
+        callbacks.onError(SDP_NEGOTIATION_ERROR)
+      })
+    } catch {
+      // Synchronous construction failure
+      if (!this._disconnected && this._callbacks === callbacks) {
+        callbacks.onError(SDP_NEGOTIATION_ERROR)
+      }
+      return
+    }
 
     // Wire data channel events
     dc.onopen = () => {
@@ -319,11 +342,9 @@ export class BrowserVoiceTransport implements VoiceTransport {
       }
 
       case 'error':
-        if (typeof parsed['message'] === 'string') {
-          callbacks.onError(parsed['message'])
-        } else {
-          callbacks.onError('Provider error')
-        }
+        // Documented envelope nests error.message; top-level message is a legacy/fallback shape.
+        // Both are sanitized — raw provider detail must never reach callbacks/UI.
+        callbacks.onError(SANITIZED_PROVIDER_ERROR)
         break
 
       // Unknown event types are silently ignored for forward compatibility

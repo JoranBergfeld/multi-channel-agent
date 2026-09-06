@@ -82,6 +82,31 @@ export default function VoiceControls({
     t.disconnect()
   }
 
+  /**
+   * Terminal failure path: fence heartbeat/callbacks, disconnect transport, dispatch
+   * a terminal error to the reducer, best-effort release the admitted server session,
+   * and notify the parent. Guarantees exactly one release per failure; swallows release
+   * rejection (SQL expiry is the authoritative fallback). No-ops if the generation has
+   * already advanced (stale callback).
+   *
+   * explicitSessionId overrides stateRef when the reducer dispatch has not yet flushed
+   * to the ref (e.g. synchronous connect throw right after dispatch({type:'admitted'})).
+   */
+  function failAndRelease(generation: number, errorMessage: string, explicitSessionId?: string) {
+    if (generation !== generationRef.current || !mountedRef.current) return
+    generationRef.current++
+    clearHeartbeat()
+    dispatch({ type: 'error_occurred', error: errorMessage })
+    transport.disconnect()
+
+    const sid = explicitSessionId ?? stateRef.current.voiceSessionId
+    if (sid) {
+      void releaseVoice(sid, csrfRef.current).catch(() => {})
+    }
+
+    onSessionChangedRef.current(null)
+  }
+
   function startHeartbeat(generation: number) {
     clearHeartbeat()
     heartbeatTimerRef.current = setInterval(() => {
@@ -125,12 +150,9 @@ export default function VoiceControls({
               onSessionChangedRef.current(null)
               break
           }
-        } catch (err) {
-          if (generation !== generationRef.current || !mountedRef.current) return
-          clearHeartbeat()
-          dispatch({ type: 'error_occurred', error: err instanceof Error ? err.message : String(err) })
-          transport.disconnect()
-          onSessionChangedRef.current(null)
+        } catch {
+          // Network/malformed heartbeat failure — server session may still be active
+          failAndRelease(generation, 'Voice session lost.')
         } finally {
           heartbeatInFlightRef.current = false
         }
@@ -206,66 +228,65 @@ export default function VoiceControls({
         })
         onSessionChangedRef.current(result.voiceSessionId!)
 
-        transport.connect(result.sdpAnswer!, {
-          onConnected: () => {
-            if (generation !== generationRef.current || !mountedRef.current) return
-            dispatch({ type: 'connected' })
-            startHeartbeat(generation)
-          },
-          onSpeechStarted: () => {
-            if (generation !== generationRef.current || !mountedRef.current) return
-            const wasPlaying = stateRef.current.phase === 'speaking'
-            dispatch({ type: 'speech_started' })
-            if (wasPlaying) {
-              transport.cancelPlayback(0)
-            }
-          },
-          onSpeechStopped: () => {
-            // No reducer action; speechActive cleared by final_transcript / speech_interrupted
-          },
-          onPartialTranscript: (text: string) => {
-            if (generation !== generationRef.current || !mountedRef.current) return
-            dispatch({ type: 'partial_transcript', text })
-          },
-          onFinalTranscript: (text: string, nativeMessageId: string) => {
-            if (generation !== generationRef.current || !mountedRef.current) return
-            dispatch({ type: 'final_transcript', text, nativeMessageId })
-            onFinalizedRef.current({ text, nativeMessageId })
-          },
-          onPlaybackStarted: () => {
-            if (generation !== generationRef.current || !mountedRef.current) return
-            dispatch({ type: 'playback_started' })
-          },
-          onPlaybackDone: () => {
-            if (generation !== generationRef.current || !mountedRef.current) return
-            dispatch({ type: 'playback_finished' })
-          },
-          onPlaybackFailed: (error: string) => {
-            if (generation !== generationRef.current || !mountedRef.current) return
-            dispatch({ type: 'playback_failed', error })
-          },
-          onPlaybackIntegrityError: (requested: string, received: string) => {
-            if (generation !== generationRef.current || !mountedRef.current) return
-            dispatch({
-              type: 'playback_failed',
-              error: `Integrity error: expected "${requested}", got "${received}"`,
-            })
-          },
-          onError: (error: string) => {
-            if (generation !== generationRef.current || !mountedRef.current) return
-            clearHeartbeat()
-            dispatch({ type: 'error_occurred', error })
-            transport.disconnect()
-            onSessionChangedRef.current(null)
-          },
-          onMicrophoneFailed: (error: string) => {
-            if (generation !== generationRef.current || !mountedRef.current) return
-            clearHeartbeat()
-            dispatch({ type: 'error_occurred', error: `Microphone error: ${error}` })
-            transport.disconnect()
-            onSessionChangedRef.current(null)
-          },
-        }, result.voiceSessionId!)
+        try {
+          transport.connect(result.sdpAnswer!, {
+            onConnected: () => {
+              if (generation !== generationRef.current || !mountedRef.current) return
+              dispatch({ type: 'connected' })
+              startHeartbeat(generation)
+            },
+            onSpeechStarted: () => {
+              if (generation !== generationRef.current || !mountedRef.current) return
+              const wasPlaying = stateRef.current.phase === 'speaking'
+              dispatch({ type: 'speech_started' })
+              if (wasPlaying) {
+                transport.cancelPlayback(0)
+              }
+            },
+            onSpeechStopped: () => {
+              // No reducer action; speechActive cleared by final_transcript / speech_interrupted
+            },
+            onPartialTranscript: (text: string) => {
+              if (generation !== generationRef.current || !mountedRef.current) return
+              dispatch({ type: 'partial_transcript', text })
+            },
+            onFinalTranscript: (text: string, nativeMessageId: string) => {
+              if (generation !== generationRef.current || !mountedRef.current) return
+              dispatch({ type: 'final_transcript', text, nativeMessageId })
+              onFinalizedRef.current({ text, nativeMessageId })
+            },
+            onPlaybackStarted: () => {
+              if (generation !== generationRef.current || !mountedRef.current) return
+              dispatch({ type: 'playback_started' })
+            },
+            onPlaybackDone: () => {
+              if (generation !== generationRef.current || !mountedRef.current) return
+              dispatch({ type: 'playback_finished' })
+            },
+            onPlaybackFailed: (error: string) => {
+              if (generation !== generationRef.current || !mountedRef.current) return
+              dispatch({ type: 'playback_failed', error })
+            },
+            onPlaybackIntegrityError: (requested: string, received: string) => {
+              if (generation !== generationRef.current || !mountedRef.current) return
+              dispatch({
+                type: 'playback_failed',
+                error: `Integrity error: expected "${requested}", got "${received}"`,
+              })
+            },
+            onError: (error: string) => {
+              void error // consumed — raw detail never forwarded
+              failAndRelease(generation, 'Voice connection error.')
+            },
+            onMicrophoneFailed: (error: string) => {
+              void error
+              failAndRelease(generation, 'Microphone error.')
+            },
+          }, result.voiceSessionId!)
+        } catch {
+          // Synchronous transport.connect() throw after successful admission
+          failAndRelease(generation, 'Voice connection failed.', result.voiceSessionId!)
+        }
       } finally {
         startingRef.current = false
         if (abortRef.current === controller) {

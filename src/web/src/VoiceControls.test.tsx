@@ -288,7 +288,7 @@ describe('VoiceControls', () => {
 
       act(() => { transport.simulateError('connection reset') })
 
-      expect(screen.getByRole('alert', { name: 'Voice error' })).toHaveTextContent('connection reset')
+      expect(screen.getByRole('alert', { name: 'Voice error' })).toHaveTextContent('Voice connection error.')
       expect(transport.disconnectCount).toBe(1)
       expect(onVoiceSessionChanged).toHaveBeenCalledWith(null)
       expect(screen.getByRole('button', { name: 'Start Voice' })).toBeEnabled()
@@ -300,7 +300,7 @@ describe('VoiceControls', () => {
 
       act(() => { transport.simulateMicrophoneFailed('NotAllowedError') })
 
-      expect(screen.getByRole('alert', { name: 'Voice error' })).toHaveTextContent('NotAllowedError')
+      expect(screen.getByRole('alert', { name: 'Voice error' })).toHaveTextContent('Microphone error.')
       expect(transport.disconnectCount).toBe(1)
       expect(onVoiceSessionChanged).toHaveBeenCalledWith(null)
     })
@@ -550,7 +550,7 @@ describe('VoiceControls', () => {
       await act(async () => { await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS) })
 
       expect(screen.getByRole('button', { name: 'Start Voice' })).toBeEnabled()
-      expect(screen.getByRole('alert', { name: 'Voice error' })).toHaveTextContent('heartbeat network failure')
+      expect(screen.getByRole('alert', { name: 'Voice error' })).toHaveTextContent('Voice session lost.')
       expect(transport.disconnectCount).toBe(1)
       expect(onVoiceSessionChanged).toHaveBeenCalledWith(null)
     })
@@ -765,5 +765,102 @@ describe('VoiceControls', () => {
 
   it('exports HEARTBEAT_INTERVAL_MS as 30000', () => {
     expect(HEARTBEAT_INTERVAL_MS).toBe(30_000)
+  })
+
+  // ── Server session release on failure ─────────────────────────────────────
+
+  describe('failure session release', () => {
+    it('transport error releases admitted session exactly once', async () => {
+      const { transport, onVoiceSessionChanged } = await renderConnected()
+      onVoiceSessionChanged.mockClear()
+
+      act(() => { transport.simulateError('connection reset') })
+
+      expect(mockReleaseVoice).toHaveBeenCalledOnce()
+      expect(mockReleaseVoice).toHaveBeenCalledWith(SESSION_ID, CSRF)
+      expect(screen.getByRole('button', { name: 'Start Voice' })).toBeEnabled()
+    })
+
+    it('microphone failure releases admitted session exactly once', async () => {
+      const { transport, onVoiceSessionChanged } = await renderConnected()
+      onVoiceSessionChanged.mockClear()
+
+      act(() => { transport.simulateMicrophoneFailed('NotAllowedError') })
+
+      expect(mockReleaseVoice).toHaveBeenCalledOnce()
+      expect(mockReleaseVoice).toHaveBeenCalledWith(SESSION_ID, CSRF)
+      expect(screen.getByRole('button', { name: 'Start Voice' })).toBeEnabled()
+    })
+
+    it('release rejection on failure path does not cause unhandled rejection', async () => {
+      mockReleaseVoice.mockRejectedValue(new Error('release failed'))
+      const { transport } = await renderConnected()
+
+      act(() => { transport.simulateError('connection reset') })
+
+      // Flush microtask queue — no unhandled rejection
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+
+      expect(screen.getByRole('button', { name: 'Start Voice' })).toBeEnabled()
+    })
+
+    it('stale transport error after disconnect does not double-release', async () => {
+      const { transport, onVoiceSessionChanged } = await renderConnected()
+      onVoiceSessionChanged.mockClear()
+
+      // End voice normally (releases)
+      await userEvent.click(screen.getByRole('button', { name: 'End Voice' }))
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Start Voice' })).toBeEnabled())
+
+      mockReleaseVoice.mockClear()
+
+      // Stale error after transport disconnected — FakeVoiceTransport suppresses
+      transport.simulateError('stale error')
+
+      expect(mockReleaseVoice).not.toHaveBeenCalled()
+    })
+
+    it('connect throw after successful admission releases session and shows sanitized error', async () => {
+      mockAdmitVoice.mockResolvedValue(admitted())
+      const props = makeProps()
+      // Make connect throw synchronously
+      vi.spyOn(props.transport, 'connect').mockImplementation(() => {
+        throw new Error('RTCPeerConnection internal failure detail xyz')
+      })
+      render(<VoiceControls {...props} />)
+
+      await userEvent.click(screen.getByRole('button', { name: 'Start Voice' }))
+      await waitFor(() => expect(mockReleaseVoice).toHaveBeenCalledOnce())
+
+      expect(mockReleaseVoice).toHaveBeenCalledWith(SESSION_ID, CSRF)
+      expect(props.onVoiceSessionChanged).toHaveBeenCalledWith(null)
+      expect(screen.getByRole('button', { name: 'Start Voice' })).toBeEnabled()
+    })
+  })
+
+  describe('failure session release (fake timers)', () => {
+    beforeEach(() => { vi.useFakeTimers() })
+    afterEach(() => { vi.useRealTimers() })
+
+    it('heartbeat network failure releases admitted session', async () => {
+      mockHeartbeatVoice.mockRejectedValue(new Error('heartbeat network failure'))
+      await renderConnectedFake()
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS) })
+
+      expect(mockReleaseVoice).toHaveBeenCalledOnce()
+      expect(mockReleaseVoice).toHaveBeenCalledWith(SESSION_ID, CSRF)
+      expect(screen.getByRole('button', { name: 'Start Voice' })).toBeEnabled()
+    })
+
+    it('expired/idle/not_found heartbeat does not release (server already reclaimed)', async () => {
+      mockHeartbeatVoice.mockResolvedValue(expiredHb('timeout'))
+      await renderConnectedFake()
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS) })
+
+      expect(mockReleaseVoice).not.toHaveBeenCalled()
+      expect(screen.getByRole('button', { name: 'Start Voice' })).toBeEnabled()
+    })
   })
 })
