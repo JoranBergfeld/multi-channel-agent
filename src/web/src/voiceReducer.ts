@@ -113,6 +113,7 @@ export function reduce(state: VoiceState, action: VoiceAction): VoiceState {
       return { ...state, phase: 'connecting', voiceSessionId: action.voiceSessionId }
 
     case 'denied':
+      if (state.phase !== 'requesting') return state
       return {
         ...clearEphemeral({ ...state, phase: 'idle' }),
         phase: 'idle',
@@ -170,9 +171,12 @@ export function reduce(state: VoiceState, action: VoiceAction): VoiceState {
       if (state.phase !== 'speaking') return state
       return { ...state, phase: 'listening', playbackFailed: true, error: action.error }
 
-    case 'session_warning':
+    case 'session_warning': {
+      const warningPhases: VoicePhase[] = ['connecting', 'listening', 'speaking']
+      if (!warningPhases.includes(state.phase)) return state
       if (state.warningDelivered) return state
       return { ...state, warning: action.message, warningDelivered: true }
+    }
 
     case 'session_expired':
       return {

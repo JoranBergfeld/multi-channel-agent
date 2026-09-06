@@ -151,6 +151,25 @@ describe('denied', () => {
     const s = reduce({ ...initialState, phase: 'requesting' }, { type: 'denied', reason: 'SomeUnknownReason' })
     expect(s.error).toBeTruthy()
   })
+
+  it('is a referential no-op when in listening phase', () => {
+    const listening = activeState()
+    const s = reduce(listening, { type: 'denied', reason: 'VoiceDisabled' })
+    expect(s).toBe(listening)
+  })
+
+  it('is a referential no-op when in speaking phase', () => {
+    const speaking = apply(activeState(), { type: 'playback_started' })
+    const s = reduce(speaking, { type: 'denied', reason: 'VoiceDisabled' })
+    expect(s).toBe(speaking)
+  })
+
+  it('is a referential no-op when already idle after terminal reset', () => {
+    const ended = apply(activeState(), { type: 'end_requested' }, { type: 'ended' })
+    expect(ended.phase).toBe('idle')
+    const s = reduce(ended, { type: 'denied', reason: 'AlreadyActive' })
+    expect(s).toBe(ended)
+  })
 })
 
 // ── 5. connected ──────────────────────────────────────────────────────────────
@@ -324,6 +343,73 @@ describe('session_warning', () => {
     const afterSecond = reduce(afterFirst, { type: 'session_warning', message: 'second warning' })
     expect(afterSecond.warning).toBe('first warning')
     expect(afterSecond.warningDelivered).toBe(true)
+  })
+
+  it('is ignored when in idle (initial state)', () => {
+    const s = reduce(initialState, { type: 'session_warning', message: 'nearing limit' })
+    expect(s.warning).toBeNull()
+    expect(s.warningDelivered).toBe(false)
+  })
+
+  it('is ignored after session ended', () => {
+    const ended = apply(activeState(), { type: 'end_requested' }, { type: 'ended' })
+    const s = reduce(ended, { type: 'session_warning', message: 'nearing limit' })
+    expect(s.warning).toBeNull()
+    expect(s.warningDelivered).toBe(false)
+  })
+
+  it('is ignored after error_occurred', () => {
+    const errored = reduce(activeState(), { type: 'error_occurred', error: 'boom' })
+    const s = reduce(errored, { type: 'session_warning', message: 'nearing limit' })
+    expect(s.warning).toBeNull()
+  })
+
+  it('is ignored after session_expired', () => {
+    const expired = reduce(activeState(), { type: 'session_expired', reason: 'timeout' })
+    const s = reduce(expired, { type: 'session_warning', message: 'nearing limit' })
+    expect(s.warning).toBeNull()
+  })
+
+  it('is ignored while in requesting phase', () => {
+    const requesting = reduce(initialState, { type: 'start_requested' })
+    const s = reduce(requesting, { type: 'session_warning', message: 'nearing limit' })
+    expect(s.warning).toBeNull()
+  })
+
+  it('is ignored while in ending phase', () => {
+    const ending = reduce(activeState(), { type: 'end_requested' })
+    const s = reduce(ending, { type: 'session_warning', message: 'nearing limit' })
+    expect(s.warning).toBeNull()
+  })
+
+  it('is accepted in connecting phase when session ID is present', () => {
+    const connecting = apply(
+      initialState,
+      { type: 'start_requested' },
+      { type: 'admitted', voiceSessionId: 'vs-1', sdpAnswer: 'v=0\r\n...' },
+    )
+    expect(connecting.phase).toBe('connecting')
+    const s = reduce(connecting, { type: 'session_warning', message: 'nearing limit' })
+    expect(s.warning).toBe('nearing limit')
+    expect(s.warningDelivered).toBe(true)
+  })
+
+  it('is accepted in speaking phase', () => {
+    const speaking = apply(activeState(), { type: 'playback_started' })
+    const s = reduce(speaking, { type: 'session_warning', message: 'nearing limit' })
+    expect(s.warning).toBe('nearing limit')
+    expect(s.warningDelivered).toBe(true)
+  })
+
+  it('resets warningDelivered on start_requested so a new session can receive a warning', () => {
+    const withWarning = reduce(activeState(), { type: 'session_warning', message: 'nearing limit' })
+    expect(withWarning.warningDelivered).toBe(true)
+    const restarted = reduce(withWarning, { type: 'start_requested' })
+    expect(restarted.warningDelivered).toBe(false)
+    // A fresh listening session should accept the next warning
+    const listeningAgain = apply(restarted, { type: 'admitted', voiceSessionId: 'vs-2', sdpAnswer: 'v=0' }, { type: 'connected' })
+    const warningAgain = reduce(listeningAgain, { type: 'session_warning', message: 'nearing limit again' })
+    expect(warningAgain.warning).toBe('nearing limit again')
   })
 })
 
