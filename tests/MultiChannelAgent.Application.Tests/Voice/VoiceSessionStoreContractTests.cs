@@ -281,34 +281,62 @@ public abstract class VoiceSessionStoreContractTests
         Assert.Empty(results);
     }
 
-    // ── Owner query ──────────────────────────────────────────────────────────
+    // ── Stale-owner query ───────────────────────────────────────────────────
 
     [Fact]
-    public async Task FindByOwnerInstance_returns_sessions_for_owner()
+    public async Task FindStaleOwnerSessions_returns_other_owner_past_cutoff()
     {
         var store = CreateStore();
-        var sessionA = MakeSession(owner: OwnerA);
-        var sessionB = MakeSession(participant: ParticipantB, owner: OwnerB);
-        await store.TryAdmitAsync(sessionA, DefaultCap, CancellationToken.None);
-        await store.TryAdmitAsync(sessionB, DefaultCap, CancellationToken.None);
+        var session = MakeSession(participant: ParticipantB, owner: OwnerB);
+        await store.TryAdmitAsync(session, DefaultCap, CancellationToken.None);
 
-        var results = await store.FindByOwnerInstanceAsync(OwnerA, CancellationToken.None);
+        // OwnerB heartbeat at Now; cutoff at Now + 1 minute → heartbeat is stale
+        var results = await store.FindStaleOwnerSessionsAsync(
+            OwnerA, Now + TimeSpan.FromMinutes(1), CancellationToken.None);
 
         Assert.Single(results);
-        Assert.Equal(sessionA.Id, results[0].Id);
+        Assert.Equal(session.Id, results[0].Id);
     }
 
     [Fact]
-    public async Task FindByOwnerInstance_excludes_ended_sessions()
+    public async Task FindStaleOwnerSessions_excludes_current_owner()
     {
         var store = CreateStore();
         var session = MakeSession(owner: OwnerA);
         await store.TryAdmitAsync(session, DefaultCap, CancellationToken.None);
 
+        var results = await store.FindStaleOwnerSessionsAsync(
+            OwnerA, Now + TimeSpan.FromMinutes(1), CancellationToken.None);
+
+        Assert.Empty(results);
+    }
+
+    [Fact]
+    public async Task FindStaleOwnerSessions_excludes_fresh_other_owner()
+    {
+        var store = CreateStore();
+        var session = MakeSession(participant: ParticipantB, owner: OwnerB);
+        await store.TryAdmitAsync(session, DefaultCap, CancellationToken.None);
+
+        // OwnerB heartbeat at Now; cutoff at Now − 1 minute → heartbeat is fresh
+        var results = await store.FindStaleOwnerSessionsAsync(
+            OwnerA, Now - TimeSpan.FromMinutes(1), CancellationToken.None);
+
+        Assert.Empty(results);
+    }
+
+    [Fact]
+    public async Task FindStaleOwnerSessions_excludes_ended_sessions()
+    {
+        var store = CreateStore();
+        var session = MakeSession(participant: ParticipantB, owner: OwnerB);
+        await store.TryAdmitAsync(session, DefaultCap, CancellationToken.None);
+
         session.End(Now + TimeSpan.FromMinutes(1));
         await store.UpdateAsync(session, VoiceSessionStatus.Negotiating, CancellationToken.None);
 
-        var results = await store.FindByOwnerInstanceAsync(OwnerA, CancellationToken.None);
+        var results = await store.FindStaleOwnerSessionsAsync(
+            OwnerA, Now + TimeSpan.FromMinutes(2), CancellationToken.None);
 
         Assert.Empty(results);
     }

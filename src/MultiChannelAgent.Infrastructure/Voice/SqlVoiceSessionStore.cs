@@ -143,14 +143,17 @@ public sealed class SqlVoiceSessionStore(MultiChannelAgentDbContext db) : IVoice
         return entities.Select(ToDomain).ToList();
     }
 
-    public async Task<IReadOnlyList<VoiceSession>> FindByOwnerInstanceAsync(
-        string ownerInstanceId, CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<VoiceSession>> FindStaleOwnerSessionsAsync(
+        string currentOwnerInstanceId, DateTimeOffset heartbeatCutoff, CancellationToken cancellationToken)
     {
         var endedStatus = VoiceSessionStatus.Ended.ToString();
+        var cutoffTicks = heartbeatCutoff.UtcTicks;
 
         var entities = await db.VoiceSessions
             .AsNoTracking()
-            .Where(e => e.Status != endedStatus && e.OwnerInstanceId == ownerInstanceId)
+            .Where(e => e.Status != endedStatus)
+            .Where(e => e.OwnerInstanceId != currentOwnerInstanceId)
+            .Where(e => e.LastHeartbeatAtTicks < cutoffTicks)
             .ToListAsync(cancellationToken);
 
         return entities.Select(ToDomain).ToList();

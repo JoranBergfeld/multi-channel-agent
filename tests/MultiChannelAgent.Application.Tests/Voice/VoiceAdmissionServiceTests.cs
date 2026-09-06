@@ -244,8 +244,9 @@ public sealed class VoiceAdmissionServiceTests
         public Task<IReadOnlyList<VoiceSession>> FindExpiredOrIdleAsync(DateTimeOffset now, CancellationToken ct) =>
             inner.FindExpiredOrIdleAsync(now, ct);
 
-        public Task<IReadOnlyList<VoiceSession>> FindByOwnerInstanceAsync(string ownerInstanceId, CancellationToken ct) =>
-            inner.FindByOwnerInstanceAsync(ownerInstanceId, ct);
+        public Task<IReadOnlyList<VoiceSession>> FindStaleOwnerSessionsAsync(
+            string currentOwnerInstanceId, DateTimeOffset heartbeatCutoff, CancellationToken ct) =>
+            inner.FindStaleOwnerSessionsAsync(currentOwnerInstanceId, heartbeatCutoff, ct);
     }
 
     /// <summary>
@@ -277,8 +278,9 @@ public sealed class VoiceAdmissionServiceTests
         public Task<IReadOnlyList<VoiceSession>> FindExpiredOrIdleAsync(DateTimeOffset now, CancellationToken ct) =>
             inner.FindExpiredOrIdleAsync(now, ct);
 
-        public Task<IReadOnlyList<VoiceSession>> FindByOwnerInstanceAsync(string ownerInstanceId, CancellationToken ct) =>
-            inner.FindByOwnerInstanceAsync(ownerInstanceId, ct);
+        public Task<IReadOnlyList<VoiceSession>> FindStaleOwnerSessionsAsync(
+            string currentOwnerInstanceId, DateTimeOffset heartbeatCutoff, CancellationToken ct) =>
+            inner.FindStaleOwnerSessionsAsync(currentOwnerInstanceId, heartbeatCutoff, ct);
     }
 
     /// <summary>
@@ -318,8 +320,9 @@ public sealed class VoiceAdmissionServiceTests
         public Task<IReadOnlyList<VoiceSession>> FindExpiredOrIdleAsync(DateTimeOffset now, CancellationToken ct) =>
             inner.FindExpiredOrIdleAsync(now, ct);
 
-        public Task<IReadOnlyList<VoiceSession>> FindByOwnerInstanceAsync(string ownerInstanceId, CancellationToken ct) =>
-            inner.FindByOwnerInstanceAsync(ownerInstanceId, ct);
+        public Task<IReadOnlyList<VoiceSession>> FindStaleOwnerSessionsAsync(
+            string currentOwnerInstanceId, DateTimeOffset heartbeatCutoff, CancellationToken ct) =>
+            inner.FindStaleOwnerSessionsAsync(currentOwnerInstanceId, heartbeatCutoff, ct);
     }
 
     /// <summary>

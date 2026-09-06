@@ -77,14 +77,17 @@ public sealed class InMemoryVoiceSessionStore : IVoiceSessionStore
         }
     }
 
-    public Task<IReadOnlyList<VoiceSession>> FindByOwnerInstanceAsync(string ownerInstanceId, CancellationToken cancellationToken)
+    public Task<IReadOnlyList<VoiceSession>> FindStaleOwnerSessionsAsync(
+        string currentOwnerInstanceId, DateTimeOffset heartbeatCutoff, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
 
         lock (_lock)
         {
             var result = _sessions.Values
-                .Where(s => s.Status != VoiceSessionStatus.Ended && s.OwnerInstanceId == ownerInstanceId)
+                .Where(s => s.Status != VoiceSessionStatus.Ended)
+                .Where(s => s.OwnerInstanceId != currentOwnerInstanceId)
+                .Where(s => s.LastHeartbeatAt < heartbeatCutoff)
                 .Select(Clone)
                 .ToList();
 

@@ -33,6 +33,10 @@ public interface IVoiceSessionStore
     /// </summary>
     Task<IReadOnlyList<VoiceSession>> FindExpiredOrIdleAsync(DateTimeOffset now, CancellationToken cancellationToken);
 
-    /// <summary>Returns all non-ended sessions owned by <paramref name="ownerInstanceId"/>.</summary>
-    Task<IReadOnlyList<VoiceSession>> FindByOwnerInstanceAsync(string ownerInstanceId, CancellationToken cancellationToken);
+    /// <summary>
+    /// Returns non-ended sessions owned by instances other than <paramref name="currentOwnerInstanceId"/>
+    /// whose <see cref="VoiceSession.LastHeartbeatAt"/> is strictly before <paramref name="heartbeatCutoff"/>.
+    /// </summary>
+    Task<IReadOnlyList<VoiceSession>> FindStaleOwnerSessionsAsync(
+        string currentOwnerInstanceId, DateTimeOffset heartbeatCutoff, CancellationToken cancellationToken);
 }
