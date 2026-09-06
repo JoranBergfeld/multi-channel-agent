@@ -58,7 +58,7 @@ public sealed class VoiceSessionReleaseServiceTests
         var r = await CreateService().HeartbeatAsync(session.Id, Alice, CancellationToken.None);
 
         Assert.True(r.Renewed);
-        Assert.Equal("active", r.LifecycleState);
+        Assert.Equal(HeartbeatLifecycleState.Active, r.LifecycleState);
         Assert.Equal(1770, r.RemainingSeconds); // 30 min − 30 s = 1770 s
         Assert.Null(r.ForcedCloseReason);
     }
@@ -74,12 +74,12 @@ public sealed class VoiceSessionReleaseServiceTests
         var svc = CreateService(idleTimeout: TimeSpan.FromMinutes(30));
         var first = await svc.HeartbeatAsync(session.Id, Alice, CancellationToken.None);
         Assert.True(first.Renewed);
-        Assert.Equal("warning_due", first.LifecycleState);
+        Assert.Equal(HeartbeatLifecycleState.WarningDue, first.LifecycleState);
 
         _time.Advance(TimeSpan.FromSeconds(30));
         var second = await svc.HeartbeatAsync(session.Id, Alice, CancellationToken.None);
         Assert.True(second.Renewed);
-        Assert.Equal("active", second.LifecycleState);
+        Assert.Equal(HeartbeatLifecycleState.Active, second.LifecycleState);
 
         // WarningIssued persisted
         var loaded = await _store.FindByIdAsync(session.Id, CancellationToken.None);
@@ -98,7 +98,7 @@ public sealed class VoiceSessionReleaseServiceTests
         var r = await CreateService().HeartbeatAsync(session.Id, Alice, CancellationToken.None);
 
         Assert.False(r.Renewed);
-        Assert.Equal("expired", r.LifecycleState);
+        Assert.Equal(HeartbeatLifecycleState.Expired, r.LifecycleState);
         Assert.Equal("expired", r.ForcedCloseReason);
         Assert.Null(r.RemainingSeconds);
     }
@@ -114,7 +114,7 @@ public sealed class VoiceSessionReleaseServiceTests
         var r = await CreateService().HeartbeatAsync(session.Id, Alice, CancellationToken.None);
 
         Assert.False(r.Renewed);
-        Assert.Equal("idle", r.LifecycleState);
+        Assert.Equal(HeartbeatLifecycleState.Idle, r.LifecycleState);
         Assert.Equal("idle", r.ForcedCloseReason);
         Assert.Null(r.RemainingSeconds);
     }
@@ -128,7 +128,7 @@ public sealed class VoiceSessionReleaseServiceTests
             new VoiceSessionId(Guid.NewGuid()), Alice, CancellationToken.None);
 
         Assert.False(r.Renewed);
-        Assert.Equal("not_found", r.LifecycleState);
+        Assert.Equal(HeartbeatLifecycleState.NotFound, r.LifecycleState);
         Assert.Null(r.RemainingSeconds);
         Assert.Null(r.ForcedCloseReason);
     }
@@ -143,7 +143,7 @@ public sealed class VoiceSessionReleaseServiceTests
         var r = await CreateService().HeartbeatAsync(session.Id, Bob, CancellationToken.None);
 
         Assert.False(r.Renewed);
-        Assert.Equal("not_found", r.LifecycleState);
+        Assert.Equal(HeartbeatLifecycleState.NotFound, r.LifecycleState);
     }
 
     // ── Heartbeat: missing and wrong participant indistinguishable ────────────
@@ -191,7 +191,7 @@ public sealed class VoiceSessionReleaseServiceTests
 
         // Ended session is unavailable — identical to missing/wrong-participant
         Assert.False(r.Renewed);
-        Assert.Equal("not_found", r.LifecycleState);
+        Assert.Equal(HeartbeatLifecycleState.NotFound, r.LifecycleState);
         Assert.Null(r.RemainingSeconds);
         Assert.Null(r.ForcedCloseReason);
 

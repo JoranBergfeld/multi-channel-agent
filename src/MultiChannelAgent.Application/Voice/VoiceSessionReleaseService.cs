@@ -19,7 +19,7 @@ public sealed class VoiceSessionReleaseService(
     private const int MaxCasRetries = 3;
 
     private static readonly HeartbeatResult NotFound =
-        new(Renewed: false, LifecycleState: "not_found", RemainingSeconds: null, ForcedCloseReason: null);
+        new(Renewed: false, LifecycleState: HeartbeatLifecycleState.NotFound, RemainingSeconds: null, ForcedCloseReason: null);
 
     /// <summary>
     /// Records a heartbeat for the given session if it belongs to <paramref name="participantId"/>.
@@ -42,14 +42,14 @@ public sealed class VoiceSessionReleaseService(
         var now = timeProvider.GetUtcNow();
 
         if (session.IsExpired(now))
-            return new HeartbeatResult(Renewed: false, LifecycleState: "expired",
+            return new HeartbeatResult(Renewed: false, LifecycleState: HeartbeatLifecycleState.Expired,
                 RemainingSeconds: null, ForcedCloseReason: "expired");
 
         if (session.IsIdle(now))
-            return new HeartbeatResult(Renewed: false, LifecycleState: "idle",
+            return new HeartbeatResult(Renewed: false, LifecycleState: HeartbeatLifecycleState.Idle,
                 RemainingSeconds: null, ForcedCloseReason: "idle");
 
-        var lifecycleState = session.ShouldWarn(now) ? "warning_due" : "active";
+        var lifecycleState = session.ShouldWarn(now) ? HeartbeatLifecycleState.WarningDue : HeartbeatLifecycleState.Active;
 
         session.RecordHeartbeat(now, idleTimeout);
         var updated = await store.UpdateAsync(session, VoiceSessionStatus.Active, ct);

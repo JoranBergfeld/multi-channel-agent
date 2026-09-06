@@ -26,6 +26,13 @@ public sealed record AdmitVoiceHttpResponse(
 /// <summary>Wire shape for <c>POST /api/voice/heartbeat</c> and <c>POST /api/voice/release</c> requests.</summary>
 public sealed record VoiceSessionIdHttpRequest(string? VoiceSessionId);
 
+/// <summary>Wire shape for <c>POST /api/voice/heartbeat</c> response.</summary>
+public sealed record HeartbeatHttpResponse(
+    bool Renewed,
+    string LifecycleState,
+    int? RemainingSeconds,
+    string? ForcedCloseReason);
+
 /// <summary>Maps the voice session lifecycle HTTP endpoints.</summary>
 public static class VoiceEndpoints
 {
@@ -92,12 +99,25 @@ public static class VoiceEndpoints
             var participantId = user.GetParticipantId();
             var result = await releaseService.HeartbeatAsync(sessionId, participantId, cancellationToken);
 
-            if (result.LifecycleState == "not_found")
+            if (result.LifecycleState == HeartbeatLifecycleState.NotFound)
             {
                 return Results.NotFound();
             }
 
-            return Results.Ok(result);
+            var lifecycleStateWire = result.LifecycleState switch
+            {
+                HeartbeatLifecycleState.Active => "active",
+                HeartbeatLifecycleState.WarningDue => "warning_due",
+                HeartbeatLifecycleState.Expired => "expired",
+                HeartbeatLifecycleState.Idle => "idle",
+                _ => throw new ArgumentOutOfRangeException(nameof(result.LifecycleState), result.LifecycleState, "Unexpected lifecycle state."),
+            };
+
+            return Results.Ok(new HeartbeatHttpResponse(
+                Renewed: result.Renewed,
+                LifecycleState: lifecycleStateWire,
+                RemainingSeconds: result.RemainingSeconds,
+                ForcedCloseReason: result.ForcedCloseReason));
         }).AddEndpointFilter<AntiforgeryEndpointFilter>();
 
         // ── Release ──────────────────────────────────────────────────────────

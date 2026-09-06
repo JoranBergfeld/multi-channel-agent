@@ -6,6 +6,6 @@ namespace MultiChannelAgent.Application.Voice;
 /// </summary>
 public sealed record HeartbeatResult(
     bool Renewed,
-    string LifecycleState,
+    HeartbeatLifecycleState LifecycleState,
     int? RemainingSeconds,
     string? ForcedCloseReason);
