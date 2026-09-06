@@ -110,8 +110,34 @@ public sealed class InventoryAgentTeamsHandlerTests
         Assert.Empty(inboxStore.AcceptedTurns);
     }
 
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    public async Task Messages_with_a_missing_or_blank_aad_object_id_are_ignored_without_saving_or_accepting_anything(
+        string? aadObjectId)
+    {
+        var referenceStore = new CapturingTeamsConversationReferenceStore();
+        var participantStore = new CapturingParticipantStore();
+        var bindingStore = new StubFoundryConversationBindingStore();
+        var inboxStore = new CapturingInboxStore();
+        var handler = new InventoryAgentTeamsHandler(referenceStore, participantStore, bindingStore, inboxStore, new FakeTimeProvider());
+        var activity = CreateMessageActivity(
+            aadObjectId: aadObjectId,
+            conversationType: ConversationTypes.Personal,
+            conversationId: "teams-conversation-4",
+            text: "ignore me",
+            tenantId: "22222222-2222-2222-2222-222222222222");
+
+        await handler.OnTurnAsync(new TurnContext(new StubChannelAdapter(), activity, new ClaimsIdentity()), CancellationToken.None);
+
+        Assert.Null(referenceStore.SavedConversationId);
+        Assert.Empty(participantStore.UpsertedParticipants);
+        Assert.Null(bindingStore.ParticipantId);
+        Assert.Empty(inboxStore.AcceptedTurns);
+    }
+
     private static Activity CreateMessageActivity(
-        string aadObjectId,
+        string? aadObjectId,
         string conversationType,
         string conversationId,
         string text,
