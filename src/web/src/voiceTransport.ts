@@ -52,7 +52,9 @@ export interface VoiceTransport {
   /**
    * Establishes the voice session using the SDP answer from the server orchestrator.
    * All callbacks are delivered after connect() returns until disconnect() is called.
-   * Calling connect() again starts a fresh session; previous callbacks are discarded.
+   * Calling connect() again without an intervening disconnect() starts a fresh session;
+   * previous callbacks are discarded and become unreachable — only the new callbacks
+   * receive events. disconnectCount is not incremented by an implicit replacement.
    */
   connect(sdpAnswer: string, callbacks: VoiceTransportCallbacks): void
 
@@ -78,7 +80,11 @@ export interface VoiceTransport {
    *   - content_index: 0 (invariant)
    *   - audio_end_ms: measuredPlayedDurationMs (must be finite and non-negative)
    *
-   * Throws RangeError if measuredPlayedDurationMs is not finite or is negative.
+   * Requires connected transport. Throws a plain Error with message
+   * 'cancelPlayback requires connected transport' if the transport is not connected.
+   * State is checked before argument validity; a disconnected call always throws the
+   * InvalidState error regardless of the argument value.
+   * Throws RangeError if measuredPlayedDurationMs is not finite or is negative (when connected).
    */
   cancelPlayback(measuredPlayedDurationMs: number): void
 
@@ -89,6 +95,9 @@ export interface VoiceTransport {
    * set to the exact canonical text. It then listens for response.audio_transcript.done and
    * verifies that transcript equals the requested text. A mismatch fires
    * onPlaybackIntegrityError and stops playback.
+   *
+   * Requires connected transport. Throws a plain Error with message
+   * 'speakCanonical requires connected transport' if the transport is not connected.
    *
    * The UI always keeps the canonical summary text visible regardless of playback state.
    */

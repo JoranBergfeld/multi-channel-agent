@@ -279,32 +279,83 @@ describe('FakeVoiceTransport', () => {
     expect(transport.cancelPlaybackCalls).toEqual([0])
   })
 
-  // ── Pre-connect / post-disconnect record-only behavior ─────────────────────
+  // ── Connected-only commands: cancelPlayback and speakCanonical ────────────
 
-  it('speakCanonical before connect records text without error', () => {
+  it('cancelPlayback throws InvalidState if not connected (before connect)', () => {
     const transport = new FakeVoiceTransport()
-    transport.speakCanonical('early text')
-    expect(transport.lastSpokenText).toBe('early text')
+    expect(() => transport.cancelPlayback(100)).toThrow(
+      'cancelPlayback requires connected transport',
+    )
+    expect(transport.cancelPlaybackCalls).toEqual([])
   })
 
-  it('speakCanonical after disconnect records text without error', () => {
+  it('cancelPlayback throws InvalidState if not connected (after disconnect)', () => {
     const [transport] = connected()
     transport.disconnect()
-    transport.speakCanonical('post disconnect')
-    expect(transport.lastSpokenText).toBe('post disconnect')
+    expect(() => transport.cancelPlayback(200)).toThrow(
+      'cancelPlayback requires connected transport',
+    )
+    expect(transport.cancelPlaybackCalls).toEqual([])
   })
 
-  it('cancelPlayback before connect records call (no connection required for fake)', () => {
+  it('cancelPlayback state guard fires before argument validation', () => {
     const transport = new FakeVoiceTransport()
-    transport.cancelPlayback(100)
-    expect(transport.cancelPlaybackCalls).toEqual([100])
+    // disconnected: InvalidState error, not RangeError, even with invalid arg
+    expect(() => transport.cancelPlayback(-1)).toThrow('cancelPlayback requires connected transport')
+    expect(transport.cancelPlaybackCalls).toEqual([])
   })
 
-  it('cancelPlayback after disconnect records call', () => {
+  it('speakCanonical throws InvalidState if not connected (before connect)', () => {
+    const transport = new FakeVoiceTransport()
+    expect(() => transport.speakCanonical('early text')).toThrow(
+      'speakCanonical requires connected transport',
+    )
+    expect(transport.spokenTexts).toEqual([])
+  })
+
+  it('speakCanonical throws InvalidState if not connected (after disconnect)', () => {
     const [transport] = connected()
     transport.disconnect()
-    transport.cancelPlayback(200)
-    expect(transport.cancelPlaybackCalls).toEqual([200])
+    expect(() => transport.speakCanonical('post disconnect')).toThrow(
+      'speakCanonical requires connected transport',
+    )
+    expect(transport.spokenTexts).toEqual([])
+  })
+
+  // ── Connect-over-connect (no intervening disconnect) ───────────────────────
+
+  it('connect-over-connect discards old callbacks; only new callbacks receive events', () => {
+    const transport = new FakeVoiceTransport()
+    const firstCallbacks = makeCallbacks()
+    transport.connect('v=0\r\nfirst\r\n', firstCallbacks)
+    transport.simulateConnected() // goes to firstCallbacks
+
+    const secondCallbacks = makeCallbacks()
+    transport.connect('v=0\r\nsecond\r\n', secondCallbacks)
+    transport.simulateConnected()
+    transport.simulateSpeechStarted()
+
+    // Old callbacks receive no events after re-connect
+    expect(firstCallbacks.onConnected).toHaveBeenCalledOnce()
+    expect(firstCallbacks.onSpeechStarted).not.toHaveBeenCalled()
+
+    // New callbacks receive all subsequent events
+    expect(secondCallbacks.onConnected).toHaveBeenCalledOnce()
+    expect(secondCallbacks.onSpeechStarted).toHaveBeenCalledOnce()
+  })
+
+  it('connect-over-connect increments connectCount', () => {
+    const transport = new FakeVoiceTransport()
+    transport.connect('v=0\r\nfirst\r\n', makeCallbacks())
+    transport.connect('v=0\r\nsecond\r\n', makeCallbacks())
+    expect(transport.connectCount).toBe(2)
+  })
+
+  it('connect-over-connect does not increment disconnectCount', () => {
+    const transport = new FakeVoiceTransport()
+    transport.connect('v=0\r\nfirst\r\n', makeCallbacks())
+    transport.connect('v=0\r\nsecond\r\n', makeCallbacks())
+    expect(transport.disconnectCount).toBe(0)
   })
 
   // ── Simulate helpers do nothing before connect or after disconnect ──────────

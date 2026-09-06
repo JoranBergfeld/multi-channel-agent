@@ -61,6 +61,9 @@ export class FakeVoiceTransport implements VoiceTransport {
   }
 
   cancelPlayback(measuredPlayedDurationMs: number): void {
+    if (!this.isConnected) {
+      throw new Error('cancelPlayback requires connected transport')
+    }
     if (!Number.isFinite(measuredPlayedDurationMs) || measuredPlayedDurationMs < 0) {
       throw new RangeError(
         `cancelPlayback: measuredPlayedDurationMs must be finite and non-negative, got ${measuredPlayedDurationMs}`,
@@ -70,6 +73,9 @@ export class FakeVoiceTransport implements VoiceTransport {
   }
 
   speakCanonical(text: string): void {
+    if (!this.isConnected) {
+      throw new Error('speakCanonical requires connected transport')
+    }
     this.spokenTexts.push(text)
   }
 
