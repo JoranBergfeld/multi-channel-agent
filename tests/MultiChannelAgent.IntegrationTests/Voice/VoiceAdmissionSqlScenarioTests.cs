@@ -191,10 +191,10 @@ public sealed class VoiceAdmissionSqlScenarioTests : SqlIntegrationTestBase
         }
     }
 
-    // ── Scenario 4: full lifecycle no cap leakage ────────────────────────────
+    // ── Scenario 4: full lifecycle reclaims all slots ────────────────────────
 
     [SkippableFact]
-    public async Task Full_lifecycle_no_cap_leakage_admit_release_readmit()
+    public async Task Full_lifecycle_reclaims_all_slots()
     {
         Skip.IfNot(DockerAvailable, SkipReason);
 
@@ -206,9 +206,9 @@ public sealed class VoiceAdmissionSqlScenarioTests : SqlIntegrationTestBase
         var time = new FakeTimeProvider(Epoch);
         var options = EnabledOptions(cap);
 
-        // Admit N participants at cap.
+        // Admit cap participants; retain their session IDs and participant ownership.
         var participants = Enumerable.Range(0, cap).Select(_ => NewParticipant()).ToArray();
-        var sessions = new VoiceSession[cap];
+        var sessionIds = new VoiceSessionId[cap];
 
         for (var i = 0; i < cap; i++)
         {
@@ -218,10 +218,7 @@ public sealed class VoiceAdmissionSqlScenarioTests : SqlIntegrationTestBase
             var result = await svc.AdmitAsync(
                 participants[i], new ChannelConversationId($"lifecycle-{i}"), "offer", CancellationToken.None);
             Assert.True(result.Admitted, $"Participant {i} admission must succeed.");
-
-            var found = await store.FindByIdAsync(result.VoiceSessionId!.Value, CancellationToken.None);
-            Assert.NotNull(found);
-            sessions[i] = found;
+            sessionIds[i] = result.VoiceSessionId!.Value;
         }
 
         // Verify occupied count equals cap.
@@ -231,29 +228,31 @@ public sealed class VoiceAdmissionSqlScenarioTests : SqlIntegrationTestBase
             Assert.Equal(cap, occupied);
         }
 
-        // Release each session using its actual participant's session.
+        // Release each session through VoiceSessionReleaseService so the provider is terminated.
         for (var i = 0; i < cap; i++)
         {
             using var db = CreateSqlContext(connectionString);
             var store = new SqlVoiceSessionStore(db);
-            sessions[i].End(Epoch + TimeSpan.FromMinutes(i + 1));
-            var released = await store.UpdateAsync(sessions[i], VoiceSessionStatus.Active, CancellationToken.None);
-            Assert.True(released, $"Session {i} release must succeed.");
+            var svc = new VoiceSessionReleaseService(store, gateway, time, options.IdleTimeout);
+            await svc.ReleaseAsync(sessionIds[i], participants[i], CancellationToken.None);
         }
 
-        // Verify each session is Ended, non-occupying, provider terminated.
+        // Verify each session is Ended, non-occupying, and the gateway no longer owns its handle.
         for (var i = 0; i < cap; i++)
         {
             using var db = CreateSqlContext(connectionString);
             var store = new SqlVoiceSessionStore(db);
-            var ended = await store.FindByIdAsync(sessions[i].Id, CancellationToken.None);
+            var ended = await store.FindByIdAsync(sessionIds[i], CancellationToken.None);
             Assert.NotNull(ended);
             Assert.Equal(VoiceSessionStatus.Ended, ended.Status);
             Assert.False(ended.OccupiesSlot);
+            Assert.False(gateway.OwnsSession(ended.ControlSessionId!),
+                "Gateway must not own a session after release.");
         }
 
-        // All gateway sessions were terminated by the admission service's activation.
+        // Provider terminated all sessions: termination attempts exactly cap, no active sessions remain.
         Assert.Equal(cap, gateway.TerminationAttemptCount);
+        Assert.Equal(0, gateway.ActiveSessionCount);
 
         // Verify zero occupied slots remain.
         using (var verify = CreateSqlContext(connectionString))
@@ -274,16 +273,12 @@ public sealed class VoiceAdmissionSqlScenarioTests : SqlIntegrationTestBase
             Assert.True(result.Admitted, $"New participant {i} admission must succeed.");
         }
 
-        // Durable occupied count equals N.
+        // Durable occupied count equals N, no Negotiating leaks.
         using (var verify = CreateSqlContext(connectionString))
         {
             var finalOccupied = await verify.VoiceSessions.AsNoTracking().CountAsync(e => e.OccupiesSlot);
             Assert.Equal(cap, finalOccupied);
-        }
 
-        // No leaked Negotiating rows remain.
-        using (var verify = CreateSqlContext(connectionString))
-        {
             var negotiating = await verify.VoiceSessions.AsNoTracking()
                 .CountAsync(e => e.Status == nameof(VoiceSessionStatus.Negotiating));
             Assert.Equal(0, negotiating);
