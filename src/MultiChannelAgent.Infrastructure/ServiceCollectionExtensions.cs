@@ -2,11 +2,14 @@ using Azure.Core;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using MultiChannelAgent.Application.Channels.Email;
 using MultiChannelAgent.Application.Authentication;
 using MultiChannelAgent.Application.Inventories;
 using MultiChannelAgent.Application.Turns;
 using MultiChannelAgent.Application.Voice;
+using MultiChannelAgent.Domain.Turns;
 using MultiChannelAgent.Infrastructure.Authentication;
+using MultiChannelAgent.Infrastructure.Channels.Email;
 using MultiChannelAgent.Infrastructure.Inventories;
 using MultiChannelAgent.Infrastructure.Persistence;
 using MultiChannelAgent.Infrastructure.Turns;
@@ -33,9 +36,14 @@ public static class ServiceCollectionExtensions
         services.AddScoped<ITurnProgressEventStore, SqlTurnProgressEventStore>();
         services.AddScoped<ILeaseCoordinator, SqlLeaseCoordinator>();
         services.AddKeyedScoped<IDeliverySender, LoggingDeliverySender>("web");
+        services.AddKeyedScoped<IDeliverySender, GraphEmailDeliverySender>(EmailChannel.Name);
         services.AddScoped<IDeliverySender, ChannelRoutingDeliverySender>();
         services.AddSingleton(TimeProvider.System);
         services.AddScoped<IModelBoundary, ScriptedModelBoundary>();
+        services.AddOptions<EmailChannelOptions>()
+            .Bind(configuration.GetSection("EmailChannel"));
+        services.AddScoped<EmailSenderResolutionService>();
+        services.AddScoped<EmailInboundProcessingService>();
 
         // Voice infrastructure — the store is always available (it is just SQL); the gateway is
         // conditionally resolved: enabled voice gets the real Azure adapter with Entra TokenCredential,
@@ -105,6 +113,8 @@ public static class ServiceCollectionExtensions
         // lifetime, exactly like every other Scoped store above.
         services.AddSingleton<TokenCredential>(_ => GraphCredentialFactory.Create(configuration));
         services.AddHttpClient<GraphTenantMemberDirectory>(client => client.BaseAddress = new Uri(GraphBaseUrl));
+        services.AddHttpClient<GraphMailboxClient>(client => client.BaseAddress = new Uri(GraphBaseUrl));
+        services.AddScoped<IGraphMailboxClient>(sp => sp.GetRequiredService<GraphMailboxClient>());
         services.AddScoped<ITenantMemberDirectory>(sp => sp.GetRequiredService<GraphTenantMemberDirectory>());
 
         services.AddScoped<IAuthTicketRepository, SqlAuthTicketRepository>();

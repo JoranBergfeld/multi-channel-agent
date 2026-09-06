@@ -143,6 +143,7 @@ app.UseAuthentication();
 app.UseAuthorization();
 
 app.MapTurnEndpoints();
+app.MapEmailWebhookEndpoints();
 app.MapSessionEndpoints();
 app.MapVoiceEndpoints();
 app.MapInventoryEndpoints();
