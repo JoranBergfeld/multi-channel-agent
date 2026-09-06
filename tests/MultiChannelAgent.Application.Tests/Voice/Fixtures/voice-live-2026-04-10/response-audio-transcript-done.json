@@ -1,0 +1,8 @@
+{
+  "type": "response.audio_transcript.done",
+  "response_id": "resp_abc123",
+  "item_id": "item_def456",
+  "output_index": 0,
+  "content_index": 0,
+  "transcript": "Your request has been submitted."
+}

@@ -5,10 +5,12 @@ using Microsoft.Extensions.DependencyInjection;
 using MultiChannelAgent.Application.Authentication;
 using MultiChannelAgent.Application.Inventories;
 using MultiChannelAgent.Application.Turns;
+using MultiChannelAgent.Application.Voice;
 using MultiChannelAgent.Infrastructure.Authentication;
 using MultiChannelAgent.Infrastructure.Inventories;
 using MultiChannelAgent.Infrastructure.Persistence;
 using MultiChannelAgent.Infrastructure.Turns;
+using MultiChannelAgent.Infrastructure.Voice;
 
 namespace MultiChannelAgent.Infrastructure;
 
@@ -33,6 +35,25 @@ public static class ServiceCollectionExtensions
         services.AddScoped<IDeliverySender, LoggingDeliverySender>();
         services.AddSingleton(TimeProvider.System);
         services.AddScoped<IModelBoundary, ScriptedModelBoundary>();
+
+        // Voice infrastructure — the store is always available (it is just SQL); the gateway is
+        // conditionally resolved: enabled voice gets the real Azure adapter with Entra TokenCredential,
+        // disabled voice (the default) gets a stub that throws if unexpectedly invoked. The factory
+        // lambda runs on first resolve, when VoiceOptions is already registered by the Host.
+        services.AddScoped<IVoiceSessionStore, SqlVoiceSessionStore>();
+        services.AddSingleton<GatewayRegistry>();
+        services.AddSingleton<IVoiceLiveGateway>(sp =>
+        {
+            var voiceOptions = sp.GetRequiredService<VoiceOptions>();
+            if (!voiceOptions.Enabled)
+                return new DisabledVoiceLiveGateway();
+
+            return new AzureVoiceLiveGateway(
+                sp.GetRequiredService<TokenCredential>(),
+                sp.GetRequiredService<GatewayRegistry>(),
+                voiceOptions);
+        });
+
         services.AddScoped<StockToolDispatcher>();
         services.AddScoped<ReferenceToolDispatcher>();
 

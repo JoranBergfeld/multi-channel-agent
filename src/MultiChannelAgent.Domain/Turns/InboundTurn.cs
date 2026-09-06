@@ -56,6 +56,12 @@ public sealed record InboundTurnDraft
     public bool WasInterrupted { get; init; }
 
     /// <summary>
+    /// How the Participant's input was captured. Set by the Host from trusted evidence; clients
+    /// cannot attest modality directly.
+    /// </summary>
+    public InputModality InputModality { get; init; }
+
+    /// <summary>
     /// The common case every text-only channel produces today: one part, authored directly by the
     /// authenticated Participant in this Turn.
     /// </summary>
@@ -145,6 +151,9 @@ public sealed record InboundTurn
     /// <summary>See <see cref="InboundTurnDraft.WasInterrupted"/>. Durable, because it decides what this Turn may authorize.</summary>
     public bool WasInterrupted { get; init; }
 
+    /// <summary>See <see cref="InboundTurnDraft.InputModality"/>. Durable, because it decides confirmation policy.</summary>
+    public InputModality InputModality { get; init; }
+
     public required DateTimeOffset ReceivedAt { get; init; }
 
     /// <summary>The scope-complete identity duplicate native delivery is detected by.</summary>
@@ -179,6 +188,12 @@ public sealed record InboundTurn
             throw new ArgumentException("A channel must at least declare text capability.", nameof(draft.Capabilities));
         }
 
+        if (!Enum.IsDefined(draft.InputModality))
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(draft.InputModality), draft.InputModality, "InputModality must be a defined enum value.");
+        }
+
         return new InboundTurn
         {
             TurnId = TurnId.NewId(),
@@ -192,6 +207,7 @@ public sealed record InboundTurn
             Locale = RequireOptionalWithinBounds(draft.Locale, MaxLocaleLength, nameof(draft.Locale)),
             TraceId = RequireOptionalWithinBounds(draft.TraceId, MaxTraceIdLength, nameof(draft.TraceId)),
             WasInterrupted = draft.WasInterrupted,
+            InputModality = draft.InputModality,
             ReceivedAt = draft.ReceivedAt,
         };
     }

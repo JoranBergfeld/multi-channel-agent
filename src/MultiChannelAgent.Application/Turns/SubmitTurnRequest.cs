@@ -21,4 +21,5 @@ public sealed record SubmitTurnRequest(
     string ContentText,
     string? Locale,
     string? TraceId,
-    bool WasInterrupted = false);
+    bool WasInterrupted = false,
+    InputModality InputModality = InputModality.Text);

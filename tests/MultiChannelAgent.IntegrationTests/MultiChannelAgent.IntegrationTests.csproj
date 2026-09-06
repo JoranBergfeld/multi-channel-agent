@@ -28,6 +28,7 @@
     <ProjectReference Include="..\..\src\MultiChannelAgent.Application\MultiChannelAgent.Application.csproj" />
     <ProjectReference Include="..\..\src\MultiChannelAgent.Infrastructure\MultiChannelAgent.Infrastructure.csproj" />
     <ProjectReference Include="..\..\src\MultiChannelAgent.Host\MultiChannelAgent.Host.csproj" />
+    <ProjectReference Include="..\MultiChannelAgent.Application.Tests\MultiChannelAgent.Application.Tests.csproj" />
   </ItemGroup>
 
 </Project>

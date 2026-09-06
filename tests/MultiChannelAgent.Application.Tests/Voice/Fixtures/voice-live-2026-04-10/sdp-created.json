@@ -1,0 +1,4 @@
+{
+  "type": "rtc.call.sdp.created",
+  "sdp_answer": "v=0\r\no=answer\r\n"
+}

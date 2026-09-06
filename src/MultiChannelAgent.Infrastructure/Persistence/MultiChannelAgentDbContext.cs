@@ -67,6 +67,8 @@ public sealed class MultiChannelAgentDbContext(DbContextOptions<MultiChannelAgen
 
     public DbSet<FoundryConversationBindingEntity> FoundryConversationBindings => Set<FoundryConversationBindingEntity>();
 
+    public DbSet<VoiceSessionEntity> VoiceSessions => Set<VoiceSessionEntity>();
+
     /// <summary>
     /// The columns Stock and reference ordering, keyset pagination, and uniqueness compare
     /// (<see cref="Domain.Inventories.StockEntryOrderKey"/> and

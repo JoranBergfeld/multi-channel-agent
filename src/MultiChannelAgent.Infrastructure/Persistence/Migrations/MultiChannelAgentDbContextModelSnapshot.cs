@@ -419,6 +419,13 @@ namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
                     b.Property<Guid?>("FoundryConversationId")
                         .HasColumnType("uniqueidentifier");
 
+                    b.Property<string>("InputModality")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(16)
+                        .HasColumnType("nvarchar(16)")
+                        .HasDefaultValueSql("'Text'");
+
                     b.Property<string>("Locale")
                         .HasMaxLength(32)
                         .HasColumnType("nvarchar(32)");
@@ -1180,6 +1187,77 @@ namespace MultiChannelAgent.Infrastructure.Persistence.Migrations
                     b.HasIndex("InventoryId", "UnitId", "RetiredAt");
 
                     b.ToTable("UnitTerms", (string)null);
+                });
+
+            modelBuilder.Entity("MultiChannelAgent.Infrastructure.Persistence.Entities.VoiceSessionEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("ChannelConversationId")
+                        .IsRequired()
+                        .HasMaxLength(512)
+                        .HasColumnType("nvarchar(512)");
+
+                    b.Property<string>("ControlSessionId")
+                        .HasMaxLength(512)
+                        .HasColumnType("nvarchar(512)");
+
+                    b.Property<long?>("EndedAtTicks")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("ExpiresAtTicks")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("IdleExpiresAtTicks")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("LastHeartbeatAtTicks")
+                        .HasColumnType("bigint");
+
+                    b.Property<bool>("OccupiesSlot")
+                        .HasColumnType("bit");
+
+                    b.Property<string>("OwnerInstanceId")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)");
+
+                    b.Property<Guid>("ParticipantId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<long>("StartedAtTicks")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("nvarchar(32)");
+
+                    b.Property<long>("WarningAtTicks")
+                        .HasColumnType("bigint");
+
+                    b.Property<bool>("WarningIssued")
+                        .HasColumnType("bit");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("OccupiesSlot")
+                        .HasDatabaseName("IX_VoiceSessions_OccupiesSlot");
+
+                    b.HasIndex("ParticipantId")
+                        .IsUnique()
+                        .HasDatabaseName("IX_VoiceSessions_ParticipantId_OccupiesSlot")
+                        .HasFilter("[OccupiesSlot] = 1");
+
+                    b.HasIndex("OwnerInstanceId", "Status")
+                        .HasDatabaseName("IX_VoiceSessions_Owner_Status");
+
+                    b.HasIndex("Status", "ExpiresAtTicks", "IdleExpiresAtTicks")
+                        .HasDatabaseName("IX_VoiceSessions_Status_Expiry");
+
+                    b.ToTable("VoiceSessions", (string)null);
                 });
 
             modelBuilder.Entity("MultiChannelAgent.Infrastructure.Persistence.Entities.ActiveInventorySelectionEntity", b =>

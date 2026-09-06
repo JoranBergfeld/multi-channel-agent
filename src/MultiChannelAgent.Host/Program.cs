@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
 using MultiChannelAgent.Application.Inventories;
+using MultiChannelAgent.Application.Voice;
 using MultiChannelAgent.Host.Authentication;
 using MultiChannelAgent.Host.Authorization;
 using MultiChannelAgent.Host.Endpoints;
@@ -46,6 +47,46 @@ builder.Services.AddHostedService<DeliveryDispatchWorker>();
 builder.Services.AddHostedService<OutcomePayloadCleanupWorker>();
 builder.Services.AddHostedService<TurnProgressEventCleanupWorker>();
 
+// ── Voice ────────────────────────────────────────────────────────────────
+// VoiceOptions is bound from configuration and validated when enabled. When disabled (the default),
+// validation is a no-op and no Azure credentials are required, so the app starts cleanly in test
+// environments. The stable process instance ID is registered once so every resolve shares the same
+// identity — not a new ID per scope.
+var voiceOptions = builder.Configuration.GetSection("Voice").Get<VoiceOptions>() ?? new VoiceOptions();
+if (voiceOptions.Enabled)
+{
+    var errors = voiceOptions.Validate();
+    if (errors.Count > 0)
+    {
+        throw new InvalidOperationException(
+            $"Voice configuration is invalid: {string.Join("; ", errors)}");
+    }
+}
+builder.Services.AddSingleton(voiceOptions);
+
+var ownerInstanceId = $"host-{Environment.MachineName}-{Guid.NewGuid():N}";
+builder.Services.AddScoped<VoiceAdmissionService>(sp => new VoiceAdmissionService(
+    sp.GetRequiredService<IVoiceSessionStore>(),
+    sp.GetRequiredService<IVoiceLiveGateway>(),
+    sp.GetRequiredService<VoiceOptions>(),
+    sp.GetRequiredService<TimeProvider>(),
+    ownerInstanceId));
+
+builder.Services.AddScoped<VoiceSessionReleaseService>(sp => new VoiceSessionReleaseService(
+    sp.GetRequiredService<IVoiceSessionStore>(),
+    sp.GetRequiredService<IVoiceLiveGateway>(),
+    sp.GetRequiredService<TimeProvider>(),
+    sp.GetRequiredService<VoiceOptions>().IdleTimeout));
+
+builder.Services.AddScoped<VoiceSessionCleanupCoordinator>(sp => new VoiceSessionCleanupCoordinator(
+    sp.GetRequiredService<IVoiceSessionStore>(),
+    sp.GetRequiredService<IVoiceLiveGateway>(),
+    sp.GetRequiredService<TimeProvider>(),
+    ownerInstanceId,
+    sp.GetRequiredService<VoiceOptions>().IdleTimeout * 3));
+
+builder.Services.AddHostedService<VoiceSessionCleanupWorker>();
+
 // The production numbers, in one place. A test that must not wait fifteen real seconds for a
 // heartbeat replaces this one registration and changes nothing else.
 builder.Services.AddSingleton(new TurnStreamOptions());
@@ -60,6 +101,33 @@ builder.Services
     .AddDbContextCheck<MultiChannelAgentDbContext>("database", tags: ["ready"]);
 
 var app = builder.Build();
+
+// Explicit exception handler suppresses the auto-registered developer exception page in all
+// environments (ASP.NET Core skips the auto-registration when UseExceptionHandler is already
+// present). Unhandled exceptions are mapped to clean problem responses without stack traces,
+// exception type names, or framework-internal paths that could aid an attacker.
+// BadHttpRequestException carries the HTTP status ASP.NET Core intends (typically 400), so its
+// status code is preserved; all other exceptions become 500.
+app.UseExceptionHandler(errorApp =>
+{
+    errorApp.Run(async context =>
+    {
+        var feature = context.Features.Get<Microsoft.AspNetCore.Diagnostics.IExceptionHandlerFeature>();
+        var (statusCode, type, title) = feature?.Error is BadHttpRequestException badRequest
+            ? ((int)badRequest.StatusCode,
+               "https://tools.ietf.org/html/rfc9110#section-15.5.1",
+               "The request was invalid.")
+            : (StatusCodes.Status500InternalServerError,
+               "https://tools.ietf.org/html/rfc9110#section-15.6.1",
+               "An unexpected error occurred.");
+
+        context.Response.StatusCode = statusCode;
+        await context.Response.WriteAsJsonAsync(
+            new { type, title, status = statusCode },
+            options: null,
+            contentType: "application/problem+json");
+    });
+});
 
 app.MapHealthChecks("/health/live", new HealthCheckOptions
 {
@@ -76,6 +144,7 @@ app.UseAuthorization();
 
 app.MapTurnEndpoints();
 app.MapSessionEndpoints();
+app.MapVoiceEndpoints();
 app.MapInventoryEndpoints();
 app.MapInventoryGovernanceEndpoints();
 app.MapInventoryRecoveryEndpoints();

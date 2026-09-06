@@ -52,6 +52,12 @@ public sealed class InboxEntryEntity
     public bool WasInterrupted { get; set; }
 
     /// <summary>
+    /// How the Participant's input was captured. Host-attested from trusted evidence; never accepted
+    /// from untrusted client input. Existing rows default to <see cref="InputModality.Text"/>.
+    /// </summary>
+    public InputModality InputModality { get; set; }
+
+    /// <summary>
     /// The Foundry conversation this Turn was accepted into, captured at acceptance. Nullable only
     /// for Turns accepted before this was recorded; every acceptance since writes it, which is what
     /// stops a conversation reset from moving already-accepted work into the new history.

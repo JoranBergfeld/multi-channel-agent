@@ -1,6 +1,8 @@
 using System.Security.Claims;
 using MultiChannelAgent.Application.Turns;
+using MultiChannelAgent.Application.Voice;
 using MultiChannelAgent.Domain.Turns;
+using MultiChannelAgent.Domain.Voice;
 using MultiChannelAgent.Host.Authentication;
 using MultiChannelAgent.Host.Authorization;
 using MultiChannelAgent.Host.Security;
@@ -11,13 +13,18 @@ namespace MultiChannelAgent.Host.Endpoints;
 /// The wire shape accepted at the synthetic Turn submission endpoint. Deliberately carries no
 /// Participant or conversation identity: those are always trusted application context derived from
 /// the authenticated principal and the web conversation cookie, never accepted from the client body.
+/// <see cref="VoiceSessionId"/> is the only voice-related field: if it parses and resolves to a valid
+/// active session belonging to the current Participant and conversation, the server sets
+/// <see cref="InputModality.Voice"/> and <see cref="ChannelCapabilities.Voice"/>. Otherwise the Turn
+/// is accepted normally as Text. No <c>InputModality</c> or <c>Capabilities</c> field is accepted.
 /// </summary>
 public sealed record SubmitTurnHttpRequest(
     string? NativeMessageId,
     string? ContentText,
     string? Locale,
     string? TraceId,
-    bool Interrupted = false);
+    bool Interrupted = false,
+    string? VoiceSessionId = null);
 
 /// <summary>
 /// What the signed-in web channel is, as declared to the channel-neutral core: its name, and what it
@@ -47,6 +54,7 @@ public static class TurnEndpoints
             ClaimsPrincipal user,
             TurnAcceptanceService acceptanceService,
             TurnOutcomeReader outcomeReader,
+            IVoiceSessionStore voiceSessionStore,
             TimeProvider timeProvider,
             CancellationToken cancellationToken) =>
         {
@@ -59,6 +67,31 @@ public static class TurnEndpoints
             var participantId = user.GetParticipantId();
             var channelConversationId = WebConversationCookie.EnsureId(httpContext);
 
+            // Voice provenance: if the client supplied a voiceSessionId, check whether it resolves
+            // to an active session belonging to this Participant and conversation at a single
+            // captured instant. If so, the Turn gets Voice modality and Voice capability. Otherwise,
+            // it is silently accepted as Text with ordinary web capabilities — safe fallback.
+            var inputModality = InputModality.Text;
+            var capabilities = WebChannel.Capabilities;
+
+            if (Guid.TryParse(request.VoiceSessionId, out var vsidGuid) && vsidGuid != Guid.Empty)
+            {
+                var now = timeProvider.GetUtcNow();
+                var voiceSession = await voiceSessionStore.FindByIdAsync(
+                    new VoiceSessionId(vsidGuid), cancellationToken);
+
+                if (voiceSession is not null
+                    && voiceSession.ParticipantId == participantId
+                    && voiceSession.ChannelConversationId == new ChannelConversationId(channelConversationId)
+                    && voiceSession.Status == VoiceSessionStatus.Active
+                    && !voiceSession.IsExpired(now)
+                    && !voiceSession.IsIdle(now))
+                {
+                    inputModality = InputModality.Voice;
+                    capabilities = WebChannel.Capabilities | ChannelCapabilities.Voice;
+                }
+            }
+
             var result = await acceptanceService.AcceptAsync(
                 new SubmitTurnRequest(
                     request.NativeMessageId!,
@@ -68,11 +101,12 @@ public static class TurnEndpoints
                     // Typed evidence of how this Turn's Participant was authenticated - the signed-in
                     // Entra session behind the cookie, never anything the request body claimed.
                     ChannelPrincipal.EntraUser(participantId.Value.ToString(), user.FindFirst("tid")?.Value),
-                    WebChannel.Capabilities,
+                    capabilities,
                     request.ContentText!,
                     request.Locale,
                     request.TraceId,
-                    request.Interrupted),
+                    request.Interrupted,
+                    inputModality),
                 timeProvider.GetUtcNow(),
                 cancellationToken);
 

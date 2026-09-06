@@ -1,0 +1,6 @@
+{
+  "type": "conversation.item.input_audio_transcription.completed",
+  "item_id": "item_abc123",
+  "content_index": 0,
+  "transcript": "Add ten units of reference A to the main warehouse."
+}

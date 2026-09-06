@@ -6,7 +6,16 @@ namespace MultiChannelAgent.Domain.Turns;
 /// conversation cookie) so it is never confused with a <see cref="FoundryConversationId"/> or any
 /// other identity in this domain.
 /// </summary>
-public readonly record struct ChannelConversationId(string Value)
+public readonly record struct ChannelConversationId
 {
+    public string Value { get; }
+
+    public ChannelConversationId(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            throw new ArgumentException("Channel conversation ID must not be blank.", nameof(value));
+        Value = value;
+    }
+
     public override string ToString() => Value;
 }

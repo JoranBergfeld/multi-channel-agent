@@ -25,4 +25,8 @@
     <ProjectReference Include="..\..\src\MultiChannelAgent.Application\MultiChannelAgent.Application.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <None Include="Voice\Fixtures\**\*.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

@@ -1,0 +1,6 @@
+{
+  "type": "conversation.item.truncate",
+  "item_id": "item_abc123",
+  "content_index": 0,
+  "audio_end_ms": 1500
+}
