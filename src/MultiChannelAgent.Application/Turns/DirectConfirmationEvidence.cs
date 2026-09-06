@@ -49,6 +49,14 @@ public static class DirectConfirmationEvidenceReader
     {
         ArgumentNullException.ThrowIfNull(turn);
 
+        // Voice-originated Turns can never provide confirmation evidence. Voice Live provides no
+        // trusted recognition-confidence signal, so all voice confirmation attempts are clarification-
+        // only. The Participant must use visible text input to confirm or reject.
+        if (turn.InputModality == InputModality.Voice)
+        {
+            return DirectConfirmationEvidence.None;
+        }
+
         if (turn.WasInterrupted)
         {
             return DirectConfirmationEvidence.None;

@@ -86,6 +86,7 @@ public sealed class SqlInboxStore(MultiChannelAgentDbContext db) : IInboxStore
                 Locale = turn.Locale,
                 TraceId = turn.TraceId,
                 WasInterrupted = turn.WasInterrupted,
+                InputModality = turn.InputModality,
                 FoundryConversationId = binding.FoundryConversationId.Value,
                 FoundryConversationGeneration = binding.Generation,
                 ReceivedAt = turn.ReceivedAt,
@@ -243,6 +244,7 @@ public sealed class SqlInboxStore(MultiChannelAgentDbContext db) : IInboxStore
             Locale = entity.Locale,
             TraceId = entity.TraceId,
             WasInterrupted = entity.WasInterrupted,
+            InputModality = entity.InputModality,
             ReceivedAt = entity.ReceivedAt,
         }).ToList();
     }

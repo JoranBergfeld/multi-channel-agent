@@ -32,7 +32,7 @@ public sealed class TurnAcceptanceService(IInboxStore inboxStore, IFoundryConver
 
         // Every channel's text-only submission is the same shape: one content part, authored directly
         // by the authenticated Participant in this Turn.
-        var turn = InboundTurn.Create(InboundTurnDraft.DirectText(
+        var draft = InboundTurnDraft.DirectText(
             request.NativeMessageId,
             request.ParticipantId,
             request.ChannelConversationId,
@@ -43,7 +43,11 @@ public sealed class TurnAcceptanceService(IInboxStore inboxStore, IFoundryConver
             request.Locale,
             receivedAt,
             request.TraceId,
-            request.WasInterrupted));
+            request.WasInterrupted);
+
+        // InputModality is a host-attested field set from trusted evidence (e.g., an active voice
+        // session). It defaults to Text and is never accepted from untrusted client input.
+        var turn = InboundTurn.Create(draft with { InputModality = request.InputModality });
 
         // The conversation this Turn belongs to is decided here, at acceptance, and stamped on the
         // Turn itself. Resolving it later - when the Turn is finally claimed - would let a "New

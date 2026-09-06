@@ -22,6 +22,7 @@ public sealed class InboxEntryEntityConfiguration : IEntityTypeConfiguration<Inb
         builder.Property(e => e.Locale).HasMaxLength(InboundTurn.MaxLocaleLength);
         builder.Property(e => e.TraceId).HasMaxLength(InboundTurn.MaxTraceIdLength);
         builder.Property(e => e.Status).HasConversion<string>().HasMaxLength(32);
+        builder.Property(e => e.InputModality).HasConversion<string>().HasMaxLength(16).HasDefaultValueSql("'Text'");
 
         // Enforces idempotency at the Turn boundary, scoped the way a native message id is actually
         // unique: within the Participant and ChannelConversation that issued it. At-least-once

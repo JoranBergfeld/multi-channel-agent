@@ -142,6 +142,88 @@ public sealed class InboundTurnContractSqliteTests : IDisposable
     private static FoundryConversationBinding Binding(InboundTurn turn) =>
         FoundryConversationBinding.CreateFirstGeneration(turn.ParticipantId, turn.ChannelConversationId, turn.ReceivedAt);
 
+    [Fact]
+    public async Task A_turn_accepted_without_explicit_modality_defaults_to_Text()
+    {
+        var accepted = InboundTurn.Create(InboundTurnDraft.DirectText(
+            "native-modality-default",
+            SomeParticipant,
+            "conversation-modality-default",
+            "web",
+            ChannelPrincipal.EntraUser("11111111-1111-1111-1111-111111111111", null),
+            ChannelCapabilities.Text,
+            "list stock",
+            null,
+            DateTimeOffset.UtcNow,
+            null));
+
+        // DirectText does not set InputModality, so it is the enum default: Text.
+        Assert.Equal(InputModality.Text, accepted.InputModality);
+
+        using (var writeDb = CreateContext())
+        {
+            await new SqlInboxStore(writeDb).AcceptAsync(accepted, Binding(accepted), CancellationToken.None);
+        }
+
+        using var readDb = CreateContext();
+        var reloaded = await new SqlInboxStore(readDb).FindByTurnIdAsync(accepted.TurnId, CancellationToken.None);
+
+        Assert.NotNull(reloaded);
+        Assert.Equal(InputModality.Text, reloaded!.InputModality);
+    }
+
+    [Fact]
+    public async Task A_voice_turn_round_trips_its_input_modality_through_SqlInboxStore()
+    {
+        var accepted = InboundTurn.Create(new InboundTurnDraft
+        {
+            NativeMessageId = "native-modality-voice",
+            ParticipantId = SomeParticipant,
+            ChannelConversationId = "conversation-modality-voice",
+            Channel = "web",
+            Principal = ChannelPrincipal.EntraUser("11111111-1111-1111-1111-111111111111", null),
+            Capabilities = ChannelCapabilities.Text,
+            ContentParts = [TurnContentPart.Create(1, ContentProvenance.Direct, "add five gloves")],
+            ReceivedAt = DateTimeOffset.UtcNow,
+            InputModality = InputModality.Voice,
+        });
+
+        using (var writeDb = CreateContext())
+        {
+            await new SqlInboxStore(writeDb).AcceptAsync(accepted, Binding(accepted), CancellationToken.None);
+        }
+
+        using var readDb = CreateContext();
+        var reloaded = await new SqlInboxStore(readDb).FindByTurnIdAsync(accepted.TurnId, CancellationToken.None);
+
+        Assert.NotNull(reloaded);
+        Assert.Equal(InputModality.Voice, reloaded!.InputModality);
+    }
+
+    [Fact]
+    public async Task Claimed_voice_turns_carry_their_input_modality()
+    {
+        var turn = InboundTurn.Create(new InboundTurnDraft
+        {
+            NativeMessageId = "native-modality-claim",
+            ParticipantId = SomeParticipant,
+            ChannelConversationId = "conversation-modality-claim",
+            Channel = "web",
+            Principal = ChannelPrincipal.EntraUser("11111111-1111-1111-1111-111111111111", null),
+            Capabilities = ChannelCapabilities.Text,
+            ContentParts = [TurnContentPart.Create(1, ContentProvenance.Direct, "add stock")],
+            ReceivedAt = DateTimeOffset.UtcNow,
+            InputModality = InputModality.Voice,
+        });
+
+        using var db = CreateContext();
+        var store = new SqlInboxStore(db);
+        await store.AcceptAsync(turn, Binding(turn), CancellationToken.None);
+
+        var claimed = Assert.Single(await store.ClaimPendingAsync(10, CancellationToken.None));
+        Assert.Equal(InputModality.Voice, claimed.InputModality);
+    }
+
     private MultiChannelAgentDbContext CreateContext()
     {
         var options = new DbContextOptionsBuilder<MultiChannelAgentDbContext>()
