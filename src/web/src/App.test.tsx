@@ -963,4 +963,114 @@ describe('App', () => {
     // Voice controls should be visible with a Start Voice button
     expect(screen.getByRole('button', { name: 'Start Voice' })).toBeInTheDocument();
   });
+
+  it('canonical TurnTracer summary remains visible after voice playback failure', async () => {
+    setViewportWidth(DESKTOP_WIDTH);
+    const transport = new FakeVoiceTransport();
+    const { streams } = stubApi({
+      '/api/voice/admit': () =>
+        json({ admitted: true, voiceSessionId: 'vs-pf1', sdpAnswer: 'v=0\r\n', denialReason: null }),
+      '/api/turns': () => json({ turnId: 'turn-pf1', alreadyAccepted: false }, 202),
+    });
+
+    render(<App testTransport={transport} />);
+    await screen.findByRole('banner');
+
+    // Admit and connect voice
+    await userEvent.click(screen.getByRole('button', { name: 'Start Voice' }));
+    transport.simulateConnected();
+    await waitFor(() => expect(transport.connectCount).toBe(1));
+
+    // Finalized transcript triggers shared controller to submit a turn with voiceSessionId
+    transport.simulateFinalTranscript('list steel bolts', 'voice:vs-pf1:item_1');
+    await waitFor(() => expect(turnStreamIn(streams)).toBeDefined());
+
+    // Drive accepted → processing → terminal outcome through the fake SSE mechanism
+    const CANONICAL_SUMMARY = 'Twelve steel bolts are on Shelf A.';
+    turnStreamIn(streams)!.emit(
+      'accepted',
+      { turnId: 'turn-pf1', receivedAt: '2026-09-06T10:00:00+00:00' },
+      '1',
+    );
+    turnStreamIn(streams)!.emit(
+      'processing',
+      { turnId: 'turn-pf1', startedAt: '2026-09-06T10:00:01+00:00' },
+      '2',
+    );
+    turnStreamIn(streams)!.emit(
+      'outcome',
+      {
+        turnId: 'turn-pf1',
+        status: 'completed',
+        category: 'completed',
+        code: 'stock.listed',
+        summary: CANONICAL_SUMMARY,
+        deliveries: [],
+      },
+      '1000000',
+    );
+
+    // TurnTracer renders the exact canonical summary
+    expect(await screen.findByText(CANONICAL_SUMMARY)).toBeInTheDocument();
+
+    // Simulate playback_started → speaking, then playback_failed → listening + alert
+    transport.simulatePlaybackStarted();
+    transport.simulatePlaybackFailed('TTS synthesis error');
+
+    // Accessible playback failure alert appears
+    await waitFor(() =>
+      expect(screen.getByRole('alert', { name: 'Playback failure' })).toBeInTheDocument(),
+    );
+
+    // The exact canonical summary is still visible in TurnTracer, unchanged
+    expect(screen.getByText(CANONICAL_SUMMARY)).toBeInTheDocument();
+  });
+
+  it('canonical TurnTracer summary remains visible after voice playback integrity error', async () => {
+    setViewportWidth(DESKTOP_WIDTH);
+    const transport = new FakeVoiceTransport();
+    const { streams } = stubApi({
+      '/api/voice/admit': () =>
+        json({ admitted: true, voiceSessionId: 'vs-ie1', sdpAnswer: 'v=0\r\n', denialReason: null }),
+      '/api/turns': () => json({ turnId: 'turn-ie1', alreadyAccepted: false }, 202),
+    });
+
+    render(<App testTransport={transport} />);
+    await screen.findByRole('banner');
+
+    await userEvent.click(screen.getByRole('button', { name: 'Start Voice' }));
+    transport.simulateConnected();
+    await waitFor(() => expect(transport.connectCount).toBe(1));
+
+    transport.simulateFinalTranscript('list steel bolts', 'voice:vs-ie1:item_1');
+    await waitFor(() => expect(turnStreamIn(streams)).toBeDefined());
+
+    const CANONICAL_SUMMARY = 'Four brass rivets are unlocated.';
+    turnStreamIn(streams)!.emit(
+      'outcome',
+      {
+        turnId: 'turn-ie1',
+        status: 'completed',
+        category: 'completed',
+        code: 'stock.listed',
+        summary: CANONICAL_SUMMARY,
+        deliveries: [],
+      },
+      '1000000',
+    );
+
+    expect(await screen.findByText(CANONICAL_SUMMARY)).toBeInTheDocument();
+
+    // Simulate playback_started then an integrity error (dispatches playback_failed internally)
+    transport.simulatePlaybackStarted();
+    transport.simulatePlaybackIntegrityError('Four brass rivets are unlocated.', 'Unexpected item X.');
+
+    // Accessible playback failure alert appears
+    await waitFor(() =>
+      expect(screen.getByRole('alert', { name: 'Playback failure' })).toBeInTheDocument(),
+    );
+
+    // The exact canonical summary is still visible in TurnTracer, unchanged
+    expect(screen.getByText(CANONICAL_SUMMARY)).toBeInTheDocument();
+  });
 });
