@@ -4,7 +4,7 @@
  * flow and real App-level composition, not direct storage helpers alone.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { act, render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { setViewportWidth, DESKTOP_WIDTH } from './testing/setup'
 import { FakeEventSource, installFakeEventSource } from './testing/fakeEventSource'
@@ -452,5 +452,235 @@ describe('voice integration: transport integrity via FakeVoiceTransport', () => 
   it('speakCanonical throws when transport is not connected', () => {
     const transport = new FakeVoiceTransport()
     expect(() => transport.speakCanonical('hello')).toThrow('speakCanonical requires connected transport')
+  })
+})
+
+// ── Submission rejection fallback ───────────────────────────────────────────
+
+describe('voice integration: submission rejection fallback', () => {
+  it('second distinct voice final while controller busy falls back to text with exactly one release', async () => {
+    setViewportWidth(DESKTOP_WIDTH)
+    const transport = new FakeVoiceTransport()
+    const { calls } = stubApi({
+      '/api/voice/admit': () =>
+        json({ admitted: true, voiceSessionId: 'vs-rb1', sdpAnswer: 'v=0\r\n', denialReason: null }),
+      '/api/turns': () => json({ turnId: 'turn-rb1', alreadyAccepted: false }, 202),
+      '/api/voice/release': () => json({}),
+    })
+
+    const { unmount } = render(<App testTransport={transport} />)
+    await screen.findByRole('banner')
+
+    await userEvent.click(screen.getByRole('button', { name: 'Start Voice' }))
+    transport.simulateConnected()
+    await waitFor(() => expect(transport.connectCount).toBe(1))
+
+    // First finalized transcript → accepted (async POST in-flight, fetchInFlightRef = true)
+    transport.simulateFinalTranscript('add five boxes', 'voice:vs-rb1:item_1')
+
+    // Second distinct finalized transcript → controller busy → submit returns false
+    transport.simulateFinalTranscript('remove three bolts', 'voice:vs-rb1:item_2')
+
+    // Visible fallback error in the App banner
+    const banner = screen.getByRole('banner')
+    await waitFor(() =>
+      expect(within(banner).getByRole('alert')).toHaveTextContent(
+        'Voice input could not be submitted. Continue with text.',
+      ),
+    )
+
+    // Transport disconnected (voice ended)
+    expect(transport.isConnected).toBe(false)
+
+    // Exactly one POST to /api/turns (the first, accepted one)
+    expect(turnSubmitCalls(calls)).toHaveLength(1)
+
+    // Exactly one release — no double from VoiceControls external-ID effect
+    const releaseCalls = calls.filter((c) => c.url === '/api/voice/release')
+    expect(releaseCalls).toHaveLength(1)
+
+    // Unmount does NOT add a second release (session ref already cleared)
+    unmount()
+    expect(calls.filter((c) => c.url === '/api/voice/release')).toHaveLength(1)
+  })
+
+  it('storage failure during voice submission falls back to text with no burned ID', async () => {
+    setViewportWidth(DESKTOP_WIDTH)
+    const transport = new FakeVoiceTransport()
+    const { calls } = stubApi({
+      '/api/voice/admit': () =>
+        json({ admitted: true, voiceSessionId: 'vs-sf2', sdpAnswer: 'v=0\r\n', denialReason: null }),
+      '/api/voice/release': () => json({}),
+    })
+
+    render(<App testTransport={transport} />)
+    await screen.findByRole('banner')
+
+    await userEvent.click(screen.getByRole('button', { name: 'Start Voice' }))
+    transport.simulateConnected()
+    await waitFor(() => expect(transport.connectCount).toBe(1))
+
+    const spy = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new DOMException('Storage is disabled', 'SecurityError')
+    })
+
+    try {
+      transport.simulateFinalTranscript('add five boxes', 'voice:vs-sf2:item_1')
+
+      // App-level visible fallback error in the banner
+      const banner = screen.getByRole('banner')
+      await waitFor(() =>
+        expect(within(banner).getByRole('alert')).toHaveTextContent(
+          'Voice input could not be submitted. Continue with text.',
+        ),
+      )
+
+      // Transport disconnected
+      expect(transport.isConnected).toBe(false)
+
+      // Zero POSTs (storage failure prevented submit from starting the async fetch)
+      expect(turnSubmitCalls(calls)).toHaveLength(0)
+
+      // Exactly one release
+      expect(calls.filter((c) => c.url === '/api/voice/release')).toHaveLength(1)
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  it('duplicate redelivery of accepted first native ID produces one POST and no fallback', async () => {
+    setViewportWidth(DESKTOP_WIDTH)
+    const transport = new FakeVoiceTransport()
+    const { calls } = stubApi({
+      '/api/voice/admit': () =>
+        json({ admitted: true, voiceSessionId: 'vs-dr1', sdpAnswer: 'v=0\r\n', denialReason: null }),
+      '/api/turns': () => json({ turnId: 'turn-dr1', alreadyAccepted: false }, 202),
+    })
+
+    render(<App testTransport={transport} />)
+    await screen.findByRole('banner')
+
+    await userEvent.click(screen.getByRole('button', { name: 'Start Voice' }))
+    transport.simulateConnected()
+    await waitFor(() => expect(transport.connectCount).toBe(1))
+
+    // First: accepted
+    transport.simulateFinalTranscript('add five boxes', 'voice:vs-dr1:item_dup')
+    await waitFor(() => expect(turnSubmitCalls(calls)).toHaveLength(1))
+
+    // Duplicate redelivery: same nativeMessageId
+    transport.simulateFinalTranscript('add five boxes', 'voice:vs-dr1:item_dup')
+    await act(async () => { await new Promise((r) => setTimeout(r, 50)) })
+
+    // Still only one POST
+    expect(turnSubmitCalls(calls)).toHaveLength(1)
+
+    // No fallback error in banner
+    const banner = screen.getByRole('banner')
+    const bannerAlerts = within(banner).queryAllByRole('alert')
+    for (const alert of bannerAlerts) {
+      expect(alert).not.toHaveTextContent('Voice input could not be submitted')
+    }
+
+    // No release (voice still active)
+    expect(calls.filter((c) => c.url === '/api/voice/release')).toHaveLength(0)
+
+    // Transport still connected
+    expect(transport.isConnected).toBe(true)
+  })
+
+  it('voice fallback produces exactly one release — no double from VoiceControls or unmount', async () => {
+    setViewportWidth(DESKTOP_WIDTH)
+    const transport = new FakeVoiceTransport()
+    const { calls } = stubApi({
+      '/api/voice/admit': () =>
+        json({ admitted: true, voiceSessionId: 'vs-1r1', sdpAnswer: 'v=0\r\n', denialReason: null }),
+      '/api/turns': () => json({ turnId: 'turn-1r1', alreadyAccepted: false }, 202),
+      '/api/voice/release': () => json({}),
+    })
+
+    const { unmount } = render(<App testTransport={transport} />)
+    await screen.findByRole('banner')
+
+    await userEvent.click(screen.getByRole('button', { name: 'Start Voice' }))
+    transport.simulateConnected()
+    await waitFor(() => expect(transport.connectCount).toBe(1))
+
+    // Trigger fallback via controller busy (second distinct final while first in-flight)
+    transport.simulateFinalTranscript('text one', 'voice:vs-1r1:item_1')
+    transport.simulateFinalTranscript('text two', 'voice:vs-1r1:item_2')
+
+    const banner = screen.getByRole('banner')
+    await waitFor(() =>
+      expect(within(banner).getByRole('alert')).toHaveTextContent('Voice input could not be submitted'),
+    )
+
+    // Exactly one release before unmount
+    expect(calls.filter((c) => c.url === '/api/voice/release')).toHaveLength(1)
+
+    // Full unmount — no additional release
+    unmount()
+    expect(calls.filter((c) => c.url === '/api/voice/release')).toHaveLength(1)
+  })
+})
+
+// ── Canonical speech throw ──────────────────────────────────────────────────
+
+describe('voice integration: canonical speech visible error', () => {
+  it('speakCanonical throw sets safe visible App error without leaking raw message', async () => {
+    setViewportWidth(DESKTOP_WIDTH)
+    const transport = new FakeVoiceTransport()
+    const { streams } = stubApi({
+      '/api/voice/admit': () =>
+        json({ admitted: true, voiceSessionId: 'vs-st1', sdpAnswer: 'v=0\r\n', denialReason: null }),
+      '/api/turns': () => json({ turnId: 'turn-st1', alreadyAccepted: false }, 202),
+    })
+
+    render(<App testTransport={transport} />)
+    await screen.findByRole('banner')
+
+    await userEvent.click(screen.getByRole('button', { name: 'Start Voice' }))
+    transport.simulateConnected()
+    await waitFor(() => expect(transport.connectCount).toBe(1))
+
+    // Make speakCanonical throw with a raw internal error
+    transport.speakCanonical = () => {
+      throw new Error('Raw WebRTC data-channel failure: SCTP_INTERNAL_0xCAFE')
+    }
+
+    transport.simulateFinalTranscript('list stock', 'voice:vs-st1:item_1')
+    await waitFor(() => expect(turnStreamIn(streams)).toBeDefined())
+
+    const CANONICAL = 'Safe visible outcome text.'
+    turnStreamIn(streams)!.emit(
+      'outcome',
+      {
+        turnId: 'turn-st1',
+        status: 'completed',
+        category: 'completed',
+        code: 'stock.listed',
+        summary: CANONICAL,
+        deliveries: [],
+      },
+      '1000000',
+    )
+
+    // Canonical outcome text remains visible in TurnTracer
+    expect(await screen.findByText(CANONICAL)).toBeInTheDocument()
+
+    // Safe App-level error is visible in header
+    const banner = screen.getByRole('banner')
+    await waitFor(() =>
+      expect(within(banner).getByRole('alert')).toHaveTextContent(
+        'Voice playback failed. The response remains available as text.',
+      ),
+    )
+
+    // Raw error message is NOT leaked to ANY alert in the UI
+    const allAlerts = screen.getAllByRole('alert')
+    for (const alert of allAlerts) {
+      expect(alert.textContent).not.toContain('SCTP_INTERNAL')
+      expect(alert.textContent).not.toContain('data-channel')
+    }
   })
 })

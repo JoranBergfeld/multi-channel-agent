@@ -139,7 +139,7 @@ function App({ testTransport }: AppProps = {}) {
       transport.speakCanonical(outcome.summary);
       spokenTurnIdsRef.current.add(outcome.turnId);
     } catch {
-      // Transport disconnected or speak failed — canonical text remains visible in TurnTracer.
+      setError('Voice playback failed. The response remains available as text.');
     }
   }, []);
 
@@ -173,13 +173,26 @@ function App({ testTransport }: AppProps = {}) {
       // Per-session dedupe: duplicate provider final-transcript delivery with the same nativeMessageId
       // must not create a second HTTP submission.
       if (finalizedNativeIdsRef.current.has(utterance.nativeMessageId)) return;
-      finalizedNativeIdsRef.current.add(utterance.nativeMessageId);
 
-      submitTurnRef.current?.({
+      const accepted = submitTurnRef.current?.({
         nativeMessageId: utterance.nativeMessageId,
         contentText: utterance.text,
         voiceSessionId: sessionId,
-      });
+      }) ?? false;
+
+      if (accepted) {
+        finalizedNativeIdsRef.current.add(utterance.nativeMessageId);
+        return;
+      }
+
+      // Submit rejected (handle unavailable, controller busy, or storage failure).
+      // Fence voice callbacks, disconnect transport, best-effort release, and fall back to text.
+      voiceGenerationRef.current += 1;
+      voiceSessionIdRef.current = null;
+      finalizedNativeIdsRef.current.clear();
+      transportRef.current.disconnect();
+      void releaseVoice(sessionId, csrfTokenRef.current).catch(() => {});
+      setError('Voice input could not be submitted. Continue with text.');
     },
     [],
   );
