@@ -9,6 +9,12 @@ export interface SubmitTurnRequest {
    * make its own Turn less trusted.
    */
   interrupted?: boolean;
+  /**
+   * Optional voice session ID. When present and valid (active session, same participant and
+   * conversation), the server attests Voice modality and Voice capability. Otherwise the Turn is
+   * accepted normally as Text. The client cannot set InputModality or capabilities directly.
+   */
+  voiceSessionId?: string;
 }
 
 export interface SubmitTurnAcceptance {

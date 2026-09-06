@@ -5,10 +5,12 @@ using Microsoft.Extensions.DependencyInjection;
 using MultiChannelAgent.Application.Authentication;
 using MultiChannelAgent.Application.Inventories;
 using MultiChannelAgent.Application.Turns;
+using MultiChannelAgent.Application.Voice;
 using MultiChannelAgent.Infrastructure.Authentication;
 using MultiChannelAgent.Infrastructure.Inventories;
 using MultiChannelAgent.Infrastructure.Persistence;
 using MultiChannelAgent.Infrastructure.Turns;
+using MultiChannelAgent.Infrastructure.Voice;
 
 namespace MultiChannelAgent.Infrastructure;
 
@@ -33,6 +35,14 @@ public static class ServiceCollectionExtensions
         services.AddScoped<IDeliverySender, LoggingDeliverySender>();
         services.AddSingleton(TimeProvider.System);
         services.AddScoped<IModelBoundary, ScriptedModelBoundary>();
+
+        // Voice infrastructure — the store is always available (it is just SQL); the gateway defaults
+        // to a disabled stub that throws if unexpectedly invoked (VoiceAdmissionService fast-exits
+        // before reaching the gateway when voice is disabled). A later task replaces this with the
+        // real Azure adapter when voice is enabled.
+        services.AddScoped<IVoiceSessionStore, SqlVoiceSessionStore>();
+        services.AddSingleton<IVoiceLiveGateway, DisabledVoiceLiveGateway>();
+
         services.AddScoped<StockToolDispatcher>();
         services.AddScoped<ReferenceToolDispatcher>();
 
