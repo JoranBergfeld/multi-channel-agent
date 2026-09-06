@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using MultiChannelAgent.Application.Tests.Voice;
@@ -9,6 +10,7 @@ using MultiChannelAgent.Application.Voice;
 using MultiChannelAgent.Domain.Turns;
 using MultiChannelAgent.Domain.Voice;
 using MultiChannelAgent.Infrastructure.Persistence;
+using MultiChannelAgent.Infrastructure.Persistence.Entities;
 using MultiChannelAgent.IntegrationTests.Inventories;
 
 namespace MultiChannelAgent.IntegrationTests.Voice;
@@ -325,6 +327,50 @@ public sealed class VoiceTurnProvenanceTests : IAsyncLifetime
         Assert.False(capabilities.HasFlag(ChannelCapabilities.Voice));
     }
 
+    [Fact]
+    public async Task Turn_with_active_absolute_expired_voiceSessionId_is_accepted_as_Text()
+    {
+        var (jar, csrf) = await SignInAndBootstrapAsync();
+        var admitBody = await AdmitSuccessAsync(jar, csrf);
+        var voiceSessionId = admitBody.GetProperty("voiceSessionId").GetString()!;
+
+        // Backdate ExpiresAt and IdleExpiresAt to one minute ago so the session is Active but past
+        // its absolute deadline. The endpoint's one captured now will be even further in the future,
+        // making IsExpired(now) return true deterministically — no real delay needed.
+        await BackdateAbsoluteExpiryAsync(Guid.Parse(voiceSessionId));
+
+        var turnResponse = await SubmitTurnWithVoiceAsync(jar, csrf, voiceSessionId);
+        Assert.Equal(HttpStatusCode.Accepted, turnResponse.StatusCode);
+        var turnBody = await turnResponse.Content.ReadFromJsonAsync<JsonElement>();
+        var turnId = turnBody.GetProperty("turnId").GetGuid();
+
+        var (modality, capabilities) = await ReadPersistedTurnAsync(turnId);
+        Assert.Equal(InputModality.Text, modality);
+        Assert.False(capabilities.HasFlag(ChannelCapabilities.Voice));
+    }
+
+    [Fact]
+    public async Task Turn_with_active_idle_expired_voiceSessionId_is_accepted_as_Text()
+    {
+        var (jar, csrf) = await SignInAndBootstrapAsync();
+        var admitBody = await AdmitSuccessAsync(jar, csrf);
+        var voiceSessionId = admitBody.GetProperty("voiceSessionId").GetString()!;
+
+        // Backdate only IdleExpiresAt to one minute ago, keeping ExpiresAt in the future. The session
+        // is Active and within its absolute deadline but past its idle window. The endpoint's one
+        // captured now drives IsIdle(now) — true deterministically, no real delay needed.
+        await BackdateIdleExpiryAsync(Guid.Parse(voiceSessionId));
+
+        var turnResponse = await SubmitTurnWithVoiceAsync(jar, csrf, voiceSessionId);
+        Assert.Equal(HttpStatusCode.Accepted, turnResponse.StatusCode);
+        var turnBody = await turnResponse.Content.ReadFromJsonAsync<JsonElement>();
+        var turnId = turnBody.GetProperty("turnId").GetGuid();
+
+        var (modality, capabilities) = await ReadPersistedTurnAsync(turnId);
+        Assert.Equal(InputModality.Text, modality);
+        Assert.False(capabilities.HasFlag(ChannelCapabilities.Voice));
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────────────
 
     private async Task<(CookieJar Jar, string CsrfToken)> SignInAndBootstrapAsync()
@@ -395,5 +441,40 @@ public sealed class VoiceTurnProvenanceTests : IAsyncLifetime
         var entity = await db.InboxEntries.FindAsync(turnId);
         Assert.NotNull(entity);
         return (entity!.InputModality, entity.Capabilities);
+    }
+
+    /// <summary>
+    /// Backdates <see cref="VoiceSessionEntity.ExpiresAtTicks"/>,
+    /// <see cref="VoiceSessionEntity.WarningAtTicks"/>, and
+    /// <see cref="VoiceSessionEntity.IdleExpiresAtTicks"/> to one minute ago, putting the
+    /// session past its absolute deadline with no real delay.
+    /// </summary>
+    private async Task BackdateAbsoluteExpiryAsync(Guid voiceSessionId)
+    {
+        var pastTicks = DateTimeOffset.UtcNow.AddMinutes(-1).UtcTicks;
+        using var scope = _factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<MultiChannelAgentDbContext>();
+        await db.VoiceSessions
+            .Where(e => e.Id == voiceSessionId)
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(e => e.ExpiresAtTicks, pastTicks)
+                .SetProperty(e => e.WarningAtTicks, pastTicks - 1)
+                .SetProperty(e => e.IdleExpiresAtTicks, pastTicks));
+    }
+
+    /// <summary>
+    /// Backdates only <see cref="VoiceSessionEntity.IdleExpiresAtTicks"/> to one minute ago,
+    /// keeping <see cref="VoiceSessionEntity.ExpiresAtTicks"/> in the future so the session is
+    /// exclusively idle-expired (not absolute-expired), with no real delay.
+    /// </summary>
+    private async Task BackdateIdleExpiryAsync(Guid voiceSessionId)
+    {
+        var pastTicks = DateTimeOffset.UtcNow.AddMinutes(-1).UtcTicks;
+        using var scope = _factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<MultiChannelAgentDbContext>();
+        await db.VoiceSessions
+            .Where(e => e.Id == voiceSessionId)
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(e => e.IdleExpiresAtTicks, pastTicks));
     }
 }
