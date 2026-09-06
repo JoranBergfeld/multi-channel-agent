@@ -309,38 +309,65 @@ public sealed class VoiceAdmissionSqlScenarioTests : SqlIntegrationTestBase
         }
 
         // Two concurrent updates: one activates (Negotiating→Active), one ends (expects Negotiating→Ended).
-        // An asynchronous two-party readiness barrier ensures both tasks load independent Negotiating
-        // snapshots and apply their domain transition before either calls UpdateAsync.
-        var readyCount = 0;
-        var bothReady = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        // Each worker signals its own readiness TCS after setup, or faults it on exception so the
+        // other worker is never abandoned behind the writeGate. The main thread releases writeGate in
+        // a finally block, guaranteeing both workers proceed (or propagate a fault) regardless of
+        // which setup path throws.
         var writeGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var activatingReady = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var endingReady = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
         var activating = Task.Run(async () =>
         {
             using var db = CreateSqlContext(connectionString);
             var store = new SqlVoiceSessionStore(db);
-            var toActivate = await store.FindByIdAsync(session.Id, CancellationToken.None);
-            Assert.NotNull(toActivate);
-            toActivate.Activate("ctrl-1", Epoch + TimeSpan.FromSeconds(1));
-            if (Interlocked.Increment(ref readyCount) == 2) bothReady.SetResult();
+            VoiceSession? toActivate = null;
+            try
+            {
+                toActivate = await store.FindByIdAsync(session.Id, CancellationToken.None);
+                Assert.NotNull(toActivate);
+                toActivate.Activate("ctrl-1", Epoch + TimeSpan.FromSeconds(1));
+                activatingReady.SetResult();
+            }
+            catch (Exception ex)
+            {
+                activatingReady.SetException(ex);
+                throw;
+            }
             await writeGate.Task;
-            return await store.UpdateAsync(toActivate, VoiceSessionStatus.Negotiating, CancellationToken.None);
+            return await store.UpdateAsync(toActivate!, VoiceSessionStatus.Negotiating, CancellationToken.None);
         });
 
         var ending = Task.Run(async () =>
         {
             using var db = CreateSqlContext(connectionString);
             var store = new SqlVoiceSessionStore(db);
-            var toEnd = await store.FindByIdAsync(session.Id, CancellationToken.None);
-            Assert.NotNull(toEnd);
-            toEnd.End(Epoch + TimeSpan.FromSeconds(1));
-            if (Interlocked.Increment(ref readyCount) == 2) bothReady.SetResult();
+            VoiceSession? toEnd = null;
+            try
+            {
+                toEnd = await store.FindByIdAsync(session.Id, CancellationToken.None);
+                Assert.NotNull(toEnd);
+                toEnd.End(Epoch + TimeSpan.FromSeconds(1));
+                endingReady.SetResult();
+            }
+            catch (Exception ex)
+            {
+                endingReady.SetException(ex);
+                throw;
+            }
             await writeGate.Task;
-            return await store.UpdateAsync(toEnd, VoiceSessionStatus.Negotiating, CancellationToken.None);
+            return await store.UpdateAsync(toEnd!, VoiceSessionStatus.Negotiating, CancellationToken.None);
         });
 
-        await bothReady.Task;
-        writeGate.SetResult();
+        try
+        {
+            await Task.WhenAll(activatingReady.Task, endingReady.Task);
+        }
+        finally
+        {
+            writeGate.SetResult();
+        }
+
         var results = await Task.WhenAll(activating, ending);
 
         // Exactly one CAS succeeds; the other fails (false).
