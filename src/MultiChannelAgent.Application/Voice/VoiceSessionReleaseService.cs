@@ -16,6 +16,7 @@ public sealed class VoiceSessionReleaseService(
     TimeSpan idleTimeout)
 {
     private static readonly TimeSpan CleanupTimeout = TimeSpan.FromSeconds(10);
+    private const int MaxCasRetries = 3;
 
     private static readonly HeartbeatResult NotFound =
         new(Renewed: false, LifecycleState: "not_found", RemainingSeconds: null, ForcedCloseReason: null);
@@ -60,7 +61,8 @@ public sealed class VoiceSessionReleaseService(
     /// Releases the session if it belongs to <paramref name="participantId"/>. Idempotent for
     /// already-ended or non-existent sessions. Terminates the gateway handle when
     /// <see cref="VoiceSession.ControlSessionId"/> is present. Uses a bounded non-cancelled
-    /// token for mandatory cleanup work.
+    /// token for mandatory cleanup work. On CAS conflict, re-reads and retries so that a
+    /// concurrent Negotiating→Active transition still terminates the actual provider session.
     /// </summary>
     public async Task ReleaseAsync(
         VoiceSessionId sessionId, ParticipantId participantId, CancellationToken ct)
@@ -72,35 +74,73 @@ public sealed class VoiceSessionReleaseService(
         if (session.Status == VoiceSessionStatus.Ended)
             return;
 
-        var previousStatus = session.Status;
-        var controlSessionId = session.ControlSessionId;
-        session.End(timeProvider.GetUtcNow());
-
         using var cleanupCts = new CancellationTokenSource(CleanupTimeout);
         var failures = new List<Exception>();
+        var terminatedControlIds = new HashSet<string>();
 
-        if (controlSessionId is not null)
+        for (int attempt = 0; attempt < MaxCasRetries; attempt++)
         {
+            var expectedStatus = session.Status;
+            var controlSessionId = session.ControlSessionId;
+            session.End(timeProvider.GetUtcNow());
+
+            if (controlSessionId is not null && terminatedControlIds.Add(controlSessionId))
+            {
+                try
+                {
+                    await gateway.TerminateAsync(controlSessionId, cleanupCts.Token);
+                }
+                catch (Exception ex)
+                {
+                    failures.Add(ex);
+                }
+            }
+
+            bool persisted;
             try
             {
-                await gateway.TerminateAsync(controlSessionId, cleanupCts.Token);
+                persisted = await store.UpdateAsync(session, expectedStatus, cleanupCts.Token);
             }
             catch (Exception ex)
             {
                 failures.Add(ex);
+                break;
             }
+
+            if (persisted)
+            {
+                if (failures.Count > 0)
+                    throw new AggregateException(failures);
+                return;
+            }
+
+            // CAS conflict — re-read to observe latest state
+            VoiceSession? reread;
+            try
+            {
+                reread = await store.FindByIdAsync(sessionId, cleanupCts.Token);
+            }
+            catch (Exception ex)
+            {
+                failures.Add(ex);
+                break;
+            }
+
+            if (reread is null || reread.ParticipantId != participantId)
+                return;
+
+            if (reread.Status == VoiceSessionStatus.Ended)
+            {
+                if (failures.Count > 0)
+                    throw new AggregateException(failures);
+                return;
+            }
+
+            session = reread;
         }
 
-        try
-        {
-            await store.UpdateAsync(session, previousStatus, cleanupCts.Token);
-        }
-        catch (Exception ex)
-        {
-            failures.Add(ex);
-        }
-
-        if (failures.Count > 0)
-            throw new AggregateException(failures);
+        failures.Add(new InvalidOperationException(
+            $"Voice session release could not be persisted after {MaxCasRetries} attempts."));
+        throw new AggregateException(failures);
     }
 }

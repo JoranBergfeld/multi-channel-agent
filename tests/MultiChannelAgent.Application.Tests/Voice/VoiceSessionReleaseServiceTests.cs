@@ -40,7 +40,9 @@ public sealed class VoiceSessionReleaseServiceTests
         var d = deadlines ?? DefaultDeadlines;
         var s = VoiceSession.Reserve(Alice, Conv1, OwnerInstance, _time.GetUtcNow(), d);
         await _store.TryAdmitAsync(s, 5, CancellationToken.None);
-        s.Activate("ctrl-1", _time.GetUtcNow());
+        var negotiation = await _gateway.NegotiateAsync(
+            new VoiceLiveNegotiationRequest("offer"), CancellationToken.None);
+        s.Activate(negotiation.ControlSessionId, _time.GetUtcNow());
         await _store.UpdateAsync(s, VoiceSessionStatus.Negotiating, CancellationToken.None);
         return s;
     }
@@ -183,6 +185,11 @@ public sealed class VoiceSessionReleaseServiceTests
     public async Task Release_ends_session_and_terminates_gateway()
     {
         var session = await AdmitAndActivateAlice();
+        var ctrlId = session.ControlSessionId!;
+
+        // Precondition: gateway genuinely owns the session
+        Assert.Equal(1, _gateway.ActiveSessionCount);
+        Assert.True(_gateway.OwnsSession(ctrlId));
 
         await CreateService().ReleaseAsync(session.Id, Alice, CancellationToken.None);
 
@@ -190,8 +197,11 @@ public sealed class VoiceSessionReleaseServiceTests
         Assert.NotNull(found);
         Assert.Equal(VoiceSessionStatus.Ended, found.Status);
         Assert.False(found.OccupiesSlot);
+
+        // Postcondition: gateway session terminated
         Assert.Equal(0, _gateway.ActiveSessionCount);
-        Assert.False(_gateway.OwnsSession("ctrl-1"));
+        Assert.False(_gateway.OwnsSession(ctrlId));
+        Assert.Equal(1, _gateway.TerminationAttemptCount);
     }
 
     // ── Release: wrong participant leaves session untouched ───────────────────
@@ -275,6 +285,72 @@ public sealed class VoiceSessionReleaseServiceTests
         Assert.Contains(ex.InnerExceptions, e => e.Message == "Store update failed");
     }
 
+    // ── Release: CAS false from concurrent Negotiating→Active terminates actual provider ──
+
+    [Fact]
+    public async Task Release_concurrent_activation_terminates_actual_provider_session()
+    {
+        // Session starts in Negotiating (no control ID)
+        var s = VoiceSession.Reserve(Alice, Conv1, OwnerInstance, _time.GetUtcNow(), DefaultDeadlines);
+        await _store.TryAdmitAsync(s, 5, CancellationToken.None);
+
+        // Gateway has an active provider session (simulating what concurrent activation does)
+        var negotiation = await _gateway.NegotiateAsync(
+            new VoiceLiveNegotiationRequest("offer"), CancellationToken.None);
+        var ctrlId = negotiation.ControlSessionId;
+
+        // Precondition: gateway owns the session
+        Assert.Equal(1, _gateway.ActiveSessionCount);
+        Assert.True(_gateway.OwnsSession(ctrlId));
+
+        // Racing store: first UpdateAsync simulates concurrent activation then returns false
+        var racingStore = new ConcurrentActivationRaceStore(_store, ctrlId, _time.GetUtcNow());
+        var svc = new VoiceSessionReleaseService(racingStore, _gateway, _time, DefaultIdleTimeout);
+
+        await svc.ReleaseAsync(s.Id, Alice, CancellationToken.None);
+
+        // Postcondition: actual provider session terminated
+        Assert.Equal(0, _gateway.ActiveSessionCount);
+        Assert.False(_gateway.OwnsSession(ctrlId));
+
+        // Postcondition: session durably ended
+        var found = await _store.FindByIdAsync(s.Id, CancellationToken.None);
+        Assert.NotNull(found);
+        Assert.Equal(VoiceSessionStatus.Ended, found.Status);
+        Assert.False(found.OccupiesSlot);
+    }
+
+    // ── Release: CAS false but already Ended by another path is idempotent ──
+
+    [Fact]
+    public async Task Release_cas_false_already_ended_is_idempotent()
+    {
+        var session = await AdmitAndActivateAlice();
+        var ctrlId = session.ControlSessionId!;
+
+        // Store wrapper: first UpdateAsync returns false, re-read shows Ended
+        var alreadyEndedStore = new AlreadyEndedOnCasFailStore(_store, _time.GetUtcNow());
+        var svc = new VoiceSessionReleaseService(alreadyEndedStore, _gateway, _time, DefaultIdleTimeout);
+
+        // Should not throw — already ended is treated as success
+        await svc.ReleaseAsync(session.Id, Alice, CancellationToken.None);
+    }
+
+    // ── Release: unresolved CAS failure does not return success ──────────────
+
+    [Fact]
+    public async Task Release_unresolved_cas_failure_throws()
+    {
+        var session = await AdmitAndActivateAlice();
+
+        // Store that always returns false for UpdateAsync
+        var alwaysRejectingStore = new AlwaysCasRejectingStore(_store);
+        var svc = new VoiceSessionReleaseService(alwaysRejectingStore, _gateway, _time, DefaultIdleTimeout);
+
+        await Assert.ThrowsAsync<AggregateException>(
+            () => svc.ReleaseAsync(session.Id, Alice, CancellationToken.None));
+    }
+
     // ── Test doubles ─────────────────────────────────────────────────────────
 
     private sealed class UpdateRejectingStore(IVoiceSessionStore inner) : IVoiceSessionStore
@@ -319,6 +395,100 @@ public sealed class VoiceSessionReleaseServiceTests
             inner.FindByIdAsync(id, ct);
         public Task<bool> UpdateAsync(VoiceSession s, VoiceSessionStatus e, CancellationToken ct) =>
             throw new InvalidOperationException("Store update failed");
+        public Task<IReadOnlyList<VoiceSession>> FindExpiredOrIdleAsync(DateTimeOffset now, CancellationToken ct) =>
+            inner.FindExpiredOrIdleAsync(now, ct);
+        public Task<IReadOnlyList<VoiceSession>> FindStaleOwnerSessionsAsync(
+            string cur, DateTimeOffset cutoff, CancellationToken ct) =>
+            inner.FindStaleOwnerSessionsAsync(cur, cutoff, ct);
+    }
+
+    /// <summary>
+    /// Simulates a concurrent Negotiating→Active activation between the first read and
+    /// the first UpdateAsync. The first UpdateAsync activates the session in the inner store
+    /// (setting ControlSessionId), then delegates — which returns false because the stored
+    /// status is now Active, not the expected Negotiating.
+    /// </summary>
+    private sealed class ConcurrentActivationRaceStore(
+        InMemoryVoiceSessionStore inner,
+        string controlSessionId,
+        DateTimeOffset activationTime) : IVoiceSessionStore
+    {
+        private int _updateAttempts;
+
+        public Task<VoiceAdmissionResult> TryAdmitAsync(VoiceSession s, int cap, CancellationToken ct) =>
+            inner.TryAdmitAsync(s, cap, ct);
+        public Task<VoiceSession?> FindByIdAsync(VoiceSessionId id, CancellationToken ct) =>
+            inner.FindByIdAsync(id, ct);
+        public async Task<bool> UpdateAsync(VoiceSession session, VoiceSessionStatus expectedStatus, CancellationToken ct)
+        {
+            if (Interlocked.Increment(ref _updateAttempts) == 1)
+            {
+                // Simulate concurrent activation: read, activate, persist before our update
+                var current = await inner.FindByIdAsync(session.Id, ct);
+                if (current is not null && current.Status == VoiceSessionStatus.Negotiating)
+                {
+                    current.Activate(controlSessionId, activationTime);
+                    await inner.UpdateAsync(current, VoiceSessionStatus.Negotiating, ct);
+                }
+            }
+            return await inner.UpdateAsync(session, expectedStatus, ct);
+        }
+        public Task<IReadOnlyList<VoiceSession>> FindExpiredOrIdleAsync(DateTimeOffset now, CancellationToken ct) =>
+            inner.FindExpiredOrIdleAsync(now, ct);
+        public Task<IReadOnlyList<VoiceSession>> FindStaleOwnerSessionsAsync(
+            string cur, DateTimeOffset cutoff, CancellationToken ct) =>
+            inner.FindStaleOwnerSessionsAsync(cur, cutoff, ct);
+    }
+
+    /// <summary>
+    /// First UpdateAsync returns false, then ends the session in the inner store so
+    /// re-read returns Ended — simulating another path having already cleaned up.
+    /// </summary>
+    private sealed class AlreadyEndedOnCasFailStore(
+        InMemoryVoiceSessionStore inner,
+        DateTimeOffset endTime) : IVoiceSessionStore
+    {
+        private int _updateAttempts;
+
+        public Task<VoiceAdmissionResult> TryAdmitAsync(VoiceSession s, int cap, CancellationToken ct) =>
+            inner.TryAdmitAsync(s, cap, ct);
+        public Task<VoiceSession?> FindByIdAsync(VoiceSessionId id, CancellationToken ct) =>
+            inner.FindByIdAsync(id, ct);
+        public async Task<bool> UpdateAsync(VoiceSession session, VoiceSessionStatus expectedStatus, CancellationToken ct)
+        {
+            if (Interlocked.Increment(ref _updateAttempts) == 1)
+            {
+                // Simulate another path ending the session
+                var current = await inner.FindByIdAsync(session.Id, ct);
+                if (current is not null && current.Status != VoiceSessionStatus.Ended)
+                {
+                    var prevStatus = current.Status;
+                    current.End(endTime);
+                    await inner.UpdateAsync(current, prevStatus, ct);
+                }
+                return false;
+            }
+            return await inner.UpdateAsync(session, expectedStatus, ct);
+        }
+        public Task<IReadOnlyList<VoiceSession>> FindExpiredOrIdleAsync(DateTimeOffset now, CancellationToken ct) =>
+            inner.FindExpiredOrIdleAsync(now, ct);
+        public Task<IReadOnlyList<VoiceSession>> FindStaleOwnerSessionsAsync(
+            string cur, DateTimeOffset cutoff, CancellationToken ct) =>
+            inner.FindStaleOwnerSessionsAsync(cur, cutoff, ct);
+    }
+
+    /// <summary>
+    /// Always returns false from UpdateAsync but delegates FindByIdAsync normally,
+    /// simulating a permanently unresolvable CAS conflict.
+    /// </summary>
+    private sealed class AlwaysCasRejectingStore(InMemoryVoiceSessionStore inner) : IVoiceSessionStore
+    {
+        public Task<VoiceAdmissionResult> TryAdmitAsync(VoiceSession s, int cap, CancellationToken ct) =>
+            inner.TryAdmitAsync(s, cap, ct);
+        public Task<VoiceSession?> FindByIdAsync(VoiceSessionId id, CancellationToken ct) =>
+            inner.FindByIdAsync(id, ct);
+        public Task<bool> UpdateAsync(VoiceSession s, VoiceSessionStatus e, CancellationToken ct) =>
+            Task.FromResult(false);
         public Task<IReadOnlyList<VoiceSession>> FindExpiredOrIdleAsync(DateTimeOffset now, CancellationToken ct) =>
             inner.FindExpiredOrIdleAsync(now, ct);
         public Task<IReadOnlyList<VoiceSession>> FindStaleOwnerSessionsAsync(

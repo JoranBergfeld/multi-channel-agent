@@ -6,7 +6,9 @@ namespace MultiChannelAgent.Application.Voice;
 /// Performs a single cleanup pass: finds expired/idle non-ended sessions and force-closes each,
 /// then reclaims sessions owned by stale instances whose last heartbeat is older than the lease
 /// threshold. Deduplicates overlapping candidates. Uses a bounded non-cancelled token for
-/// mandatory cleanup work and surfaces failures rather than swallowing them.
+/// mandatory cleanup work and surfaces failures rather than swallowing them. On CAS conflict,
+/// re-reads and retries so that a concurrent Negotiating→Active transition still terminates
+/// the actual provider session.
 /// </summary>
 public sealed class VoiceSessionCleanupCoordinator(
     IVoiceSessionStore store,
@@ -16,6 +18,7 @@ public sealed class VoiceSessionCleanupCoordinator(
     TimeSpan leaseTimeout)
 {
     private static readonly TimeSpan CleanupTimeout = TimeSpan.FromSeconds(10);
+    private const int MaxCasRetries = 3;
 
     /// <summary>
     /// Finds expired/idle and stale-owner sessions, deduplicates, and force-closes each.
@@ -58,29 +61,60 @@ public sealed class VoiceSessionCleanupCoordinator(
         if (session.Status == VoiceSessionStatus.Ended)
             return;
 
-        var previousStatus = session.Status;
-        var controlSessionId = session.ControlSessionId;
-        session.End(now);
+        var terminatedControlIds = new HashSet<string>();
+        var current = session;
 
-        if (controlSessionId is not null)
+        for (int attempt = 0; attempt < MaxCasRetries; attempt++)
         {
+            var expectedStatus = current.Status;
+            var controlSessionId = current.ControlSessionId;
+            current.End(now);
+
+            if (controlSessionId is not null && terminatedControlIds.Add(controlSessionId))
+            {
+                try
+                {
+                    await gateway.TerminateAsync(controlSessionId, ct);
+                }
+                catch (Exception ex)
+                {
+                    failures.Add(ex);
+                }
+            }
+
+            bool persisted;
             try
             {
-                await gateway.TerminateAsync(controlSessionId, ct);
+                persisted = await store.UpdateAsync(current, expectedStatus, ct);
             }
             catch (Exception ex)
             {
                 failures.Add(ex);
+                return;
             }
+
+            if (persisted)
+                return;
+
+            // CAS conflict — re-read to observe latest state
+            VoiceSession? reread;
+            try
+            {
+                reread = await store.FindByIdAsync(session.Id, ct);
+            }
+            catch (Exception ex)
+            {
+                failures.Add(ex);
+                return;
+            }
+
+            if (reread is null || reread.Status == VoiceSessionStatus.Ended)
+                return;
+
+            current = reread;
         }
 
-        try
-        {
-            await store.UpdateAsync(session, previousStatus, ct);
-        }
-        catch (Exception ex)
-        {
-            failures.Add(ex);
-        }
+        failures.Add(new InvalidOperationException(
+            $"Voice session cleanup could not be persisted after {MaxCasRetries} attempts for session {session.Id.Value}."));
     }
 }
