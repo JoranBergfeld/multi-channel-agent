@@ -359,7 +359,7 @@ Participant — both cases are indistinguishable. The browser client maps `404` 
 #### `POST /api/voice/release`
 
 Terminates a Voice Session owned by the authenticated Participant. Idempotent: an already-ended
-or missing session returns `200 OK`.
+session owned by the authenticated Participant returns `200 OK`.
 
 Request:
 ```json
@@ -393,7 +393,7 @@ run. They are not monetary budget, spend, or quota controls.
 | `Voice:VoiceName` | `en-US-Ava:DragonHDLatestNeural` | Voice synthesis voice name. |
 | `Voice:GlobalActiveCap` | `5` | Maximum concurrent active Voice Sessions across all Participants (capacity limit). |
 | `Voice:MaxSessionDuration` | `00:30:00` | Maximum session lifetime after admission. Immutable once computed. |
-| `Voice:SessionWarningThreshold` | `00:25:00` | Warning issued at `admission + threshold`; must be less than `MaxSessionDuration`. |
+| `Voice:SessionWarningThreshold` | `00:25:00` | Warning issued at `admission + threshold`; must be greater than zero and strictly less than `MaxSessionDuration`. |
 | `Voice:IdleTimeout` | `00:01:00` | Inactivity duration before a session is closed automatically. |
 | `Voice:HeartbeatInterval` | `00:00:30` | Browser heartbeat interval; must be less than `IdleTimeout`. |
 
