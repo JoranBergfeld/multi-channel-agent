@@ -12,11 +12,12 @@ namespace MultiChannelAgent.Infrastructure.Voice;
 /// <summary>
 /// SQL Server-backed durable store for <see cref="VoiceSession"/> lifecycle persistence.
 ///
-/// <see cref="TryAdmitAsync"/> enforces the per-participant uniqueness constraint via the filtered
-/// unique index on (ParticipantId WHERE OccupiesSlot = 1), and the global concurrent-session cap via
-/// a SERIALIZABLE COUNT with <c>UPDLOCK, HOLDLOCK</c> on the OccupiesSlot index. The serializable
-/// isolation prevents phantom-insert races where two replicas both see N−1 sessions and both insert
-/// the Nth.
+/// <see cref="TryAdmitAsync"/> acquires the global cap <c>UPDLOCK, HOLDLOCK</c> on the OccupiesSlot
+/// index <em>before</em> the per-participant uniqueness check, ensuring every concurrent admission
+/// serializes on the same first lock and never forms an ABBA cycle. The per-participant uniqueness
+/// constraint is backed by the filtered unique index on (ParticipantId WHERE OccupiesSlot = 1).
+/// Serializable isolation prevents phantom-insert races where two replicas both see N−1 sessions and
+/// both insert the Nth.
 /// </summary>
 public sealed class SqlVoiceSessionStore(MultiChannelAgentDbContext db) : IVoiceSessionStore
 {
@@ -38,17 +39,19 @@ public sealed class SqlVoiceSessionStore(MultiChannelAgentDbContext db) : IVoice
 
         try
         {
-            // Check per-participant uniqueness FIRST (gives AlreadyActive priority over GlobalCapReached).
+            // Acquire the global cap UPDLOCK/HOLDLOCK FIRST so every concurrent admission serializes
+            // on the same initial lock and never forms an ABBA cycle with the participant-range S lock.
+            var occupyingCount = await CountOccupiedSlotsAsync(cancellationToken);
+
             var hasExisting = await db.VoiceSessions
                 .AnyAsync(e => e.ParticipantId == session.ParticipantId.Value && e.OccupiesSlot, cancellationToken);
 
+            // Evaluate AlreadyActive before GlobalCapReached (denial priority).
             if (hasExisting)
             {
                 await db.AbandonAsync(transaction);
                 return VoiceAdmissionResult.Denied(VoiceAdmissionDenialReason.AlreadyActive);
             }
-
-            var occupyingCount = await CountOccupiedSlotsAsync(cancellationToken);
 
             if (occupyingCount >= globalCap)
             {

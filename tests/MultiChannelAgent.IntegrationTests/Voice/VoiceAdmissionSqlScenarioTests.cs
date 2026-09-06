@@ -309,7 +309,11 @@ public sealed class VoiceAdmissionSqlScenarioTests : SqlIntegrationTestBase
         }
 
         // Two concurrent updates: one activates (Negotiating→Active), one ends (expects Negotiating→Ended).
-        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        // An asynchronous two-party readiness barrier ensures both tasks load independent Negotiating
+        // snapshots and apply their domain transition before either calls UpdateAsync.
+        var readyCount = 0;
+        var bothReady = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var writeGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
         var activating = Task.Run(async () =>
         {
@@ -318,7 +322,8 @@ public sealed class VoiceAdmissionSqlScenarioTests : SqlIntegrationTestBase
             var toActivate = await store.FindByIdAsync(session.Id, CancellationToken.None);
             Assert.NotNull(toActivate);
             toActivate.Activate("ctrl-1", Epoch + TimeSpan.FromSeconds(1));
-            await gate.Task;
+            if (Interlocked.Increment(ref readyCount) == 2) bothReady.SetResult();
+            await writeGate.Task;
             return await store.UpdateAsync(toActivate, VoiceSessionStatus.Negotiating, CancellationToken.None);
         });
 
@@ -329,11 +334,13 @@ public sealed class VoiceAdmissionSqlScenarioTests : SqlIntegrationTestBase
             var toEnd = await store.FindByIdAsync(session.Id, CancellationToken.None);
             Assert.NotNull(toEnd);
             toEnd.End(Epoch + TimeSpan.FromSeconds(1));
-            await gate.Task;
+            if (Interlocked.Increment(ref readyCount) == 2) bothReady.SetResult();
+            await writeGate.Task;
             return await store.UpdateAsync(toEnd, VoiceSessionStatus.Negotiating, CancellationToken.None);
         });
 
-        gate.SetResult();
+        await bothReady.Task;
+        writeGate.SetResult();
         var results = await Task.WhenAll(activating, ending);
 
         // Exactly one CAS succeeds; the other fails (false).
