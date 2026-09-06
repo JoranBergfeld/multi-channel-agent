@@ -188,6 +188,12 @@ public sealed record InboundTurn
             throw new ArgumentException("A channel must at least declare text capability.", nameof(draft.Capabilities));
         }
 
+        if (!Enum.IsDefined(draft.InputModality))
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(draft.InputModality), draft.InputModality, "InputModality must be a defined enum value.");
+        }
+
         return new InboundTurn
         {
             TurnId = TurnId.NewId(),

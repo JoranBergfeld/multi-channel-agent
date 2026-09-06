@@ -244,7 +244,10 @@ public sealed class SqlInboxStore(MultiChannelAgentDbContext db) : IInboxStore
             Locale = entity.Locale,
             TraceId = entity.TraceId,
             WasInterrupted = entity.WasInterrupted,
-            InputModality = entity.InputModality,
+            InputModality = Enum.IsDefined(entity.InputModality)
+                ? entity.InputModality
+                : throw new InvalidOperationException(
+                    $"Turn {entity.TurnId} has an unrecognised InputModality '{entity.InputModality}'."),
             ReceivedAt = entity.ReceivedAt,
         }).ToList();
     }
