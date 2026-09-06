@@ -122,8 +122,10 @@ app.UseExceptionHandler(errorApp =>
                "An unexpected error occurred.");
 
         context.Response.StatusCode = statusCode;
-        context.Response.ContentType = "application/problem+json";
-        await context.Response.WriteAsJsonAsync(new { type, title, status = statusCode });
+        await context.Response.WriteAsJsonAsync(
+            new { type, title, status = statusCode },
+            options: null,
+            contentType: "application/problem+json");
     });
 });
 
