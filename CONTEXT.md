@@ -128,6 +128,18 @@ _Avoid_: Pending request, unfinished message
 The terminal, recorded result of a Turn, including its status and participant-facing response. Repeating the same Turn returns the same Outcome rather than performing the work again.
 _Avoid_: Response, result payload
 
+**Voice Session**:
+One Participant's bounded live speech session within a Channel Conversation; at most one per Participant and subject to a shared capacity ceiling. It owns the speech transport lifecycle and is not a source of business-response authority.
+_Avoid_: Call, audio session
+
+**Finalized Utterance**:
+Complete, provider-confirmed spoken content accepted as one Turn with a stable identity; partial speech captured before provider confirmation is ephemeral and is never submitted.
+_Avoid_: Partial transcript, speech fragment
+
+**Input Modality**:
+Whether a Participant's content was typed or spoken; spoken input cannot provide confirmation evidence and confirmation must use visible typed text.
+_Avoid_: Channel type, source type
+
 **Conversation Generation**:
 One bounded span of conversational history within a stable Channel Conversation. Starting a New Conversation advances the generation without changing the Participant's Inventory access or Active Inventory.
 _Avoid_: Foundry conversation, chat instance
